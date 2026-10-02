@@ -175,3 +175,147 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .login-copy h1 { font-size: 25px; }
   .demo-role-grid { grid-template-columns: 1fr; }
 }
+
+.create-meeting-page {
+  max-width: 760px;
+  margin: 40px auto;
+  padding: 36px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+}
+
+.create-meeting-page .state-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: #eaf2ff;
+  color: #2563eb;
+}
+
+.create-meeting-page .eyebrow {
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+.create-meeting-page h2 {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.create-meeting-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.create-meeting-form > div {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.create-meeting-form label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.create-meeting-form input,
+.create-meeting-form textarea,
+.create-meeting-form select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 13px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 15px;
+  font-family: inherit;
+  background: #ffffff;
+}
+
+.create-meeting-form textarea {
+  resize: vertical;
+  min-height: 100px;
+}
+
+.create-meeting-form input:focus,
+.create-meeting-form textarea:focus,
+.create-meeting-form select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+.create-meeting-form button {
+  width: fit-content;
+  padding: 10px 18px;
+  border: none;
+  border-radius: 8px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.create-meeting-form button:hover {
+  background: #1d4ed8;
+}
+
+.create-meeting-form > button[type="submit"] {
+  width: 100%;
+  margin-top: 5px;
+  padding: 13px;
+  font-size: 15px;
+}
+
+.create-meeting-form > div:has(input[type="email"]) > div {
+  display: flex;
+  gap: 10px;
+}
+
+.create-meeting-form > div:has(input[type="email"]) > div input {
+  flex: 1;
+}
+
+.create-meeting-form ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.create-meeting-form li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  margin-top: 8px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.create-meeting-form li button {
+  background: transparent;
+  color: #dc2626;
+  padding: 4px 8px;
+}
+
+.create-meeting-form li button:hover {
+  background: #fee2e2;
+}
+
+.create-meeting-form [role="alert"] {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 14px;
+}
