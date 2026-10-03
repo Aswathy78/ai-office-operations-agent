@@ -528,3 +528,418 @@ FR-3
 - [x] Backend tests
 - [x] Frontend build verification
 - [x] GitHub branch pushed
+
+
+
+FR-4 — Meeting Recording & Consent
+
+Status: Completed
+
+The Meeting Recording & Consent system has been implemented as the next feature after the Meeting Room System.
+
+The implementation includes:
+
+* Participant recording consent
+* Organizer-controlled recording
+* Audio/video recording
+* Browser MediaRecorder integration
+* Recording upload
+* Encrypted recording storage
+* Recording lifecycle management
+* Recording retention
+* Backend authorization
+* Automated testing
+
+🎥 Recording System
+
+The system allows the meeting organizer to start and stop recording during an active meeting.
+
+The recording captures the existing meeting audio and video stream using the browser MediaRecorder API.
+
+The implementation reuses the existing WebRTC media stream and does not request a second camera or microphone stream.
+
+👤 Organizer / Host
+
+The meeting organizer controls the recording.
+
+The organizer can:
+
+* Start recording
+* Stop recording
+* View recording status
+* Upload the completed recording
+
+Recording permissions are validated by the backend.
+
+📝 Recording Consent
+
+Recording requires explicit participant consent.
+
+All active participants must provide consent before the organizer can start recording.
+
+Consent information includes:
+
+* Meeting
+* Participant
+* Attendance context
+* Consent status
+* Consent timestamp
+
+Repeated identical consent operations are handled safely.
+
+▶️ Recording Start
+
+When the organizer starts recording:
+
+* Backend verifies the meeting
+* Organizer authorization is checked
+* Active participants are checked
+* Recording consent is verified
+* Backend recording is started
+* Browser MediaRecorder is started
+
+The browser recording starts only after the backend confirms the recording start.
+
+If browser recording fails, the backend recording is stopped to prevent an inconsistent state.
+
+🎙️ Audio and Video
+
+The recording supports combined audio and video.
+
+The implementation uses supported WebM MIME types.
+
+The browser checks MediaRecorder support before selecting the recording format.
+
+The existing meeting media tracks are not replaced or stopped.
+
+⏹️ Recording Stop
+
+When recording is stopped:
+
+* MediaRecorder stops
+* Final recording data is collected
+* Recording Blob is created
+* Backend recording is stopped
+* Recording is uploaded
+* Recording enters processing state
+
+If upload fails, the completed Blob is preserved in memory and recording is not automatically restarted.
+
+📤 Recording Upload
+
+Completed recordings are uploaded through an organizer-authorized backend endpoint.
+
+The backend validates:
+
+* Organizer authorization
+* Meeting association
+* Recording association
+* Recording state
+* File presence
+* File format
+
+Supported browser recordings use WebM.
+
+Uploads are first written to a temporary location and then moved to the final recording location.
+
+📁 Recording Storage
+
+Recordings are stored using the following structure:
+
+backend/storage/recordings/<meeting-id>/<recording-id>.<extension>
+
+The database stores the relative recording storage URI.
+
+Runtime recording files are excluded from Git.
+
+🔐 Recording Encryption
+
+Recording files are encrypted before being stored as the final recording artifact.
+
+The implementation uses:
+
+* AES-256-GCM
+* Random nonce
+* Authenticated encryption
+* 32-byte encryption key
+* AORC encrypted recording container
+
+The final stored recording is encrypted at rest.
+
+Temporary plaintext recording files are cleaned up after encryption.
+
+🔑 Environment Configuration
+
+Recording encryption requires:
+
+RECORDING_ENCRYPTION_KEY
+
+The key must decode to exactly 32 bytes.
+
+Local configuration is stored in:
+
+backend/.env
+
+A template is provided as:
+
+backend/.env.example
+
+The actual encryption key must never be committed to GitHub.
+
+🔄 Recording Lifecycle
+
+Recording states include:
+
+* pending
+* recording
+* processing
+* completed
+* failed
+* cancelled
+
+The backend validates recording state transitions.
+
+Repeated start and stop operations are handled safely.
+
+🗄️ Database
+
+The recording system introduces:
+
+MeetingRecording
+
+Stores:
+
+* Recording ID
+* Meeting ID
+* Status
+* Storage URI
+* Created time
+* Started time
+* Stopped time
+* Retention expiry
+
+MeetingRecordingConsent
+
+Stores:
+
+* Consent ID
+* Meeting ID
+* Participant
+* Attendance context
+* Consent status
+* Consent timestamp
+
+Recording and consent records are linked to the meeting.
+
+⏳ Recording Retention
+
+The default recording retention period is 90 days.
+
+The retention service removes only expired terminal recordings.
+
+Eligible states include:
+
+* completed
+* failed
+* cancelled
+
+Active and processing recordings are protected.
+
+The retention process validates the storage path before deleting files.
+
+Missing files are handled safely and cleanup is idempotent.
+
+A production scheduler has not yet been added; the retention service can be invoked by a future scheduled worker.
+
+🔒 Authorization
+
+Recording operations require organizer authorization.
+
+Organizer authorization is required for:
+
+* Starting recording
+* Stopping recording
+* Viewing protected recording information
+* Uploading recordings
+
+Organizer authorization does not bypass participant consent.
+
+🧪 Testing
+
+Backend recording tests cover:
+
+* Recording models
+* Consent
+* Recording API
+* Start/stop lifecycle
+* Upload
+* Encryption
+* Retention
+* Authorization
+* Invalid state transitions
+
+Frontend tests cover:
+
+* MediaRecorder
+* Audio/video recording
+* MIME type selection
+* Consent flow
+* Recording start
+* Recording stop
+* Upload flow
+* Upload failure handling
+
+Backend focused recording tests:
+
+31 passed
+
+Frontend recording tests:
+
+25 passed
+
+Production build:
+
+npm run build
+
+Build completed successfully.
+
+🌐 Browser Validation
+
+The recording system was also tested through the actual browser meeting flow.
+
+The validation confirmed:
+
+* Meeting join
+* Participant consent
+* Recording start
+* Audio/video capture
+* Recording stop
+* Upload
+* Database persistence
+* Encrypted file storage
+
+The stored recording file was verified as an encrypted AORC recording container.
+
+📦 Important Files
+
+Backend:
+
+backend/app/meeting/models.py
+
+backend/app/meeting/router.py
+
+backend/app/meeting/schemas.py
+
+backend/app/meeting/service.py
+
+backend/app/meeting/recording_encryption.py
+
+backend/app/meeting/recording_retention.py
+
+Frontend:
+
+src/api/meetings.ts
+
+src/hooks/meetingRecordingFlow.ts
+
+src/hooks/meetingRecordingSession.ts
+
+src/hooks/useMeetingRecording.ts
+
+src/pages/MeetingRoomPage.tsx
+
+src/types/meeting.ts
+
+Tests:
+
+backend/tests/test_meeting_recording_api.py
+
+backend/tests/test_meeting_recording_encryption.py
+
+backend/tests/test_meeting_recording_models.py
+
+backend/tests/test_meeting_recording_retention.py
+
+backend/tests/test_meeting_recording_upload.py
+
+tests/frontend/meetingRecordingFlow.test.mjs
+
+tests/frontend/meetingRecordingSession.test.mjs
+
+📦 FR-4 GitHub Handoff
+
+The completed FR-4 implementation contains:
+
+* Recording consent
+* Organizer recording controls
+* Audio/video recording
+* MediaRecorder integration
+* Recording upload
+* Encrypted storage
+* Recording lifecycle
+* Recording retention
+* Recording authorization
+* Backend tests
+* Frontend tests
+* Production build verification
+
+The next developer should build on the existing FR-3 and FR-4 implementation instead of recreating the meeting or recording system.
+
+🔄 Recommended Workflow for the Next Developer
+
+Before starting the next feature:
+
+* Get the latest repository
+* Pull the latest changes
+* Install dependencies
+* Activate the Python environment
+* Start the backend
+* Start the frontend
+* Verify the existing meeting system
+* Verify recording consent
+* Verify recording start and stop
+* Run backend tests
+* Run frontend tests
+* Build the frontend
+
+Only after the existing functionality works should the next feature be implemented.
+
+🛠️ Development Principles
+
+When implementing future features:
+
+* Do not unnecessarily rewrite existing functionality.
+* Preserve existing APIs unless required.
+* Reuse the existing WebRTC stream where possible.
+* Do not create duplicate media streams.
+* Add tests for new functionality.
+* Verify the frontend production build.
+* Keep recordings and generated files out of Git.
+* Keep encryption keys and secrets out of Git.
+* Preserve recording authorization and consent requirements.
+* Maintain backward compatibility where possible.
+
+📌 Current Handoff Checklist
+
+FR-4
+
+* [x] Participant recording consent
+* [x] Organizer recording authorization
+* [x] Recording start
+* [x] Recording stop
+* [x] Audio recording
+* [x] Video recording
+* [x] Combined audio/video recording
+* [x] WebRTC stream reuse
+* [x] MediaRecorder integration
+* [x] Recording upload
+* [x] Recording persistence
+* [x] AES-256-GCM encryption
+* [x] Recording lifecycle
+* [x] Recording retention
+* [x] Safe repeated start/stop
+* [x] Backend tests
+* [x] Frontend tests
+* [x] Browser validation
+* [x] Production build verification
+* [x] Git commit completed
