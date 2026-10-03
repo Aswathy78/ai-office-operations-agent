@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class ParticipantCreate(BaseModel):
@@ -11,8 +11,9 @@ class MeetingCreate(BaseModel):
     title: str = Field(..., min_length=1)
     agenda: str | None = None
     meeting_type: str = Field(default="scheduled")
-    start_at: datetime
-    end_at: datetime
+    # Optional: omitted for instant meetings, required for scheduled meetings
+    start_at: datetime | None = None
+    end_at: datetime | None = None
     participants: list[ParticipantCreate] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -20,8 +21,11 @@ class MeetingCreate(BaseModel):
         if self.meeting_type not in ["instant", "scheduled"]:
             raise ValueError("Meeting type must be instant or scheduled")
 
-        if self.end_at <= self.start_at:
-            raise ValueError("End time must be after start time")
+        if self.meeting_type == "scheduled":
+            if self.start_at is None or self.end_at is None:
+                raise ValueError("start_at and end_at are required for scheduled meetings")
+            if self.end_at <= self.start_at:
+                raise ValueError("End time must be after start time")
 
         return self
 
@@ -34,3 +38,93 @@ class MeetingResponse(BaseModel):
     end_at: datetime
     join_url: str
     status: str
+    organizer_id: str | None = None
+
+
+class MeetingValidationResponse(BaseModel):
+    id: str
+    title: str
+    agenda: str | None = None
+    start_at: datetime
+    end_at: datetime
+    status: str
+    is_valid: bool = True
+    is_expired: bool = False
+
+
+class AttendanceJoinRequest(BaseModel):
+    participant_name: str = Field(..., min_length=1)
+    participant_email: str | None = None
+    user_id: str | None = None
+    is_external_guest: bool = False
+    guest_request_id: str | None = None
+
+
+class AttendanceResponse(BaseModel):
+    id: str
+    meeting_id: str
+    participant_name: str
+    participant_email: str | None = None
+    user_id: str | None = None
+    is_external_guest: bool
+    joined_at: datetime
+    left_at: datetime | None = None
+
+
+# -- Guest Lobby ---------------------------------------------------------------
+
+
+class GuestJoinRequest(BaseModel):
+    """Submitted by an external guest to enter the lobby."""
+
+    guest_name: str = Field(..., min_length=1, max_length=255)
+    guest_email: str | None = Field(default=None, max_length=255)
+
+
+class GuestRequestResponse(BaseModel):
+    """Returned after a guest submits a lobby request or for organizer listings."""
+
+    id: str
+    meeting_id: str
+    guest_name: str
+    guest_email: str | None = None
+    status: str
+    requested_at: datetime
+    decided_at: datetime | None = None
+    attendance_log_id: str | None = None
+
+
+class GuestDecisionRequest(BaseModel):
+    """Submitted by the organizer to admit or reject a guest."""
+
+    decision: str = Field(
+        ...,
+        pattern="^(admit|reject)$",
+        validation_alias=AliasChoices("decision", "action"),
+    )
+
+
+# -- Meeting Report ------------------------------------------------------------
+
+
+class AttendanceReportRow(BaseModel):
+    """One row of the organizer meeting report."""
+
+    participant_name: str
+    participant_email: str | None = None
+    user_id: str | None = None
+    is_external_guest: bool
+    joined_at: datetime
+    left_at: datetime | None = None
+
+
+class MeetingReportResponse(BaseModel):
+    """Meeting report returned to the organizer."""
+
+    meeting_id: str
+    title: str
+    agenda: str | None = None
+    start_at: datetime
+    end_at: datetime
+    organizer_id: str
+    attendance: list[AttendanceReportRow]

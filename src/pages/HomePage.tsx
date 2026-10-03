@@ -1,12 +1,11 @@
-import { ArrowRight, MessageSquarePlus, Plus } from 'lucide-react'
+import { ArrowRight, MessageSquarePlus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
-import { mockMeetings } from '../mocks/mockMeetings'
 import { ROLE_LABELS } from '../types/user'
-import { TodaysMeetings } from '../components/meetings/TodaysMeetings'
 
 export function HomePage() {
   const { user } = useAuth()
+  if (!user) return null
 
   return (
     <div className="page-stack">
@@ -17,12 +16,9 @@ export function HomePage() {
           <p>Keep meetings, tasks and AI-powered office operations in one place.</p>
         </div>
         <div className="hero-actions">
-          <Link className="button light-button" to="/meetings/create"><Plus size={17} aria-hidden="true" /> Create Meeting</Link>
           <Link className="button ghost-button" to="/chat"><MessageSquarePlus size={17} aria-hidden="true" /> Ask AI Assistant</Link>
         </div>
       </section>
-
-      <TodaysMeetings meetings={mockMeetings} />
 
       <section className="quick-card" aria-labelledby="quick-access-title">
         <div>
