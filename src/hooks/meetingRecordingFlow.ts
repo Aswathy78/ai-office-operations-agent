@@ -1,10 +1,39 @@
 import type {
   MeetingRecordingRecord,
+  MeetingRecordingUploadResponse,
   RecordingConsentRecord,
   RecordingConsentStatus,
 } from '../api/meetings'
 
-export type RecordingUploadState = 'uploading' | 'uploaded' | 'error'
+export type RecordingUploadState = 'uploading' | 'completed' | 'processing' | 'failed' | 'error'
+
+export function getRecordingUploadState(
+  status: MeetingRecordingUploadResponse['status'],
+): Exclude<RecordingUploadState, 'uploading' | 'error'> {
+  switch (status) {
+    case 'completed':
+    case 'processing':
+    case 'failed':
+      return status
+    default:
+      throw new Error(`Unexpected recording upload status: ${status}`)
+  }
+}
+
+export function getRecordingUploadMessage(state: RecordingUploadState): string {
+  switch (state) {
+    case 'uploading':
+      return 'Uploading recording…'
+    case 'completed':
+      return 'Uploaded / Completed'
+    case 'processing':
+      return 'Uploaded / Processing'
+    case 'failed':
+      return 'Upload failed. The recording was marked as failed.'
+    case 'error':
+      return 'Upload failed. The completed recording remains in this browser session.'
+  }
+}
 
 export function isMeetingOrganizer(
   organizerId: string | null | undefined,
@@ -18,6 +47,14 @@ export function shouldShowRecordingControls(
   consentStatus: 'unknown' | 'consented' | 'declined',
 ): boolean {
   return isOrganizer && consentStatus === 'consented'
+}
+
+export function shouldShowStartRecording(
+  isOrganizer: boolean,
+  consentStatus: 'unknown' | 'consented' | 'declined',
+  uploadState: RecordingUploadState | 'idle',
+): boolean {
+  return shouldShowRecordingControls(isOrganizer, consentStatus) && uploadState !== 'completed'
 }
 
 export async function persistRecordingConsent(
@@ -62,7 +99,7 @@ export async function startRecordingAfterConsent(
 export async function stopRecordingAndUpload(
   stopBrowserRecorder: () => Promise<Blob | null>,
   stopBackend: () => Promise<MeetingRecordingRecord>,
-  uploadBlob: (blob: Blob) => Promise<unknown>,
+  uploadBlob: (blob: Blob) => Promise<MeetingRecordingUploadResponse>,
   onUploadState: (state: RecordingUploadState) => void,
 ): Promise<Blob | null> {
   const blob = await stopBrowserRecorder()
@@ -71,8 +108,8 @@ export async function stopRecordingAndUpload(
 
   onUploadState('uploading')
   try {
-    await uploadBlob(blob)
-    onUploadState('uploaded')
+    const response = await uploadBlob(blob)
+    onUploadState(getRecordingUploadState(response.status))
     return blob
   } catch (error) {
     onUploadState('error')

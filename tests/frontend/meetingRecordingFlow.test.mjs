@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  getRecordingUploadMessage,
+  getRecordingUploadState,
   isMeetingOrganizer,
   persistRecordingConsent,
   shouldShowRecordingControls,
+  shouldShowStartRecording,
   startRecordingAfterConsent,
   stopRecordingAndUpload,
 } from '../../src/hooks/meetingRecordingFlow.ts'
@@ -33,6 +36,12 @@ test('non-organizer does not see organizer recording controls after consent', ()
   const isOrganizer = isMeetingOrganizer(meetingFromGet.organizer_id, 'other-user-22')
 
   assert.equal(shouldShowRecordingControls(isOrganizer, 'consented'), false)
+})
+
+test('completed recording hides Start recording while other lifecycle states preserve it', () => {
+  assert.equal(shouldShowStartRecording(true, 'consented', 'idle'), true)
+  assert.equal(shouldShowStartRecording(true, 'consented', 'processing'), true)
+  assert.equal(shouldShowStartRecording(true, 'consented', 'completed'), false)
 })
 
 test('recording cannot start before explicit consent', async () => {
@@ -161,7 +170,10 @@ test('upload waits for MediaRecorder stop and backend stop', async () => {
       return mediaRecorderStopped
     },
     async () => { calls.push('backend-stop'); return processingRecording },
-    async (blob) => { calls.push(['upload', blob]) },
+    async (blob) => {
+      calls.push(['upload', blob])
+      return { status: 'processing' }
+    },
     () => {},
   )
 
@@ -178,19 +190,30 @@ test('upload waits for MediaRecorder stop and backend stop', async () => {
   ])
 })
 
-test('successful upload updates state after backend stop', async () => {
-  const states = []
-  const completedBlob = new Blob(['recorded audio'], { type: 'audio/webm' })
+for (const [status, expectedMessage] of [
+  ['completed', 'Uploaded / Completed'],
+  ['processing', 'Uploaded / Processing'],
+  ['failed', 'Upload failed. The recording was marked as failed.'],
+]) {
+  test(`upload response status ${status} produces the matching recording display`, async () => {
+    const states = []
+    const completedBlob = new Blob(['recorded audio'], { type: 'audio/webm' })
 
-  await stopRecordingAndUpload(
-    async () => completedBlob,
-    async () => processingRecording,
-    async (blob) => assert.equal(blob, completedBlob),
-    (state) => states.push(state),
-  )
+    await stopRecordingAndUpload(
+      async () => completedBlob,
+      async () => processingRecording,
+      async (blob) => {
+        assert.equal(blob, completedBlob)
+        return { status }
+      },
+      (state) => states.push(state),
+    )
 
-  assert.deepEqual(states, ['uploading', 'uploaded'])
-})
+    assert.deepEqual(states, ['uploading', status])
+    assert.equal(getRecordingUploadState(status), status)
+    assert.equal(getRecordingUploadMessage(states.at(-1)), expectedMessage)
+  })
+}
 
 test('failed upload preserves completed Blob and reports error state', async () => {
   const states = []

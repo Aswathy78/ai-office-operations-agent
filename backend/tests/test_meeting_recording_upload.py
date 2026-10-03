@@ -16,6 +16,8 @@ from app.meeting.models import (
     Meeting,
     MeetingAttendanceLog,
     MeetingRecording,
+    RECORDING_STATUS_COMPLETED,
+    RECORDING_STATUS_FAILED,
     RECORDING_STATUS_PROCESSING,
     RECORDING_STATUS_RECORDING,
 )
@@ -115,7 +117,7 @@ def test_successful_upload_persists_file_uri_and_metadata(
     assert response.status_code == 200
     result = response.json()
     assert result["recording_id"] == recording.id
-    assert result["status"] == RECORDING_STATUS_PROCESSING
+    assert result["status"] == RECORDING_STATUS_COMPLETED
     assert result["filename"] == f"{recording.id}.webm"
     assert result["content_type"] == "audio/webm"
     assert result["size_bytes"] == len(media)
@@ -127,6 +129,9 @@ def test_successful_upload_persists_file_uri_and_metadata(
     db_session.expire_all()
     saved_recording = db_session.get(MeetingRecording, recording.id)
     assert saved_recording.storage_uri == result["storage_uri"]
+    assert saved_recording.status == RECORDING_STATUS_COMPLETED
+    assert saved_recording.completed_at is not None
+    assert saved_recording.error_message is None
 
 
 def test_successful_audio_video_webm_upload(
@@ -146,6 +151,7 @@ def test_successful_audio_video_webm_upload(
     assert response.status_code == 200
     result = response.json()
     assert result["recording_id"] == recording.id
+    assert result["status"] == RECORDING_STATUS_COMPLETED
     assert result["content_type"] == "video/webm"
     assert result["filename"] == f"{recording.id}.webm"
     stored_file = recording_storage / result["storage_uri"]
@@ -160,13 +166,17 @@ def test_empty_upload_is_rejected(
     recording_storage,
 ):
     meeting = _create_meeting(db_session)
-    _create_processing_recording(db_session, meeting.id)
+    recording = _create_processing_recording(db_session, meeting.id)
 
     response = _upload(client, meeting.id, ORGANIZER_ID, b"")
 
     assert response.status_code == 400
     assert "empty" in response.json()["detail"].lower()
     assert list(recording_storage.rglob("*.webm")) == []
+    db_session.expire_all()
+    failed_recording = db_session.get(MeetingRecording, recording.id)
+    assert failed_recording.status == RECORDING_STATUS_FAILED
+    assert "empty" in failed_recording.error_message.lower()
 
 
 def test_upload_without_processing_recording_is_rejected(
@@ -216,7 +226,7 @@ def test_upload_rejects_recording_not_in_processing_state(
     assert list(recording_storage.rglob("*.webm")) == []
 
 
-def test_repeat_upload_replaces_the_deterministic_file(
+def test_completed_recording_rejects_repeat_upload(
     client: TestClient,
     db_session: Session,
     recording_storage,
@@ -227,12 +237,15 @@ def test_repeat_upload_replaces_the_deterministic_file(
     first = _upload(client, meeting.id, ORGANIZER_ID, b"first completed blob")
     second = _upload(client, meeting.id, ORGANIZER_ID, b"replacement completed blob")
 
-    assert first.status_code == second.status_code == 200
-    assert first.json()["storage_uri"] == second.json()["storage_uri"]
+    assert first.status_code == 200
+    assert first.json()["status"] == RECORDING_STATUS_COMPLETED
+    assert second.status_code == 409
     files = list(recording_storage.rglob("*.webm"))
-    assert files == [recording_storage / second.json()["storage_uri"]]
-    assert files[0].read_bytes() != b"replacement completed blob"
-    assert decrypt_recording_file(files[0]) == b"replacement completed blob"
+    assert files == [recording_storage / first.json()["storage_uri"]]
+    assert decrypt_recording_file(files[0]) == b"first completed blob"
+    db_session.expire_all()
+    saved_recording = db_session.get(MeetingRecording, recording.id)
+    assert saved_recording.status == RECORDING_STATUS_COMPLETED
 
 
 def test_encryption_failure_removes_plaintext_temporary_file(
@@ -242,7 +255,7 @@ def test_encryption_failure_removes_plaintext_temporary_file(
     monkeypatch,
 ):
     meeting = _create_meeting(db_session)
-    _create_processing_recording(db_session, meeting.id)
+    recording = _create_processing_recording(db_session, meeting.id)
 
     def fail_encryption(_source, _destination):
         raise OSError("forced encryption failure")
@@ -254,6 +267,10 @@ def test_encryption_failure_removes_plaintext_temporary_file(
     assert list(recording_storage.rglob("*.plaintext.tmp")) == []
     assert list(recording_storage.rglob("*.encrypted.tmp")) == []
     assert list(recording_storage.rglob("*.webm")) == []
+    db_session.expire_all()
+    failed_recording = db_session.get(MeetingRecording, recording.id)
+    assert failed_recording.status == RECORDING_STATUS_FAILED
+    assert "forced encryption failure" in failed_recording.error_message
 
 
 def test_missing_encryption_key_rejects_upload_and_cleans_temporary_files(
@@ -263,7 +280,7 @@ def test_missing_encryption_key_rejects_upload_and_cleans_temporary_files(
     monkeypatch,
 ):
     meeting = _create_meeting(db_session)
-    _create_processing_recording(db_session, meeting.id)
+    recording = _create_processing_recording(db_session, meeting.id)
     monkeypatch.delenv("RECORDING_ENCRYPTION_KEY", raising=False)
 
     response = _upload(client, meeting.id, ORGANIZER_ID, b"sensitive plaintext")
@@ -273,6 +290,63 @@ def test_missing_encryption_key_rejects_upload_and_cleans_temporary_files(
     assert list(recording_storage.rglob("*.plaintext.tmp")) == []
     assert list(recording_storage.rglob("*.encrypted.tmp")) == []
     assert list(recording_storage.rglob("*.webm")) == []
+    db_session.expire_all()
+    failed_recording = db_session.get(MeetingRecording, recording.id)
+    assert failed_recording.status == RECORDING_STATUS_FAILED
+    assert "RECORDING_ENCRYPTION_KEY" in failed_recording.error_message
+
+
+def test_filesystem_storage_failure_persists_failed_state(
+    client: TestClient,
+    db_session: Session,
+    recording_storage,
+    monkeypatch,
+):
+    meeting = _create_meeting(db_session)
+    recording = _create_processing_recording(db_session, meeting.id)
+
+    def fail_replace(_source, _destination):
+        raise OSError("forced storage failure")
+
+    monkeypatch.setattr(meeting_service.os, "replace", fail_replace)
+    response = _upload(client, meeting.id, ORGANIZER_ID, b"recording")
+
+    assert response.status_code == 500
+    assert list(recording_storage.rglob("*.webm")) == []
+    db_session.expire_all()
+    failed_recording = db_session.get(MeetingRecording, recording.id)
+    assert failed_recording.status == RECORDING_STATUS_FAILED
+    assert "forced storage failure" in failed_recording.error_message
+
+
+def test_metadata_persistence_failure_persists_failed_state(
+    client: TestClient,
+    db_session: Session,
+    recording_storage,
+    monkeypatch,
+):
+    meeting = _create_meeting(db_session)
+    recording = _create_processing_recording(db_session, meeting.id)
+    commit = db_session.commit
+    should_fail = True
+
+    def fail_first_commit():
+        nonlocal should_fail
+        if should_fail:
+            should_fail = False
+            raise RuntimeError("forced metadata persistence failure")
+        commit()
+
+    monkeypatch.setattr(db_session, "commit", fail_first_commit)
+    response = _upload(client, meeting.id, ORGANIZER_ID, b"recording")
+
+    assert response.status_code == 500
+    assert "Unable to persist recording metadata" in response.json()["detail"]
+    assert list(recording_storage.rglob("*.webm")) == []
+    db_session.expire_all()
+    failed_recording = db_session.get(MeetingRecording, recording.id)
+    assert failed_recording.status == RECORDING_STATUS_FAILED
+    assert "Unable to persist recording metadata" in failed_recording.error_message
 
 
 def test_upload_rejects_unsafe_filename_and_non_audio_content_type(
@@ -281,17 +355,27 @@ def test_upload_rejects_unsafe_filename_and_non_audio_content_type(
     recording_storage,
 ):
     meeting = _create_meeting(db_session)
-    _create_processing_recording(db_session, meeting.id)
+    unsafe_recording = _create_processing_recording(db_session, meeting.id)
 
     unsafe_filename = client.post(
         f"/api/v1/meetings/{meeting.id}/recording/upload?organizer_id={ORGANIZER_ID}",
         files={"file": ("..\\outside.webm", b"media", "audio/webm")},
     )
+
+    db_session.expire_all()
+    failed_unsafe_recording = db_session.get(MeetingRecording, unsafe_recording.id)
+    assert failed_unsafe_recording.status == RECORDING_STATUS_FAILED
+
+    invalid_type_meeting = _create_meeting(db_session)
+    invalid_type_recording = _create_processing_recording(db_session, invalid_type_meeting.id)
     invalid_type = client.post(
-        f"/api/v1/meetings/{meeting.id}/recording/upload?organizer_id={ORGANIZER_ID}",
+        f"/api/v1/meetings/{invalid_type_meeting.id}/recording/upload?organizer_id={ORGANIZER_ID}",
         files={"file": ("recording.txt", b"not audio", "text/plain")},
     )
 
     assert unsafe_filename.status_code == 400
     assert invalid_type.status_code == 415
+    db_session.expire_all()
+    failed_invalid_type_recording = db_session.get(MeetingRecording, invalid_type_recording.id)
+    assert failed_invalid_type_recording.status == RECORDING_STATUS_FAILED
     assert list(recording_storage.rglob("*.*")) == []

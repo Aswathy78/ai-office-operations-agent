@@ -46,8 +46,10 @@ import { useAuth } from '../contexts/AuthContext'
 import { useMeetingRecording } from '../hooks/useMeetingRecording'
 import {
   persistRecordingConsent,
+  getRecordingUploadMessage,
   isMeetingOrganizer,
   shouldShowRecordingControls,
+  shouldShowStartRecording,
   startRecordingAfterConsent,
   stopRecordingAndUpload,
   type RecordingUploadState,
@@ -381,9 +383,7 @@ export function MeetingRoomPage() {
         (uploadState) => {
           if (uploadState === 'uploading') uploadAttempted = true
           setRecordingUploadState(uploadState)
-          if (uploadState === 'uploading') setRecordingMessage('Uploading recording…')
-          if (uploadState === 'uploaded') setRecordingMessage('Uploaded / Processing')
-          if (uploadState === 'error') setRecordingMessage('Upload failed. The completed recording remains in this browser session.')
+          setRecordingMessage(getRecordingUploadMessage(uploadState))
         },
       )
       if (!blob) {
@@ -647,21 +647,19 @@ export function MeetingRoomPage() {
 
       <div className="meet-muted-toast" role="status" aria-live="polite">
         <span>
-          {recordingUploadState === 'uploading'
-            ? 'Uploading'
-            : recordingUploadState === 'uploaded'
-              ? 'Uploaded / Processing'
-              : recordingUploadState === 'error'
-                ? recordingMessage || 'Upload failed'
-                : recording.state === 'recording'
-                  ? 'Recording'
-                  : recordingMessage || (
-            recordingConsent === 'consented'
-              ? 'You have consented to recording.'
-              : recordingConsent === 'declined'
-                ? 'You have not consented to recording.'
-                : 'Recording requires your explicit consent.'
-                  )}
+          {recordingUploadState !== 'idle'
+            ? recordingUploadState === 'error' && recordingMessage
+              ? recordingMessage
+              : getRecordingUploadMessage(recordingUploadState)
+            : recording.state === 'recording'
+              ? 'Recording'
+              : recordingMessage || (
+                recordingConsent === 'consented'
+                  ? 'You have consented to recording.'
+                  : recordingConsent === 'declined'
+                    ? 'You have not consented to recording.'
+                    : 'Recording requires your explicit consent.'
+              )}
           {recording.error && ` ${recording.error}`}
         </span>
         {recordingConsent !== 'consented' && (
@@ -691,7 +689,7 @@ export function MeetingRoomPage() {
             >
               {recordingBusy ? 'Stopping…' : 'Stop recording'}
             </button>
-          ) : (
+          ) : shouldShowStartRecording(isHost, recordingConsent, recordingUploadState) ? (
             <button
               className="button secondary"
               onClick={() => void handleStartRecording()}
@@ -699,7 +697,7 @@ export function MeetingRoomPage() {
             >
               {recordingBusy ? 'Starting…' : 'Start recording'}
             </button>
-          )
+          ) : null
         )}
       </div>
 

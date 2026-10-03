@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
@@ -49,6 +50,7 @@ RECORDING_MEDIA_TYPES = {
     "audio/wav": {".wav"},
     "audio/x-wav": {".wav"},
 }
+logger = logging.getLogger(__name__)
 
 
 
@@ -689,6 +691,23 @@ def stop_meeting_recording(
     return recording
 
 
+def _mark_recording_failed(db: Session, recording_id: str, error_message: str) -> None:
+    try:
+        db.rollback()
+        recording = db.get(MeetingRecording, recording_id)
+        if recording is None:
+            raise RuntimeError(f"Recording {recording_id} was not found while persisting failure.")
+        recording.status = RECORDING_STATUS_FAILED
+        recording.error_message = error_message
+        db.commit()
+    except Exception:
+        logger.exception("Unable to persist failed state for meeting recording %s", recording_id)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("Unable to roll back failed recording update %s", recording_id)
+
+
 def upload_meeting_recording(
     db: Session,
     meeting_id: str,
@@ -705,107 +724,119 @@ def upload_meeting_recording(
             detail="A stopped recording in processing state is required before upload",
         )
 
-    if not filename or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A safe recording filename is required",
-        )
-    extension = Path(filename).suffix.lower()
-    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
-    valid_extensions = RECORDING_MEDIA_TYPES.get(normalized_type)
-    if not valid_extensions or extension not in valid_extensions:
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail="Unsupported recording filename or audio content type",
-        )
-
     try:
-        meeting_component = str(uuid.UUID(meeting_id))
-        recording_component = str(uuid.UUID(recording.id))
-    except (ValueError, AttributeError):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid meeting or recording identifier",
-        ) from None
-
-    storage_root = Path(RECORDING_STORAGE_DIR).resolve()
-    meeting_directory = (storage_root / meeting_component).resolve()
-    if not meeting_directory.is_relative_to(storage_root):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid recording storage location",
-        )
-    meeting_directory.mkdir(parents=True, exist_ok=True)
-
-    target_path = meeting_directory / f"{recording_component}{extension}"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{recording_component}.",
-        suffix=".plaintext.tmp",
-        dir=meeting_directory,
-    )
-    os.close(descriptor)
-    plaintext_path = Path(temporary_name)
-    encrypted_path: Path | None = None
-    size_bytes = 0
-    try:
-        encrypted_descriptor, encrypted_name = tempfile.mkstemp(
-            prefix=f".{recording_component}.",
-            suffix=".encrypted.tmp",
-            dir=meeting_directory,
-        )
-        os.close(encrypted_descriptor)
-        encrypted_path = Path(encrypted_name)
-        with plaintext_path.open("wb") as destination:
-            while chunk := upload.read(1024 * 1024):
-                size_bytes += len(chunk)
-                destination.write(chunk)
-        if size_bytes == 0:
+        if not filename or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Recording upload cannot be empty",
+                detail="A safe recording filename is required",
             )
-        encrypt_recording_file(plaintext_path, encrypted_path)
-        os.replace(encrypted_path, target_path)
+        extension = Path(filename).suffix.lower()
+        normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+        valid_extensions = RECORDING_MEDIA_TYPES.get(normalized_type)
+        if not valid_extensions or extension not in valid_extensions:
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Unsupported recording filename or audio content type",
+            )
+
+        try:
+            meeting_component = str(uuid.UUID(meeting_id))
+            recording_component = str(uuid.UUID(recording.id))
+        except (ValueError, AttributeError):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid meeting or recording identifier",
+            ) from None
+
+        storage_root = Path(RECORDING_STORAGE_DIR).resolve()
+        meeting_directory = (storage_root / meeting_component).resolve()
+        if not meeting_directory.is_relative_to(storage_root):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid recording storage location",
+            )
+        target_path = meeting_directory / f"{recording_component}{extension}"
+        plaintext_path: Path | None = None
+        encrypted_path: Path | None = None
+        size_bytes = 0
+        try:
+            meeting_directory.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{recording_component}.",
+                suffix=".plaintext.tmp",
+                dir=meeting_directory,
+            )
+            plaintext_path = Path(temporary_name)
+            os.close(descriptor)
+
+            encrypted_descriptor, encrypted_name = tempfile.mkstemp(
+                prefix=f".{recording_component}.",
+                suffix=".encrypted.tmp",
+                dir=meeting_directory,
+            )
+            encrypted_path = Path(encrypted_name)
+            os.close(encrypted_descriptor)
+            with plaintext_path.open("wb") as destination:
+                while chunk := upload.read(1024 * 1024):
+                    size_bytes += len(chunk)
+                    destination.write(chunk)
+            if size_bytes == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Recording upload cannot be empty",
+                )
+            encrypt_recording_file(plaintext_path, encrypted_path)
+            os.replace(encrypted_path, target_path)
+
+            storage_uri = f"{meeting_component}/{recording_component}{extension}"
+            previous_uri = recording.storage_uri
+            recording.storage_uri = storage_uri
+            recording.status = RECORDING_STATUS_COMPLETED
+            recording.completed_at = datetime.now(timezone.utc)
+            recording.error_message = None
+            try:
+                db.commit()
+            except Exception as error:
+                db.rollback()
+                if previous_uri != storage_uri:
+                    target_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Unable to persist recording metadata",
+                ) from error
+
+            if previous_uri and previous_uri != storage_uri:
+                previous_path = (storage_root / previous_uri).resolve()
+                if previous_path.is_relative_to(storage_root) and previous_path.is_file():
+                    previous_path.unlink(missing_ok=True)
+        finally:
+            try:
+                if plaintext_path is not None:
+                    plaintext_path.unlink(missing_ok=True)
+            finally:
+                if encrypted_path is not None:
+                    encrypted_path.unlink(missing_ok=True)
     except RecordingEncryptionConfigurationError as error:
+        _mark_recording_failed(db, recording.id, str(error))
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(error),
         ) from error
-    except HTTPException:
+    except HTTPException as error:
+        _mark_recording_failed(db, recording.id, str(error.detail))
         raise
     except OSError as error:
+        _mark_recording_failed(db, recording.id, str(error))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to encrypt or persist recording file",
         ) from error
     except Exception as error:
+        _mark_recording_failed(db, recording.id, str(error))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Unable to encrypt or persist recording file",
         ) from error
-    finally:
-        plaintext_path.unlink(missing_ok=True)
-        if encrypted_path is not None:
-            encrypted_path.unlink(missing_ok=True)
-
-    storage_uri = f"{meeting_component}/{recording_component}{extension}"
-    previous_uri = recording.storage_uri
-    recording.storage_uri = storage_uri
-    try:
-        db.commit()
-    except Exception as error:
-        db.rollback()
-        if previous_uri != storage_uri:
-            target_path.unlink(missing_ok=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to persist recording metadata",
-        ) from error
-
-    if previous_uri and previous_uri != storage_uri:
-        previous_path = (storage_root / previous_uri).resolve()
-        if previous_path.is_relative_to(storage_root) and previous_path.is_file():
-            previous_path.unlink(missing_ok=True)
 
     return {
         "recording_id": recording.id,
