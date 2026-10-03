@@ -11,12 +11,14 @@ from app.meeting.models import (
     Base,
     Meeting,
     MeetingRecording,
+    MeetingTranscript,
     RECORDING_RETENTION_DAYS,
     RECORDING_STATUS_CANCELLED,
     RECORDING_STATUS_COMPLETED,
     RECORDING_STATUS_FAILED,
     RECORDING_STATUS_PROCESSING,
     RECORDING_STATUS_RECORDING,
+    TRANSCRIPT_STATUS_COMPLETED,
 )
 from app.meeting import recording_retention
 from app.meeting.recording_retention import enforce_recording_retention
@@ -128,6 +130,16 @@ def test_expired_completed_recording_file_and_row_are_deleted(
         expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         storage_uri=uri,
     )
+    transcript = MeetingTranscript(
+        id=str(uuid.uuid4()),
+        recording_id=recording.id,
+        status=TRANSCRIPT_STATUS_COMPLETED,
+        language="en",
+        transcript_text="Expired recording transcript",
+    )
+    transcript_id = transcript.id
+    db_session.add(transcript)
+    db_session.commit()
 
     report = enforce_recording_retention(db_session, storage_root=retention_storage)
 
@@ -135,6 +147,7 @@ def test_expired_completed_recording_file_and_row_are_deleted(
     assert report.failures == []
     assert not stored_file.exists()
     assert db_session.get(MeetingRecording, recording.id) is None
+    assert db_session.get(MeetingTranscript, transcript_id) is None
 
 
 def test_unexpired_recording_is_preserved(db_session: Session, retention_storage: Path):

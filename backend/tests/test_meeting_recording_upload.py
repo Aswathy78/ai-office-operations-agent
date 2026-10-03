@@ -1,6 +1,9 @@
 import base64
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import secrets
+import sys
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -16,13 +19,20 @@ from app.meeting.models import (
     Meeting,
     MeetingAttendanceLog,
     MeetingRecording,
+    MeetingTranscript,
     RECORDING_STATUS_COMPLETED,
     RECORDING_STATUS_FAILED,
     RECORDING_STATUS_PROCESSING,
     RECORDING_STATUS_RECORDING,
+    TRANSCRIPT_STATUS_PENDING,
 )
 from app.meeting import service as meeting_service
 from app.meeting.recording_encryption import decrypt_recording_file
+from app.meeting.transcription_worker import (
+    claim_pending_transcript,
+    create_whisper_model,
+    process_claimed_transcript,
+)
 
 ORGANIZER_ID = "recording-organizer"
 
@@ -132,6 +142,10 @@ def test_successful_upload_persists_file_uri_and_metadata(
     assert saved_recording.status == RECORDING_STATUS_COMPLETED
     assert saved_recording.completed_at is not None
     assert saved_recording.error_message is None
+    transcripts = db_session.query(MeetingTranscript).filter_by(recording_id=recording.id).all()
+    assert len(transcripts) == 1
+    assert transcripts[0].status == TRANSCRIPT_STATUS_PENDING
+    assert transcripts[0].language == "en"
 
 
 def test_successful_audio_video_webm_upload(
@@ -246,6 +260,95 @@ def test_completed_recording_rejects_repeat_upload(
     db_session.expire_all()
     saved_recording = db_session.get(MeetingRecording, recording.id)
     assert saved_recording.status == RECORDING_STATUS_COMPLETED
+    assert db_session.query(MeetingTranscript).filter_by(recording_id=recording.id).count() == 1
+
+
+def test_upload_to_transcription_happy_path(
+    client: TestClient,
+    db_session: Session,
+    recording_storage,
+    tmp_path,
+    monkeypatch,
+):
+    meeting = _create_meeting(db_session)
+    recording = _create_processing_recording(db_session, meeting.id)
+    media = b"completed english meeting audio"
+
+    response = _upload(client, meeting.id, ORGANIZER_ID, media)
+
+    assert response.status_code == 200
+    assert response.json()["status"] == RECORDING_STATUS_COMPLETED
+    db_session.expire_all()
+    saved_recording = db_session.get(MeetingRecording, recording.id)
+    assert saved_recording.status == RECORDING_STATUS_COMPLETED
+    assert saved_recording.storage_uri is not None
+
+    transcripts = db_session.query(MeetingTranscript).filter_by(recording_id=recording.id).all()
+    assert len(transcripts) == 1
+    transcript_id = transcripts[0].id
+    assert transcripts[0].status == TRANSCRIPT_STATUS_PENDING
+
+    duplicate_upload = _upload(client, meeting.id, ORGANIZER_ID, media)
+    assert duplicate_upload.status_code == 409
+    assert db_session.query(MeetingTranscript).filter_by(recording_id=recording.id).count() == 1
+
+    assert claim_pending_transcript(db_session) == transcript_id
+    assert claim_pending_transcript(db_session) is None
+    db_session.expire_all()
+    assert db_session.get(MeetingTranscript, transcript_id).status == "processing"
+
+    constructor_calls = []
+
+    class FakeWhisperModel:
+        def __init__(self, model_name, **options):
+            constructor_calls.append((model_name, options))
+            self.input_path = None
+            self.language = None
+
+        def transcribe(self, audio_path, *, language):
+            self.input_path = audio_path
+            self.language = language
+            assert Path(audio_path).read_bytes() == media
+            return iter(
+                [
+                    SimpleNamespace(start=0.4, end=1.8, text=" Welcome everyone."),
+                    SimpleNamespace(start=2.1, end=3.6, text=" Let's begin."),
+                ]
+            ), SimpleNamespace(language="en")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "faster_whisper",
+        SimpleNamespace(WhisperModel=FakeWhisperModel),
+    )
+    model = create_whisper_model()
+    assert constructor_calls[0][0] == "large-v3"
+    assert "device" in constructor_calls[0][1]
+    assert "compute_type" in constructor_calls[0][1]
+
+    temporary_directory = tmp_path / "decrypted-audio"
+    temporary_directory.mkdir()
+    assert process_claimed_transcript(
+        db_session,
+        transcript_id,
+        model,
+        storage_root=recording_storage,
+        temporary_directory=temporary_directory,
+    )
+
+    db_session.expire_all()
+    completed_transcript = db_session.get(MeetingTranscript, transcript_id)
+    assert completed_transcript.status == "completed"
+    assert completed_transcript.language == "en"
+    assert completed_transcript.transcript_text == "Welcome everyone. Let's begin."
+    assert completed_transcript.segments == [
+        {"start": 0.4, "end": 1.8, "text": "Welcome everyone."},
+        {"start": 2.1, "end": 3.6, "text": "Let's begin."},
+    ]
+    assert model.language == "en"
+    assert model.input_path is not None
+    assert not Path(model.input_path).exists()
+    assert list(temporary_directory.iterdir()) == []
 
 
 def test_encryption_failure_removes_plaintext_temporary_file(

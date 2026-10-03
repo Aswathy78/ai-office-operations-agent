@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from datetime import timedelta
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Allowed values for MeetingGuestRequest.status
@@ -35,6 +35,17 @@ RECORDING_CONSENT_STATUSES = (
 )
 
 RECORDING_RETENTION_DAYS = 90
+
+TRANSCRIPT_STATUS_PENDING = "pending"
+TRANSCRIPT_STATUS_PROCESSING = "processing"
+TRANSCRIPT_STATUS_COMPLETED = "completed"
+TRANSCRIPT_STATUS_FAILED = "failed"
+TRANSCRIPT_STATUSES = (
+    TRANSCRIPT_STATUS_PENDING,
+    TRANSCRIPT_STATUS_PROCESSING,
+    TRANSCRIPT_STATUS_COMPLETED,
+    TRANSCRIPT_STATUS_FAILED,
+)
 
 
 class Base(DeclarativeBase):
@@ -228,3 +239,40 @@ class MeetingRecordingConsent(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class MeetingTranscript(Base):
+    __tablename__ = "meeting_transcripts"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in TRANSCRIPT_STATUSES)})",
+            name="ck_meeting_transcripts_status",
+        ),
+        UniqueConstraint("recording_id", name="uq_meeting_transcripts_recording_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    recording_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_recordings.id"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=TRANSCRIPT_STATUS_PENDING,
+    )
+    language: Mapped[str] = mapped_column(String(10), nullable=False, default="en")
+    transcript_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    segments: Mapped[list[dict[str, object]] | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
