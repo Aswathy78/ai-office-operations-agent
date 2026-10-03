@@ -6,6 +6,7 @@ import { ROLE_LABELS } from '../../types/user'
 export function Sidebar() {
   const { user } = useAuth()
   const location = useLocation()
+  if (!user) return null
   const items = getNavigationForRole(user.role)
 
   return (

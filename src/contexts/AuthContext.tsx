@@ -1,6 +1,6 @@
 import { createContext, useContext, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
-import { mockUser } from '../mocks/mockUser'
+import { demoUsers } from '../mocks/mockUser'
 import type { User, UserRole } from '../types/user'
 
 interface AuthContextValue {
@@ -31,7 +31,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   })
 
   const signInAsDemo = (role: UserRole) => {
-    const demoUser = { ...mockUser, role }
+    const demoUser = demoUsers[role]
 
     setUser(demoUser)
     sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(demoUser))

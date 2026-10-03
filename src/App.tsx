@@ -5,10 +5,15 @@ import { AccessDenied, NotFound } from './components/common/AccessDenied'
 import { routePermissions } from './config/navigation'
 import { useAuth } from './contexts/AuthContext'
 import { CreateMeetingPlaceholder } from './pages/CreateMeetingPlaceholder'
+import { GuestMeetingRoomPlaceholder } from './pages/GuestMeetingRoomPlaceholder'
+import { GuestJoinPage } from './pages/GuestJoinPage'
 import { HomePage } from './pages/HomePage'
-import { MeetingRoomPlaceholder } from './pages/MeetingRoomPlaceholder'
-import { PlaceholderPage } from './pages/PlaceholderPage'
 import { LoginPage } from './pages/LoginPage'
+import { MeetingEntryPage } from './pages/MeetingEntryPage'
+import { MeetingReportPage } from './pages/MeetingReportPage'
+import { MeetingRoomPage } from './pages/MeetingRoomPage'
+import { MeetingsPage } from './pages/MeetingsPage'
+import { PlaceholderPage } from './pages/PlaceholderPage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -19,39 +24,56 @@ function ProtectedRoute({ path, children }: { path: string; children: ReactNode 
   return <>{children}</>
 }
 
-function AppRoutes() {
+function ProtectedAppPage({ path, children }: { path: string; children: ReactNode }) {
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="*" element={<AuthenticatedRoutes />} />
-    </Routes>
+    <ProtectedRoute path={path}>
+      <AppShell>{children}</AppShell>
+    </ProtectedRoute>
   )
 }
 
-function AuthenticatedRoutes() {
-  const { isAuthenticated } = useAuth()
-  if (!isAuthenticated) return <Navigate to="/login" replace />
-
+function AppRoutes() {
   return (
-    <AppShell>
-      <Routes>
-        <Route path="/" element={<Navigate to="/home" replace />} />
-        <Route path="/home" element={<ProtectedRoute path="/home"><HomePage /></ProtectedRoute>} />
-        <Route path="/meetings" element={<ProtectedRoute path="/meetings"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/meetings/create" element={<ProtectedRoute path="/meetings"><CreateMeetingPlaceholder /></ProtectedRoute>} />
-        <Route path="/meetings/:meetingId" element={<ProtectedRoute path="/meetings"><MeetingRoomPlaceholder /></ProtectedRoute>} />
-        <Route path="/chat" element={<ProtectedRoute path="/chat"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/tasks" element={<ProtectedRoute path="/tasks"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/calendar" element={<ProtectedRoute path="/calendar"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/dashboard" element={<ProtectedRoute path="/dashboard"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/documents" element={<ProtectedRoute path="/documents"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/approvals" element={<ProtectedRoute path="/approvals"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/admin/users" element={<ProtectedRoute path="/admin/users"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/admin/agent-monitor" element={<ProtectedRoute path="/admin/agent-monitor"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="/admin/audit-logs" element={<ProtectedRoute path="/admin/audit-logs"><PlaceholderPage /></ProtectedRoute>} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
-    </AppShell>
+    <Routes>
+      {/* Public routes - no auth required */}
+      <Route path="/login" element={<LoginPage />} />
+
+      {/* Guest-only sub-routes (unauthenticated flow) */}
+      <Route path="/meetings/:meetingId/guest" element={<GuestJoinPage />} />
+      <Route path="/meetings/:meetingId/guest/room" element={<GuestMeetingRoomPlaceholder />} />
+
+      {/* Full-screen authenticated meeting room — outside AppShell */}
+      <Route
+        path="/app/meetings/:meetingId"
+        element={<ProtectedRoute path="/meetings"><MeetingRoomPage /></ProtectedRoute>}
+      />
+
+      {/* Authenticated routes inside AppShell */}
+      <Route path="/" element={<Navigate to="/home" replace />} />
+      <Route path="/home" element={<ProtectedAppPage path="/home"><HomePage /></ProtectedAppPage>} />
+
+      {/* Explicit meeting routes inside AppShell */}
+      <Route path="/meetings" element={<ProtectedAppPage path="/meetings"><MeetingsPage /></ProtectedAppPage>} />
+      <Route path="/meetings/create" element={<ProtectedAppPage path="/meetings"><CreateMeetingPlaceholder /></ProtectedAppPage>} />
+      <Route path="/meetings/:meetingId/report" element={<ProtectedAppPage path="/meetings"><MeetingReportPage /></ProtectedAppPage>} />
+
+      {/* Other authenticated routes inside AppShell */}
+      <Route path="/chat" element={<ProtectedAppPage path="/chat"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/documents" element={<ProtectedAppPage path="/documents"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><PlaceholderPage /></ProtectedAppPage>} />
+
+      {/* Smart meeting entry — dynamic route for /meetings/:meetingId (only hits if not /meetings/create or /meetings) */}
+      <Route path="/meetings/:meetingId" element={<MeetingEntryPage />} />
+
+      {/* Fallback 404 */}
+      <Route path="*" element={<ProtectedAppPage path="/home"><NotFound /></ProtectedAppPage>} />
+    </Routes>
   )
 }
 
