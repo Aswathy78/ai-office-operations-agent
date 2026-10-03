@@ -118,6 +118,103 @@ export interface AttendanceRecord {
   left_at: string | null
 }
 
+export type RecordingConsentStatus = 'consented' | 'declined'
+
+export interface RecordingConsentRecord {
+  id: string
+  meeting_id: string
+  attendance_id: string
+  consent_status: RecordingConsentStatus
+  consented_at: string | null
+  revoked_at: string | null
+  created_at: string
+}
+
+export interface MeetingRecordingRecord {
+  id: string
+  meeting_id: string
+  participant_id: string | null
+  status: 'pending' | 'recording' | 'processing' | 'completed' | 'failed' | 'cancelled'
+  started_at: string | null
+  completed_at: string | null
+  created_at: string
+  retention_expires_at: string
+  storage_uri: string | null
+  error_message: string | null
+}
+
+export interface MeetingRecordingUploadResponse {
+  recording_id: string
+  status: MeetingRecordingRecord['status']
+  storage_uri: string
+  filename: string
+  content_type: string
+  size_bytes: number
+}
+
+export function recordMeetingRecordingConsent(
+  meetingId: string,
+  attendanceId: string,
+  consentStatus: RecordingConsentStatus,
+): Promise<RecordingConsentRecord> {
+  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/consent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ attendance_id: attendanceId, consent_status: consentStatus }),
+  }).then((response) => readResponse<RecordingConsentRecord>(response))
+}
+
+export function startMeetingRecording(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingRecordingRecord> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/start?${query}`,
+    { method: 'POST' },
+  ).then((response) => readResponse<MeetingRecordingRecord>(response))
+}
+
+export function stopMeetingRecording(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingRecordingRecord> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/stop?${query}`,
+    { method: 'POST' },
+  ).then((response) => readResponse<MeetingRecordingRecord>(response))
+}
+
+export function uploadMeetingRecording(
+  meetingId: string,
+  organizerId: string,
+  recording: Blob,
+): Promise<MeetingRecordingUploadResponse> {
+  const mimeType = recording.type.split(';', 1)[0].trim().toLowerCase()
+  const extensionByMimeType: Record<string, string> = {
+    'audio/webm': 'webm',
+    'video/webm': 'webm',
+    'audio/ogg': 'ogg',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+  }
+  const extension = extensionByMimeType[mimeType]
+  if (!extension) {
+    throw new MeetingApiError('The completed recording has an unsupported audio format.', 415)
+  }
+
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  const formData = new FormData()
+  formData.append('file', recording, `recording.${extension}`)
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/upload?${query}`,
+    { method: 'POST', body: formData },
+  ).then((response) => readResponse<MeetingRecordingUploadResponse>(response))
+}
+
 export function joinMeetingAttendance(
   meetingId: string,
   participant: AttendanceJoinRequest,

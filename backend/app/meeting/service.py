@@ -1,4 +1,9 @@
 from datetime import datetime, timedelta, timezone
+import os
+from pathlib import Path
+import re
+import tempfile
+from typing import BinaryIO
 import uuid
 
 from fastapi import HTTPException, status
@@ -9,17 +14,41 @@ from app.meeting.models import (
     MeetingParticipant,
     MeetingAttendanceLog,
     MeetingGuestRequest,
+    MeetingRecording,
+    MeetingRecordingConsent,
     GUEST_STATUS_PENDING,
     GUEST_STATUS_ADMITTED,
     GUEST_STATUS_REJECTED,
+    RECORDING_CONSENT_STATUS_CONSENTED,
+    RECORDING_STATUS_PENDING,
+    RECORDING_STATUS_RECORDING,
+    RECORDING_STATUS_PROCESSING,
+    RECORDING_STATUS_COMPLETED,
+    RECORDING_STATUS_FAILED,
+    RECORDING_STATUS_CANCELLED,
+    RECORDING_RETENTION_DAYS,
 )
 from app.meeting.schemas import AttendanceJoinRequest, GuestJoinRequest, MeetingCreate
+from app.meeting.recording_encryption import (
+    RecordingEncryptionConfigurationError,
+    encrypt_recording_file,
+)
 from app.meeting.signaling import signaling_manager
 
 # Statuses that mean the meeting can no longer be joined
 TERMINAL_STATUSES = ("completed", "cancelled")
 # Statuses that indicate the meeting is live / was started
 ACTIVE_STATUSES = ("active", "instant")
+RECORDING_STORAGE_DIR = Path(__file__).resolve().parents[2] / "storage" / "recordings"
+RECORDING_MEDIA_TYPES = {
+    "audio/webm": {".webm"},
+    "video/webm": {".webm"},
+    "audio/ogg": {".ogg", ".oga"},
+    "audio/mp4": {".mp4", ".m4a"},
+    "audio/mpeg": {".mp3"},
+    "audio/wav": {".wav"},
+    "audio/x-wav": {".wav"},
+}
 
 
 
@@ -262,7 +291,6 @@ def record_participant_leave(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Meeting not found",
         )
-
     attendance = (
         db.query(MeetingAttendanceLog)
         .filter(MeetingAttendanceLog.id == attendance_id)
@@ -425,6 +453,368 @@ def decide_guest_request(
     db.commit()
     db.refresh(guest_req)
     return guest_req
+
+
+def record_meeting_recording_consent(
+    db: Session,
+    meeting_id: str,
+    attendance_id: str,
+    consent_status: str,
+) -> MeetingRecordingConsent:
+    meeting = get_meeting_by_id(db, meeting_id)
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+    if meeting.status in TERMINAL_STATUSES or is_meeting_expired(meeting):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recording consent cannot be changed for a completed or expired meeting",
+        )
+
+    attendance = (
+        db.query(MeetingAttendanceLog)
+        .filter(
+            MeetingAttendanceLog.id == attendance_id,
+            MeetingAttendanceLog.meeting_id == meeting_id,
+        )
+        .first()
+    )
+    if not attendance:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Attendance record not found for this meeting",
+        )
+    if attendance.left_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only an active participant can record consent",
+        )
+
+    consent = (
+        db.query(MeetingRecordingConsent)
+        .filter(
+            MeetingRecordingConsent.meeting_id == meeting_id,
+            MeetingRecordingConsent.attendance_id == attendance_id,
+        )
+        .first()
+    )
+    now = datetime.now(timezone.utc)
+    if consent is None:
+        consent = MeetingRecordingConsent(
+            id=str(uuid.uuid4()),
+            meeting_id=meeting_id,
+            attendance_id=attendance_id,
+            consent_status=consent_status,
+            consented_at=(
+                now
+                if consent_status == RECORDING_CONSENT_STATUS_CONSENTED
+                else None
+            ),
+            created_at=now,
+        )
+        db.add(consent)
+    elif not (
+        consent.consent_status == consent_status
+        and consent.revoked_at is None
+    ):
+        consent.consent_status = consent_status
+        consent.consented_at = (
+            now if consent_status == RECORDING_CONSENT_STATUS_CONSENTED else None
+        )
+        consent.revoked_at = None
+
+    db.commit()
+    db.refresh(consent)
+    return consent
+
+
+def _get_recording_for_organizer(
+    db: Session,
+    meeting_id: str,
+    organizer_id: str,
+) -> Meeting:
+    meeting = get_meeting_by_id(db, meeting_id)
+    if not meeting:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can manage recording",
+        )
+    return meeting
+
+
+def _latest_meeting_recording(
+    db: Session,
+    meeting_id: str,
+) -> MeetingRecording | None:
+    return (
+        db.query(MeetingRecording)
+        .filter(MeetingRecording.meeting_id == meeting_id)
+        .order_by(MeetingRecording.created_at.desc(), MeetingRecording.id.desc())
+        .first()
+    )
+
+
+def get_meeting_recording(
+    db: Session,
+    meeting_id: str,
+    organizer_id: str,
+) -> MeetingRecording:
+    _get_recording_for_organizer(db, meeting_id, organizer_id)
+    recording = _latest_meeting_recording(db, meeting_id)
+    if recording is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Recording not found",
+        )
+    return recording
+
+
+def start_meeting_recording(
+    db: Session,
+    meeting_id: str,
+    organizer_id: str,
+) -> MeetingRecording:
+    meeting = _get_recording_for_organizer(db, meeting_id, organizer_id)
+    if meeting.status in TERMINAL_STATUSES or is_meeting_expired(meeting):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recording cannot start for a completed or expired meeting",
+        )
+
+    active_attendees = (
+        db.query(MeetingAttendanceLog)
+        .filter(
+            MeetingAttendanceLog.meeting_id == meeting_id,
+            MeetingAttendanceLog.left_at.is_(None),
+        )
+        .all()
+    )
+    if not active_attendees:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="At least one active participant is required to start recording",
+        )
+
+    active_attendance_ids = {attendee.id for attendee in active_attendees}
+    consents = (
+        db.query(MeetingRecordingConsent)
+        .filter(
+            MeetingRecordingConsent.meeting_id == meeting_id,
+            MeetingRecordingConsent.attendance_id.in_(active_attendance_ids),
+        )
+        .all()
+    )
+    consent_by_attendance = {consent.attendance_id: consent for consent in consents}
+    if any(
+        attendance_id not in consent_by_attendance
+        or consent_by_attendance[attendance_id].consent_status
+        != RECORDING_CONSENT_STATUS_CONSENTED
+        or consent_by_attendance[attendance_id].revoked_at is not None
+        for attendance_id in active_attendance_ids
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recording requires explicit consent from all active participants",
+        )
+
+    recording = _latest_meeting_recording(db, meeting_id)
+    if recording and recording.status == RECORDING_STATUS_RECORDING:
+        return recording
+    if recording and recording.status == RECORDING_STATUS_PROCESSING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Recording is still processing",
+        )
+
+    now = datetime.now(timezone.utc)
+    if recording is None or recording.status in (
+        RECORDING_STATUS_COMPLETED,
+        RECORDING_STATUS_FAILED,
+        RECORDING_STATUS_CANCELLED,
+    ):
+        recording = MeetingRecording(
+            id=str(uuid.uuid4()),
+            meeting_id=meeting_id,
+            status=RECORDING_STATUS_PENDING,
+            created_at=now,
+            retention_expires_at=now + timedelta(days=RECORDING_RETENTION_DAYS),
+        )
+        db.add(recording)
+        db.flush()
+    elif recording.status != RECORDING_STATUS_PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot start recording from '{recording.status}' status",
+        )
+
+    recording.status = RECORDING_STATUS_RECORDING
+    recording.started_at = now
+    recording.completed_at = None
+    recording.error_message = None
+    db.commit()
+    db.refresh(recording)
+    return recording
+
+
+def stop_meeting_recording(
+    db: Session,
+    meeting_id: str,
+    organizer_id: str,
+) -> MeetingRecording:
+    _get_recording_for_organizer(db, meeting_id, organizer_id)
+    recording = _latest_meeting_recording(db, meeting_id)
+    if recording is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No recording is available to stop",
+        )
+    if recording.status == RECORDING_STATUS_PROCESSING:
+        return recording
+    if recording.status != RECORDING_STATUS_RECORDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot stop recording from '{recording.status}' status",
+        )
+
+    recording.status = RECORDING_STATUS_PROCESSING
+    db.commit()
+    db.refresh(recording)
+    return recording
+
+
+def upload_meeting_recording(
+    db: Session,
+    meeting_id: str,
+    organizer_id: str,
+    upload: BinaryIO,
+    filename: str | None,
+    content_type: str | None,
+) -> dict[str, str | int]:
+    _get_recording_for_organizer(db, meeting_id, organizer_id)
+    recording = _latest_meeting_recording(db, meeting_id)
+    if recording is None or recording.status != RECORDING_STATUS_PROCESSING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A stopped recording in processing state is required before upload",
+        )
+
+    if not filename or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", filename):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A safe recording filename is required",
+        )
+    extension = Path(filename).suffix.lower()
+    normalized_type = (content_type or "").split(";", 1)[0].strip().lower()
+    valid_extensions = RECORDING_MEDIA_TYPES.get(normalized_type)
+    if not valid_extensions or extension not in valid_extensions:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Unsupported recording filename or audio content type",
+        )
+
+    try:
+        meeting_component = str(uuid.UUID(meeting_id))
+        recording_component = str(uuid.UUID(recording.id))
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid meeting or recording identifier",
+        ) from None
+
+    storage_root = Path(RECORDING_STORAGE_DIR).resolve()
+    meeting_directory = (storage_root / meeting_component).resolve()
+    if not meeting_directory.is_relative_to(storage_root):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid recording storage location",
+        )
+    meeting_directory.mkdir(parents=True, exist_ok=True)
+
+    target_path = meeting_directory / f"{recording_component}{extension}"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{recording_component}.",
+        suffix=".plaintext.tmp",
+        dir=meeting_directory,
+    )
+    os.close(descriptor)
+    plaintext_path = Path(temporary_name)
+    encrypted_path: Path | None = None
+    size_bytes = 0
+    try:
+        encrypted_descriptor, encrypted_name = tempfile.mkstemp(
+            prefix=f".{recording_component}.",
+            suffix=".encrypted.tmp",
+            dir=meeting_directory,
+        )
+        os.close(encrypted_descriptor)
+        encrypted_path = Path(encrypted_name)
+        with plaintext_path.open("wb") as destination:
+            while chunk := upload.read(1024 * 1024):
+                size_bytes += len(chunk)
+                destination.write(chunk)
+        if size_bytes == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Recording upload cannot be empty",
+            )
+        encrypt_recording_file(plaintext_path, encrypted_path)
+        os.replace(encrypted_path, target_path)
+    except RecordingEncryptionConfigurationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+        ) from error
+    except HTTPException:
+        raise
+    except OSError as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to encrypt or persist recording file",
+        ) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to encrypt or persist recording file",
+        ) from error
+    finally:
+        plaintext_path.unlink(missing_ok=True)
+        if encrypted_path is not None:
+            encrypted_path.unlink(missing_ok=True)
+
+    storage_uri = f"{meeting_component}/{recording_component}{extension}"
+    previous_uri = recording.storage_uri
+    recording.storage_uri = storage_uri
+    try:
+        db.commit()
+    except Exception as error:
+        db.rollback()
+        if previous_uri != storage_uri:
+            target_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Unable to persist recording metadata",
+        ) from error
+
+    if previous_uri and previous_uri != storage_uri:
+        previous_path = (storage_root / previous_uri).resolve()
+        if previous_path.is_relative_to(storage_root) and previous_path.is_file():
+            previous_path.unlink(missing_ok=True)
+
+    return {
+        "recording_id": recording.id,
+        "status": recording.status,
+        "storage_uri": storage_uri,
+        "filename": target_path.name,
+        "content_type": normalized_type,
+        "size_bytes": size_bytes,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +988,14 @@ def delete_meeting(db: Session, meeting_id: str, organizer_id: str) -> None:
         )
 
     # Explicitly remove child records to avoid FK / orphan issues
+    db.query(MeetingRecordingConsent).filter(
+        MeetingRecordingConsent.meeting_id == meeting_id
+    ).delete(synchronize_session=False)
+
+    db.query(MeetingRecording).filter(
+        MeetingRecording.meeting_id == meeting_id
+    ).delete(synchronize_session=False)
+
     db.query(MeetingGuestRequest).filter(
         MeetingGuestRequest.meeting_id == meeting_id
     ).delete(synchronize_session=False)

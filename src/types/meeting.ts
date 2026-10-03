@@ -31,7 +31,7 @@ export interface MeetingDetails {
   start_at: string
   end_at: string
   status: string
-  organizer_id?: string | null
+  organizer_id: string
   is_valid: boolean
   is_expired: boolean
 }

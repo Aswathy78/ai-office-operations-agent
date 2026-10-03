@@ -1,11 +1,40 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from datetime import timedelta
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Allowed values for MeetingGuestRequest.status
 GUEST_STATUS_PENDING = "pending"
 GUEST_STATUS_ADMITTED = "admitted"
 GUEST_STATUS_REJECTED = "rejected"
+
+RECORDING_STATUS_PENDING = "pending"
+RECORDING_STATUS_RECORDING = "recording"
+RECORDING_STATUS_PROCESSING = "processing"
+RECORDING_STATUS_COMPLETED = "completed"
+RECORDING_STATUS_FAILED = "failed"
+RECORDING_STATUS_CANCELLED = "cancelled"
+RECORDING_STATUSES = (
+    RECORDING_STATUS_PENDING,
+    RECORDING_STATUS_RECORDING,
+    RECORDING_STATUS_PROCESSING,
+    RECORDING_STATUS_COMPLETED,
+    RECORDING_STATUS_FAILED,
+    RECORDING_STATUS_CANCELLED,
+)
+
+RECORDING_CONSENT_STATUS_PENDING = "pending"
+RECORDING_CONSENT_STATUS_CONSENTED = "consented"
+RECORDING_CONSENT_STATUS_DECLINED = "declined"
+RECORDING_CONSENT_STATUS_REVOKED = "revoked"
+RECORDING_CONSENT_STATUSES = (
+    RECORDING_CONSENT_STATUS_PENDING,
+    RECORDING_CONSENT_STATUS_CONSENTED,
+    RECORDING_CONSENT_STATUS_DECLINED,
+    RECORDING_CONSENT_STATUS_REVOKED,
+)
+
+RECORDING_RETENTION_DAYS = 90
 
 
 class Base(DeclarativeBase):
@@ -117,4 +146,85 @@ class MeetingGuestRequest(Base):
 
     meeting: Mapped["Meeting"] = relationship(
         back_populates="guest_requests",
+    )
+
+
+class MeetingRecording(Base):
+    __tablename__ = "meeting_recordings"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in RECORDING_STATUSES)})",
+            name="ck_meeting_recordings_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id"),
+        nullable=False,
+        index=True,
+    )
+    # Optional participant association supports future individual audio tracks.
+    participant_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("meeting_participants.id"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=RECORDING_STATUS_PENDING,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    retention_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc)
+        + timedelta(days=RECORDING_RETENTION_DAYS),
+    )
+    storage_uri: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MeetingRecordingConsent(Base):
+    __tablename__ = "meeting_recording_consents"
+    __table_args__ = (
+        CheckConstraint(
+            f"consent_status IN ({', '.join(repr(status) for status in RECORDING_CONSENT_STATUSES)})",
+            name="ck_meeting_recording_consents_status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id"),
+        nullable=False,
+        index=True,
+    )
+    attendance_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_attendance_logs.id"),
+        nullable=False,
+        index=True,
+    )
+    consent_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=RECORDING_CONSENT_STATUS_PENDING,
+    )
+    consented_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )

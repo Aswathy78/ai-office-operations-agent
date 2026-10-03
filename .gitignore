@@ -12,3 +12,10 @@ dist/
 !.env.example
 *.log
 .DS_Store
+# Runtime recording storage
+storage/
+backend/storage/
+
+# SQLite runtime files
+*.db-shm
+*.db-wal

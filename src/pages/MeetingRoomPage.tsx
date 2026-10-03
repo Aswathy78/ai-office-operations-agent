@@ -32,12 +32,26 @@ import {
   getMeeting,
   joinMeetingAttendance,
   leaveMeetingAttendance,
+  recordMeetingRecordingConsent,
+  startMeetingRecording,
+  stopMeetingRecording,
+  uploadMeetingRecording,
   MeetingApiError,
   type AttendanceRecord,
+  type RecordingConsentStatus,
 } from '../api/meetings'
 import { LocalMediaPreview } from '../components/meetings/LocalMediaPreview'
 import { OrganizerGuestLobby } from '../components/meetings/OrganizerGuestLobby'
 import { useAuth } from '../contexts/AuthContext'
+import { useMeetingRecording } from '../hooks/useMeetingRecording'
+import {
+  persistRecordingConsent,
+  isMeetingOrganizer,
+  shouldShowRecordingControls,
+  startRecordingAfterConsent,
+  stopRecordingAndUpload,
+  type RecordingUploadState,
+} from '../hooks/meetingRecordingFlow'
 import { useMeetingRoom } from '../hooks/useMeetingRoom'
 import type { MeetingDetails, ParticipantInfo, ParticipantPeerState } from '../types/meeting'
 
@@ -167,6 +181,11 @@ export function MeetingRoomPage() {
   const [showSharePanel, setShowSharePanel] = useState(false)
   const [linkCopied, setLinkCopied] = useState(false)
   const [mutedNotification, setMutedNotification] = useState(false)
+  const [attendanceRecord, setAttendanceRecord] = useState<AttendanceRecord | null>(null)
+  const [recordingConsent, setRecordingConsent] = useState<'unknown' | 'consented' | 'declined'>('unknown')
+  const [recordingBusy, setRecordingBusy] = useState(false)
+  const [recordingUploadState, setRecordingUploadState] = useState<RecordingUploadState | 'idle'>('idle')
+  const [recordingMessage, setRecordingMessage] = useState('')
   const [duration, setDuration] = useState('0:00')
   const meetingStartRef = useRef(Date.now())
   const attendanceRef = useRef<AttendanceRecord | null>(null)
@@ -181,6 +200,7 @@ export function MeetingRoomPage() {
     email: user?.email,
     userId: user?.id,
   })
+  const recording = useMeetingRecording(room.localStream)
 
   // Show muted notification
   useEffect(() => {
@@ -261,7 +281,11 @@ export function MeetingRoomPage() {
       user_id: user.id,
       is_external_guest: false,
     }).then((record) => {
-      if (active) { attendanceRef.current = record; setAttendanceError('') }
+      if (active) {
+        attendanceRef.current = record
+        setAttendanceRecord(record)
+        setAttendanceError('')
+      }
       else void leaveMeetingAttendance(meetingId, record.id).catch(() => undefined)
     }).catch((err: unknown) => {
       if (active) setAttendanceError(err instanceof Error ? err.message : 'Attendance could not be recorded.')
@@ -278,6 +302,101 @@ export function MeetingRoomPage() {
     setPageState((s) => s.kind === 'prejoin' ? { kind: 'meeting', meeting: s.meeting } : s)
     setJoinedMeeting(true)
   }, [])
+
+  const handleRecordingConsent = useCallback(async (consentStatus: RecordingConsentStatus) => {
+    const attendance = attendanceRef.current
+    if (!meetingId || !attendance) {
+      setRecordingMessage('Your participant attendance is still being registered. Try again shortly.')
+      return
+    }
+
+    setRecordingBusy(true)
+    setRecordingMessage('')
+    try {
+      const consented = await persistRecordingConsent(
+        recordMeetingRecordingConsent,
+        meetingId,
+        attendance.id,
+        consentStatus,
+      )
+      setRecordingConsent(consented ? 'consented' : 'declined')
+      setRecordingMessage(
+        consented
+          ? 'Your consent to record has been saved.'
+          : 'Your decision not to consent has been saved.',
+      )
+    } catch (error) {
+      setRecordingMessage(error instanceof Error ? error.message : 'Could not save your recording decision.')
+    } finally {
+      setRecordingBusy(false)
+    }
+  }, [meetingId])
+
+  const handleStartRecording = useCallback(async () => {
+    const organizerId = room.organizerId ?? meeting?.organizer_id ?? user?.id
+    const isOrganizer = Boolean(room.isOrganizer || (user?.id && meeting?.organizer_id === user.id))
+    if (!isOrganizer || !organizerId || !meetingId) {
+      setRecordingMessage('Only the meeting organizer can start recording.')
+      return
+    }
+    if (recordingConsent !== 'consented') {
+      setRecordingMessage('You must explicitly consent before the organizer can start recording.')
+      return
+    }
+    if (!room.localStream) {
+      setRecordingMessage('Enable your microphone before starting a recording.')
+      return
+    }
+
+    setRecordingBusy(true)
+    setRecordingMessage('')
+    try {
+      await startRecordingAfterConsent(
+        recordingConsent === 'consented',
+        () => startMeetingRecording(meetingId, organizerId),
+        recording.startRecording,
+        () => stopMeetingRecording(meetingId, organizerId),
+      )
+      setRecordingMessage('Recording is active.')
+    } catch (error) {
+      setRecordingMessage(error instanceof Error ? error.message : 'Could not start recording.')
+    } finally {
+      setRecordingBusy(false)
+    }
+  }, [meeting, meetingId, recording, recordingConsent, room.isOrganizer, room.localStream, room.organizerId, user])
+
+  const handleStopRecording = useCallback(async () => {
+    const organizerId = room.organizerId ?? meeting?.organizer_id ?? user?.id
+    if (!organizerId || !meetingId) return
+
+    setRecordingBusy(true)
+    setRecordingMessage('')
+    setRecordingUploadState('idle')
+    let uploadAttempted = false
+    try {
+      const blob = await stopRecordingAndUpload(
+        recording.stopRecordingAndGetBlob,
+        () => stopMeetingRecording(meetingId, organizerId),
+        (completedBlob) => uploadMeetingRecording(meetingId, organizerId, completedBlob),
+        (uploadState) => {
+          if (uploadState === 'uploading') uploadAttempted = true
+          setRecordingUploadState(uploadState)
+          if (uploadState === 'uploading') setRecordingMessage('Uploading recording…')
+          if (uploadState === 'uploaded') setRecordingMessage('Uploaded / Processing')
+          if (uploadState === 'error') setRecordingMessage('Upload failed. The completed recording remains in this browser session.')
+        },
+      )
+      if (!blob) {
+        setRecordingMessage('Recording stopped, but no completed audio was available to upload.')
+      }
+    } catch (error) {
+      setRecordingMessage(error instanceof Error
+        ? `${uploadAttempted ? 'Upload failed' : 'Could not stop recording'}: ${error.message}`
+        : 'Could not stop or upload recording.')
+    } finally {
+      setRecordingBusy(false)
+    }
+  }, [meeting, meetingId, recording, room.organizerId, user])
 
   const handleLeave = useCallback(() => {
     room.stopLocalMedia()
@@ -416,14 +535,19 @@ export function MeetingRoomPage() {
 
   // ── Live meeting room ──────────────────────────────────────────────────────
   const m = pageState.meeting
-  const isHost = Boolean(room.isOrganizer || (user?.id != null && m.organizer_id === user.id))
+  const isHost = Boolean(room.isOrganizer || isMeetingOrganizer(m.organizer_id, user?.id))
   const remoteIds = [...new Set([...room.participants, ...room.remoteStreams.keys(), ...room.peerStates.keys()])]
     .filter((id) => id !== room.localParticipantId)
   const totalCount = remoteIds.length + 1
   const shareLink = `${window.location.origin}/meetings/${encodeURIComponent(m.id)}`
 
   return (
-    <div className="meet-room" data-in-meeting="true">
+    <div
+      className="meet-room"
+      data-in-meeting="true"
+      data-recording-state={recording.state}
+      data-recording-duration-ms={recording.durationMs}
+    >
       {/* Top bar */}
       <header className="meet-topbar" aria-label="Meeting header">
         <div className="meet-topbar-left">
@@ -520,6 +644,64 @@ export function MeetingRoomPage() {
           {attendanceError}
         </div>
       )}
+
+      <div className="meet-muted-toast" role="status" aria-live="polite">
+        <span>
+          {recordingUploadState === 'uploading'
+            ? 'Uploading'
+            : recordingUploadState === 'uploaded'
+              ? 'Uploaded / Processing'
+              : recordingUploadState === 'error'
+                ? recordingMessage || 'Upload failed'
+                : recording.state === 'recording'
+                  ? 'Recording'
+                  : recordingMessage || (
+            recordingConsent === 'consented'
+              ? 'You have consented to recording.'
+              : recordingConsent === 'declined'
+                ? 'You have not consented to recording.'
+                : 'Recording requires your explicit consent.'
+                  )}
+          {recording.error && ` ${recording.error}`}
+        </span>
+        {recordingConsent !== 'consented' && (
+          <>
+            <button
+              className="button secondary"
+              onClick={() => void handleRecordingConsent('consented')}
+              disabled={recordingBusy || !attendanceRecord}
+            >
+              I consent to recording
+            </button>
+            <button
+              className="button minimal"
+              onClick={() => void handleRecordingConsent('declined')}
+              disabled={recordingBusy || !attendanceRecord}
+            >
+              I do not consent
+            </button>
+          </>
+        )}
+        {shouldShowRecordingControls(isHost, recordingConsent) && (
+          recording.state === 'recording' ? (
+            <button
+              className="button secondary"
+              onClick={() => void handleStopRecording()}
+              disabled={recordingBusy}
+            >
+              {recordingBusy ? 'Stopping…' : 'Stop recording'}
+            </button>
+          ) : (
+            <button
+              className="button secondary"
+              onClick={() => void handleStartRecording()}
+              disabled={recordingBusy || recording.state === 'error'}
+            >
+              {recordingBusy ? 'Starting…' : 'Start recording'}
+            </button>
+          )
+        )}
+      </div>
 
 
       {/* Video grid */}

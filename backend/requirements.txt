@@ -1,0 +1,13 @@
+# Backend runtime dependencies, pinned to the versions used by the existing backend.
+fastapi==0.141.1
+SQLAlchemy==2.0.52
+uvicorn==0.52.3
+python-multipart==0.0.32
+
+# Recording encryption dependency. Install with the backend requirements before
+# implementing the AES-GCM storage integration.
+cryptography==50.0.2
+
+# Dependencies used by the backend test suite.
+pytest==9.1.1
+httpx==0.28.1

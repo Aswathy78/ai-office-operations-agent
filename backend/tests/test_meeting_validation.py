@@ -57,10 +57,10 @@ class TestMeetingValidation(unittest.TestCase):
         self.assertEqual(data["title"], "Sprint Planning")
         self.assertEqual(data["agenda"], "Discuss sprint goals")
         self.assertEqual(data["status"], "scheduled")
+        self.assertEqual(data["organizer_id"], "test-organizer-secret")
         self.assertTrue(data["is_valid"])
         self.assertFalse(data["is_expired"])
-        # Ensure sensitive database fields like organizer_id and join_url are not leaked
-        self.assertNotIn("organizer_id", data)
+        # Keep the unrelated join URL private while exposing organizer identity for host UI.
         self.assertNotIn("join_url", data)
 
     def test_expired_meeting_returns_410(self):
@@ -105,6 +105,7 @@ class TestMeetingValidation(unittest.TestCase):
         response = self.client.get(f"/api/v1/meetings/{meeting_id}")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], meeting_id)
+        self.assertEqual(response.json()["organizer_id"], "test-organizer-secret")
 
 
 if __name__ == "__main__":

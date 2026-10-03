@@ -1,5 +1,5 @@
 import json
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
 from sqlalchemy.orm import Session
@@ -17,6 +17,10 @@ from app.meeting.schemas import (
     MeetingReportResponse,
     MeetingResponse,
     MeetingValidationResponse,
+    MeetingRecordingUploadResponse,
+    RecordingConsentRequest,
+    RecordingConsentResponse,
+    MeetingRecordingResponse,
 )
 from app.meeting.service import (
     TERMINAL_STATUSES,
@@ -32,6 +36,11 @@ from app.meeting.service import (
     is_meeting_expired,
     record_participant_join,
     record_participant_leave,
+    record_meeting_recording_consent,
+    get_meeting_recording,
+    start_meeting_recording,
+    stop_meeting_recording,
+    upload_meeting_recording,
     request_guest_join,
 )
 from app.meeting.signaling import signaling_manager
@@ -125,6 +134,7 @@ def validate_meeting(
         start_at=meeting.start_at,
         end_at=meeting.end_at,
         status=meeting.status,
+        organizer_id=meeting.organizer_id,
         is_valid=True,
         is_expired=False,
     )
@@ -235,6 +245,112 @@ def leave_meeting_attendance(
         meeting_id=meeting_id,
         attendance_id=attendance_id,
     )
+
+
+@router.post(
+    "/{meeting_id}/recording/consent",
+    response_model=RecordingConsentResponse,
+    summary="Record a participant's recording consent decision",
+)
+def recording_consent(
+    meeting_id: str,
+    consent_data: RecordingConsentRequest,
+    db: Session = Depends(get_db),
+):
+    consent = record_meeting_recording_consent(
+        db=db,
+        meeting_id=meeting_id,
+        attendance_id=consent_data.attendance_id,
+        consent_status=consent_data.consent_status,
+    )
+    return RecordingConsentResponse(
+        id=consent.id,
+        meeting_id=consent.meeting_id,
+        attendance_id=consent.attendance_id,
+        consent_status=consent.consent_status,
+        consented_at=consent.consented_at,
+        revoked_at=consent.revoked_at,
+        created_at=consent.created_at,
+    )
+
+
+def _recording_response(recording) -> MeetingRecordingResponse:
+    return MeetingRecordingResponse(
+        id=recording.id,
+        meeting_id=recording.meeting_id,
+        participant_id=recording.participant_id,
+        status=recording.status,
+        started_at=recording.started_at,
+        completed_at=recording.completed_at,
+        created_at=recording.created_at,
+        retention_expires_at=recording.retention_expires_at,
+        storage_uri=recording.storage_uri,
+        error_message=recording.error_message,
+    )
+
+
+@router.get(
+    "/{meeting_id}/recording",
+    response_model=MeetingRecordingResponse,
+    summary="Get the latest recording state",
+)
+def read_meeting_recording(
+    meeting_id: str,
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    recording = get_meeting_recording(db, meeting_id, organizer_id)
+    return _recording_response(recording)
+
+
+@router.post(
+    "/{meeting_id}/recording/start",
+    response_model=MeetingRecordingResponse,
+    summary="Start recording state after all active participants consent",
+)
+def begin_meeting_recording(
+    meeting_id: str,
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    recording = start_meeting_recording(db, meeting_id, organizer_id)
+    return _recording_response(recording)
+
+
+@router.post(
+    "/{meeting_id}/recording/stop",
+    response_model=MeetingRecordingResponse,
+    summary="Stop active recording state",
+)
+def end_meeting_recording(
+    meeting_id: str,
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    recording = stop_meeting_recording(db, meeting_id, organizer_id)
+    return _recording_response(recording)
+
+
+@router.post(
+    "/{meeting_id}/recording/upload",
+    response_model=MeetingRecordingUploadResponse,
+    summary="Persist a completed meeting recording file",
+)
+def upload_meeting_recording_file(
+    meeting_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    result = upload_meeting_recording(
+        db=db,
+        meeting_id=meeting_id,
+        organizer_id=organizer_id,
+        upload=file.file,
+        filename=file.filename,
+        content_type=file.content_type,
+    )
+    return MeetingRecordingUploadResponse(**result)
 
 
 # -- Meeting Report (organizer only) ------------------------------------------

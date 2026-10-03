@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
@@ -48,6 +49,7 @@ class MeetingValidationResponse(BaseModel):
     start_at: datetime
     end_at: datetime
     status: str
+    organizer_id: str
     is_valid: bool = True
     is_expired: bool = False
 
@@ -128,3 +130,40 @@ class MeetingReportResponse(BaseModel):
     end_at: datetime
     organizer_id: str
     attendance: list[AttendanceReportRow]
+
+
+class RecordingConsentRequest(BaseModel):
+    attendance_id: str
+    consent_status: Literal["consented", "declined"]
+
+
+class RecordingConsentResponse(BaseModel):
+    id: str
+    meeting_id: str
+    attendance_id: str
+    consent_status: str
+    consented_at: datetime | None = None
+    revoked_at: datetime | None = None
+    created_at: datetime
+
+
+class MeetingRecordingResponse(BaseModel):
+    id: str
+    meeting_id: str
+    participant_id: str | None = None
+    status: str
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime
+    retention_expires_at: datetime
+    storage_uri: str | None = None
+    error_message: str | None = None
+
+
+class MeetingRecordingUploadResponse(BaseModel):
+    recording_id: str
+    status: str
+    storage_uri: str
+    filename: str
+    content_type: str
+    size_bytes: int
