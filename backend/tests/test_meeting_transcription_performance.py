@@ -46,7 +46,8 @@ def test_large_v3_transcription_p90_is_within_ten_minutes(tmp_path):
         with av.open(str(audio_path)) as container:
             if not container.streams.audio or container.duration is None:
                 pytest.fail(f"{audio_path} must contain a measurable audio stream.")
-            duration_seconds = container.duration / av.time_base
+            audio_stream = container.streams.audio[0]
+            duration_seconds = audio_stream.duration * audio_stream.time_base
             if not 3540 <= duration_seconds <= 3660:
                 pytest.fail(f"{audio_path} is not a 60-minute audio sample.")
 
