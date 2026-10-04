@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.meeting.models import (
     MeetingRecording,
+    MeetingTranscript,
     RECORDING_STATUS_CANCELLED,
     RECORDING_STATUS_COMPLETED,
     RECORDING_STATUS_FAILED,
@@ -133,6 +134,9 @@ def enforce_recording_retention(
             if file_path is not None:
                 file_path.unlink(missing_ok=True)
 
+            db.query(MeetingTranscript).filter(
+                MeetingTranscript.recording_id == recording.id
+            ).delete(synchronize_session=False)
             db.delete(recording)
             db.commit()
             report.deleted_recording_ids.append(recording_id)

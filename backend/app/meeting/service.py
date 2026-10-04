@@ -8,6 +8,7 @@ from typing import BinaryIO
 import uuid
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.meeting.models import (
@@ -17,6 +18,7 @@ from app.meeting.models import (
     MeetingGuestRequest,
     MeetingRecording,
     MeetingRecordingConsent,
+    MeetingTranscript,
     GUEST_STATUS_PENDING,
     GUEST_STATUS_ADMITTED,
     GUEST_STATUS_REJECTED,
@@ -28,6 +30,7 @@ from app.meeting.models import (
     RECORDING_STATUS_FAILED,
     RECORDING_STATUS_CANCELLED,
     RECORDING_RETENTION_DAYS,
+    TRANSCRIPT_STATUS_PENDING,
 )
 from app.meeting.schemas import AttendanceJoinRequest, GuestJoinRequest, MeetingCreate
 from app.meeting.recording_encryption import (
@@ -794,6 +797,33 @@ def upload_meeting_recording(
             recording.status = RECORDING_STATUS_COMPLETED
             recording.completed_at = datetime.now(timezone.utc)
             recording.error_message = None
+            transcript_exists = (
+                db.query(MeetingTranscript.id)
+                .filter(MeetingTranscript.recording_id == recording.id)
+                .first()
+                is not None
+            )
+            if not transcript_exists:
+                try:
+                    with db.begin_nested():
+                        db.add(
+                            MeetingTranscript(
+                                id=str(uuid.uuid4()),
+                                recording_id=recording.id,
+                                status=TRANSCRIPT_STATUS_PENDING,
+                                language="en",
+                            )
+                        )
+                        db.flush()
+                except IntegrityError:
+                    transcript_exists = (
+                        db.query(MeetingTranscript.id)
+                        .filter(MeetingTranscript.recording_id == recording.id)
+                        .first()
+                        is not None
+                    )
+                    if not transcript_exists:
+                        raise
             try:
                 db.commit()
             except Exception as error:
@@ -1023,9 +1053,15 @@ def delete_meeting(db: Session, meeting_id: str, organizer_id: str) -> None:
         MeetingRecordingConsent.meeting_id == meeting_id
     ).delete(synchronize_session=False)
 
-    db.query(MeetingRecording).filter(
+    recording_query = db.query(MeetingRecording).filter(
         MeetingRecording.meeting_id == meeting_id
-    ).delete(synchronize_session=False)
+    )
+    recording_ids = [recording.id for recording in recording_query.all()]
+    if recording_ids:
+        db.query(MeetingTranscript).filter(
+            MeetingTranscript.recording_id.in_(recording_ids)
+        ).delete(synchronize_session=False)
+    recording_query.delete(synchronize_session=False)
 
     db.query(MeetingGuestRequest).filter(
         MeetingGuestRequest.meeting_id == meeting_id

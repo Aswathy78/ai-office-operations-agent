@@ -10,7 +10,11 @@ from app.meeting.models import (
     MeetingAttendanceLog,
     MeetingGuestRequest,
     MeetingParticipant,
+    MeetingRecording,
+    MeetingTranscript,
     GUEST_STATUS_ADMITTED,
+    RECORDING_STATUS_COMPLETED,
+    TRANSCRIPT_STATUS_COMPLETED,
 )
 from app.meeting.signaling import signaling_manager
 
@@ -30,6 +34,19 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
             self.db.query(MeetingGuestRequest).filter(MeetingGuestRequest.meeting_id == meeting_id).delete()
             self.db.query(MeetingAttendanceLog).filter(MeetingAttendanceLog.meeting_id == meeting_id).delete()
             self.db.query(MeetingParticipant).filter(MeetingParticipant.meeting_id == meeting_id).delete()
+            recording_ids = [
+                row[0]
+                for row in self.db.query(MeetingRecording.id)
+                .filter(MeetingRecording.meeting_id == meeting_id)
+                .all()
+            ]
+            if recording_ids:
+                self.db.query(MeetingTranscript).filter(
+                    MeetingTranscript.recording_id.in_(recording_ids)
+                ).delete(synchronize_session=False)
+            self.db.query(MeetingRecording).filter(
+                MeetingRecording.meeting_id == meeting_id
+            ).delete(synchronize_session=False)
             self.db.query(Meeting).filter(Meeting.id == meeting_id).delete()
         self.db.commit()
         self.db.close()
@@ -215,7 +232,20 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
             status=GUEST_STATUS_ADMITTED,
             attendance_log_id=att.id,
         )
-        self.db.add(g_req)
+        recording = MeetingRecording(
+            id=str(uuid.uuid4()),
+            meeting_id=meeting.id,
+            status=RECORDING_STATUS_COMPLETED,
+        )
+        transcript = MeetingTranscript(
+            id=str(uuid.uuid4()),
+            recording_id=recording.id,
+            status=TRANSCRIPT_STATUS_COMPLETED,
+            language="en",
+            transcript_text="Meeting transcript for deletion test",
+        )
+        recording_id = recording.id
+        self.db.add_all([g_req, recording, transcript])
         self.db.commit()
 
         meeting_id = meeting.id
@@ -227,6 +257,8 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
         self.assertEqual(self.db.query(MeetingParticipant).filter(MeetingParticipant.meeting_id == meeting_id).count(), 0)
         self.assertEqual(self.db.query(MeetingAttendanceLog).filter(MeetingAttendanceLog.meeting_id == meeting_id).count(), 0)
         self.assertEqual(self.db.query(MeetingGuestRequest).filter(MeetingGuestRequest.meeting_id == meeting_id).count(), 0)
+        self.assertEqual(self.db.query(MeetingRecording).filter(MeetingRecording.meeting_id == meeting_id).count(), 0)
+        self.assertEqual(self.db.query(MeetingTranscript).filter_by(recording_id=recording_id).count(), 0)
 
 
 if __name__ == "__main__":
