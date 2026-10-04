@@ -20,6 +20,22 @@ The application provides a centralized platform where users can interact with of
 The project follows a modular architecture so that new features can be added incrementally through Feature Requirements (FRs).
 
 ---
+## 🎙️ AI Meeting Transcription
+
+The system automatically transcribes meeting recordings after the recording is completed.
+
+### Story 2.1 – Automatic Meeting Transcription
+
+- Automatically starts transcription when a meeting recording is completed.
+- Uses Whisper `large-v3` through `faster-whisper` for English speech-to-text.
+- Generates timestamped transcript segments.
+- Tracks transcription status:
+  - Pending
+  - Processing
+  - Completed
+  - Failed
+- Prevents duplicate transcripts for the same recording.
+- Securely processes encrypted meeting recordings.
 
 # 🎯 Project Goals
 
