@@ -23,6 +23,7 @@ from app.meeting.models import (
     TRANSCRIPT_STATUS_PROCESSING,
 )
 from app.meeting.recording_encryption import encrypt_recording_file
+from app.meeting.service import get_meeting_transcript, update_meeting_transcript
 from app.meeting.transcription_worker import (
     claim_pending_transcript,
     process_claimed_transcript,
@@ -111,6 +112,86 @@ def test_transcript_is_unique_per_recording(db_session: Session, tmp_path):
     db_session.rollback()
     assert db_session.query(MeetingTranscript).filter_by(recording_id=recording.id).count() == 1
     assert db_session.get(MeetingTranscript, transcript.id) is not None
+
+
+def test_get_meeting_transcript_returns_latest_transcript(
+    db_session: Session,
+    tmp_path,
+):
+    recording, transcript = _create_completed_recording(db_session, tmp_path)
+    second_recording = MeetingRecording(
+        id=str(uuid.uuid4()),
+        meeting_id=recording.meeting_id,
+        status=RECORDING_STATUS_COMPLETED,
+        created_at=transcript.created_at + timedelta(seconds=1),
+    )
+    latest_transcript = MeetingTranscript(
+        id=str(uuid.uuid4()),
+        recording_id=second_recording.id,
+        status=TRANSCRIPT_STATUS_PENDING,
+        language="en",
+        created_at=transcript.created_at + timedelta(seconds=1),
+    )
+    db_session.add_all([second_recording, latest_transcript])
+    db_session.commit()
+
+    assert get_meeting_transcript(db_session, recording.meeting_id) == latest_transcript
+    assert get_meeting_transcript(db_session, "missing-meeting") is None
+
+
+def test_update_meeting_transcript_changes_only_segment_text(
+    db_session: Session,
+    tmp_path,
+):
+    recording, transcript = _create_completed_recording(db_session, tmp_path)
+    original_segments = [
+        {
+            "start": 0.25,
+            "end": 1.5,
+            "text": "Hello there.",
+            "speaker": "Alice",
+            "flagged_for_correction": True,
+        },
+        {
+            "start": 1.5,
+            "end": 2.75,
+            "text": "How are you?",
+            "speaker": "Bob",
+            "flagged_for_correction": False,
+        },
+    ]
+    transcript.segments = original_segments
+    db_session.commit()
+
+    updated = update_meeting_transcript(
+        db_session,
+        recording.meeting_id,
+        [{"text": "Hi."}, {"text": "Doing well."}],
+        "test-editor",
+    )
+
+    assert updated is not None
+    assert updated.segments == [
+        {
+            "start": 0.25,
+            "end": 1.5,
+            "text": "Hi.",
+            "speaker": "Alice",
+            "flagged_for_correction": True,
+        },
+        {
+            "start": 1.5,
+            "end": 2.75,
+            "text": "Doing well.",
+            "speaker": "Bob",
+            "flagged_for_correction": False,
+        },
+    ]
+    assert updated.transcript_text == "Hi. Doing well."
+    assert (
+        update_meeting_transcript(db_session, "missing-meeting", [], "test-editor")
+        is None
+    )
 
 
 def test_worker_claims_pending_transcript_only_once(db_session: Session, tmp_path):

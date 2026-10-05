@@ -1,6 +1,17 @@
 from datetime import datetime, timezone
 from datetime import timedelta
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, JSON, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Allowed values for MeetingGuestRequest.status
@@ -279,3 +290,38 @@ class MeetingTranscript(Base):
         nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MeetingTranscriptCorrection(Base):
+    __tablename__ = "meeting_transcript_corrections"
+    __table_args__ = (
+        Index(
+            "ix_meeting_transcript_corrections_transcript_created_at",
+            "transcript_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcript_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    original_text: Mapped[str] = mapped_column(Text, nullable=False)
+    corrected_text: Mapped[str] = mapped_column(Text, nullable=False)
+    original_speaker: Mapped[str] = mapped_column(String(255), nullable=False)
+    corrected_speaker: Mapped[str] = mapped_column(String(255), nullable=False)
+    editor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Literal
-from pydantic import AliasChoices, BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 
 class ParticipantCreate(BaseModel):
@@ -144,6 +144,53 @@ class RecordingConsentResponse(BaseModel):
     consent_status: str
     consented_at: datetime | None = None
     revoked_at: datetime | None = None
+    created_at: datetime
+
+class TranscriptSegment(BaseModel):
+    start: float
+    end: float
+    text: str
+    speaker: str
+    flagged_for_correction: bool = False
+
+
+class MeetingTranscriptResponse(BaseModel):
+    id: str
+    meeting_id: str
+    recording_id: str
+    status: str
+    language: str
+    transcript_text: str | None = None
+    segments: list[TranscriptSegment] = Field(default_factory=list)
+    error_message: str | None = None
+    created_at: datetime
+    processing_started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class TranscriptSegmentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(..., min_length=1)
+    speaker: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+class MeetingTranscriptUpdateRequest(BaseModel):
+    segments: list[TranscriptSegmentUpdate]
+
+
+class TranscriptCorrectionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    meeting_id: str
+    transcript_id: str
+    segment_index: int
+    original_text: str
+    corrected_text: str
+    original_speaker: str
+    corrected_speaker: str
+    editor_id: str
     created_at: datetime
 
 

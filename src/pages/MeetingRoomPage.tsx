@@ -22,6 +22,7 @@ import {
   Mic,
   MicOff,
   PhoneOff,
+  FileText,
   Users,
   Video,
   VolumeX,
@@ -44,6 +45,7 @@ import {
 } from '../api/meetings'
 import { LocalMediaPreview } from '../components/meetings/LocalMediaPreview'
 import { OrganizerGuestLobby } from '../components/meetings/OrganizerGuestLobby'
+import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { useAuth } from '../contexts/AuthContext'
 import { useMeetingRecording } from '../hooks/useMeetingRecording'
 import {
@@ -179,6 +181,7 @@ export function MeetingRoomPage() {
   const [attendanceError, setAttendanceError] = useState('')
   const [joinedMeeting, setJoinedMeeting] = useState(false)
   const [showLobby, setShowLobby] = useState(false)
+  const [showTranscript, setShowTranscript] = useState(false)
   const [showEndConfirm, setShowEndConfirm] = useState(false)
   const [showAskUnmutePrompt, setShowAskUnmutePrompt] = useState(false)
   const [endingMeeting, setEndingMeeting] = useState(false)
@@ -815,6 +818,14 @@ export function MeetingRoomPage() {
         </aside>
       )}
 
+      <TranscriptPanel
+        meetingId={meetingId}
+        organizerId={m.organizer_id}
+        isOrganizer={isHost}
+        isOpen={showTranscript}
+        onClose={() => setShowTranscript(false)}
+      />
+
       {showSharePanel && (
         <aside className="meet-side-panel" aria-label="Share meeting">
           <div className="meet-side-panel-header">
@@ -870,7 +881,7 @@ export function MeetingRoomPage() {
           {/* Participants (host only gets lobby) */}
           <button
             className={`meet-ctrl-btn${showLobby ? ' meet-ctrl-btn--active' : ''}`}
-            onClick={() => { setShowLobby((v) => !v); setShowSharePanel(false) }}
+            onClick={() => { setShowLobby((v) => !v); setShowSharePanel(false); setShowTranscript(false) }}
             aria-label="Show participants"
             title="Participants"
           >
@@ -881,12 +892,26 @@ export function MeetingRoomPage() {
           {/* Share */}
           <button
             className={`meet-ctrl-btn${showSharePanel ? ' meet-ctrl-btn--active' : ''}`}
-            onClick={() => { setShowSharePanel((v) => !v); setShowLobby(false) }}
+            onClick={() => { setShowSharePanel((v) => !v); setShowLobby(false); setShowTranscript(false) }}
             aria-label="Share meeting link"
             title="Share"
           >
             <LinkIcon size={20} />
             <span>Share</span>
+          </button>
+
+          <button
+            className={`meet-ctrl-btn${showTranscript ? ' meet-ctrl-btn--active' : ''}`}
+            onClick={() => {
+              setShowTranscript((current) => !current)
+              setShowLobby(false)
+              setShowSharePanel(false)
+            }}
+            aria-label="Show transcript"
+            title="Transcript"
+          >
+            <FileText size={20} />
+            <span>Transcript</span>
           </button>
 
           {/* End meeting for everyone — host only */}
