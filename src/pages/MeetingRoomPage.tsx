@@ -33,9 +33,11 @@ import {
   joinMeetingAttendance,
   leaveMeetingAttendance,
   recordMeetingRecordingConsent,
+  registerParticipantTracks,
   startMeetingRecording,
   stopMeetingRecording,
   uploadMeetingRecording,
+  uploadParticipantTrack,
   MeetingApiError,
   type AttendanceRecord,
   type RecordingConsentStatus,
@@ -392,6 +394,18 @@ export function MeetingRoomPage() {
           if (uploadState === 'uploading') uploadAttempted = true
           setRecordingUploadState(uploadState)
           setRecordingMessage(getRecordingUploadMessage(uploadState))
+        },
+        {
+          getTracks: recording.stopRecordingAndGetTracks,
+          registerTracks: (tracks) => registerParticipantTracks(meetingId, organizerId, tracks),
+          uploadTrack: (recordingId, trackBlob) =>
+            uploadParticipantTrack(meetingId, recordingId, organizerId, trackBlob),
+          onTrackError: (err, track) => {
+            console.warn(
+              `Participant track upload failed for ${track.participantName || track.connectionId}:`,
+              err,
+            )
+          },
         },
       )
       if (!blob) {

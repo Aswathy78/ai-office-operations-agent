@@ -168,8 +168,8 @@ def test_worker_stores_english_timestamped_segments_and_cleans_plaintext(
     assert completed.language == "en"
     assert completed.transcript_text == "Hello there. How are you?"
     assert completed.segments == [
-        {"start": 0.25, "end": 1.5, "text": "Hello there."},
-        {"start": 1.5, "end": 2.75, "text": "How are you?"},
+        {"start": 0.25, "end": 1.5, "text": "Hello there.", "speaker": "Unknown Speaker", "flagged_for_correction": True},
+        {"start": 1.5, "end": 2.75, "text": "How are you?", "speaker": "Unknown Speaker", "flagged_for_correction": True},
     ]
     assert model.language == "en"
     assert not Path(model.input_path).exists()

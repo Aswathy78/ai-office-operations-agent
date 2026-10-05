@@ -342,8 +342,8 @@ def test_upload_to_transcription_happy_path(
     assert completed_transcript.language == "en"
     assert completed_transcript.transcript_text == "Welcome everyone. Let's begin."
     assert completed_transcript.segments == [
-        {"start": 0.4, "end": 1.8, "text": "Welcome everyone."},
-        {"start": 2.1, "end": 3.6, "text": "Let's begin."},
+        {"start": 0.4, "end": 1.8, "text": "Welcome everyone.", "speaker": "Unknown Speaker", "flagged_for_correction": True},
+        {"start": 2.1, "end": 3.6, "text": "Let's begin.", "speaker": "Unknown Speaker", "flagged_for_correction": True},
     ]
     assert model.language == "en"
     assert model.input_path is not None

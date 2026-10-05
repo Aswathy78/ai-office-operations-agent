@@ -18,6 +18,8 @@ from app.meeting.schemas import (
     MeetingResponse,
     MeetingValidationResponse,
     MeetingRecordingUploadResponse,
+    ParticipantTrackRegisterResponse,
+    ParticipantTracksRegisterRequest,
     RecordingConsentRequest,
     RecordingConsentResponse,
     MeetingRecordingResponse,
@@ -41,6 +43,8 @@ from app.meeting.service import (
     start_meeting_recording,
     stop_meeting_recording,
     upload_meeting_recording,
+    register_participant_track_recordings,
+    upload_participant_track_recording,
     request_guest_join,
 )
 from app.meeting.signaling import signaling_manager
@@ -345,6 +349,79 @@ def upload_meeting_recording_file(
     result = upload_meeting_recording(
         db=db,
         meeting_id=meeting_id,
+        organizer_id=organizer_id,
+        upload=file.file,
+        filename=file.filename,
+        content_type=file.content_type,
+    )
+    return MeetingRecordingUploadResponse(**result)
+
+
+@router.post(
+    "/{meeting_id}/recording/tracks",
+    response_model=list[ParticipantTrackRegisterResponse],
+    status_code=200,
+    summary="Register participant-track recording rows (FR-8)",
+)
+def register_participant_tracks(
+    meeting_id: str,
+    body: ParticipantTracksRegisterRequest,
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    """Creates one MeetingRecording row (status=processing) per submitted track.
+
+    The frontend calls this after stopping the main recording and before
+    uploading individual participant track blobs.  No MeetingTranscript rows
+    are created here; they are created by the per-track upload endpoint.
+    """
+    rows = register_participant_track_recordings(
+        db=db,
+        meeting_id=meeting_id,
+        organizer_id=organizer_id,
+        tracks=[
+            {
+                "connection_id": track.connection_id,
+                "participant_name": track.participant_name,
+                "attendance_id": track.attendance_id,
+            }
+            for track in body.tracks
+        ],
+    )
+    return [
+        ParticipantTrackRegisterResponse(
+            recording_id=row.id,
+            connection_id=row.connection_id,
+            participant_name=row.participant_name,
+            status=row.status,
+            meeting_id=row.meeting_id,
+        )
+        for row in rows
+    ]
+
+
+@router.post(
+    "/{meeting_id}/recording/{recording_id}/upload",
+    response_model=MeetingRecordingUploadResponse,
+    summary="Upload a participant-specific audio track by explicit recording ID (FR-8)",
+)
+def upload_participant_track_file(
+    meeting_id: str,
+    recording_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+):
+    """Upload and encrypt a single participant audio track.
+
+    The recording_id must have been previously registered via
+    POST /recording/tracks and must belong to this meeting.
+    A MeetingTranscript row is created automatically upon success.
+    """
+    result = upload_participant_track_recording(
+        db=db,
+        meeting_id=meeting_id,
+        recording_id=recording_id,
         organizer_id=organizer_id,
         upload=file.file,
         filename=file.filename,
