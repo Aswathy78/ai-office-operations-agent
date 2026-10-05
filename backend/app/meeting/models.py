@@ -203,6 +203,9 @@ class MeetingRecording(Base):
     )
     storage_uri: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # FR-8: participant-track identity (NULL for the full-meeting organizer recording)
+    participant_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    connection_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class MeetingRecordingConsent(Base):

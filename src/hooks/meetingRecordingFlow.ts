@@ -1,9 +1,12 @@
 import type {
   MeetingRecordingRecord,
   MeetingRecordingUploadResponse,
+  ParticipantTrackRegistration,
+  ParticipantTrackRegistrationResponse,
   RecordingConsentRecord,
   RecordingConsentStatus,
 } from '../api/meetings'
+import type { RecordedParticipantTrack } from './meetingRecordingSession'
 
 export type RecordingUploadState = 'uploading' | 'completed' | 'processing' | 'failed' | 'error'
 
@@ -96,13 +99,115 @@ export async function startRecordingAfterConsent(
   }
 }
 
+export interface ProcessParticipantTracksOptions {
+  tracks: readonly RecordedParticipantTrack[]
+  registerTracks: (
+    registrations: ParticipantTrackRegistration[],
+  ) => Promise<ParticipantTrackRegistrationResponse[]>
+  uploadTrack: (
+    recordingId: string,
+    blob: Blob,
+  ) => Promise<MeetingRecordingUploadResponse>
+  onTrackError?: (error: Error, track: RecordedParticipantTrack) => void
+}
+
+export interface ParticipantTrackUploadResult {
+  successful: number
+  failed: number
+  errors: { connectionId: string; error: Error }[]
+}
+
+export async function uploadParticipantTracks(
+  options: ProcessParticipantTracksOptions,
+): Promise<ParticipantTrackUploadResult> {
+  const { tracks, registerTracks, uploadTrack, onTrackError } = options
+
+  const result: ParticipantTrackUploadResult = {
+    successful: 0,
+    failed: 0,
+    errors: [],
+  }
+
+  if (!tracks || tracks.length === 0) {
+    return result
+  }
+
+  const registrationItems: ParticipantTrackRegistration[] = tracks.map((t) => ({
+    connection_id: t.connectionId || t.connection_id || '',
+    participant_name: t.participantName || t.participant_name || 'Participant',
+    attendance_id: t.attendanceId || t.attendance_id || null,
+  }))
+
+  let registeredResponses: ParticipantTrackRegistrationResponse[] = []
+  try {
+    registeredResponses = await registerTracks(registrationItems)
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error))
+    tracks.forEach((t) => {
+      const connId = t.connectionId || t.connection_id || ''
+      result.failed += 1
+      result.errors.push({ connectionId: connId, error: err })
+      onTrackError?.(err, t)
+    })
+    return result
+  }
+
+  for (const resp of registeredResponses) {
+    const matchedTrack = tracks.find(
+      (t) => (t.connectionId || t.connection_id) === resp.connection_id,
+    )
+
+    if (!matchedTrack || !matchedTrack.blob) {
+      continue
+    }
+
+    try {
+      await uploadTrack(resp.recording_id, matchedTrack.blob)
+      result.successful += 1
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error))
+      result.failed += 1
+      result.errors.push({
+        connectionId: resp.connection_id,
+        error: err,
+      })
+      onTrackError?.(err, matchedTrack)
+    }
+  }
+
+  return result
+}
+
 export async function stopRecordingAndUpload(
-  stopBrowserRecorder: () => Promise<Blob | null>,
+  stopBrowserRecorder:
+    | (() => Promise<Blob | null>)
+    | (() => Promise<{ blob: Blob | null; tracks: readonly RecordedParticipantTrack[] }>),
   stopBackend: () => Promise<MeetingRecordingRecord>,
   uploadBlob: (blob: Blob) => Promise<MeetingRecordingUploadResponse>,
   onUploadState: (state: RecordingUploadState) => void,
+  participantTrackOptions?: {
+    getTracks?: () => Promise<readonly RecordedParticipantTrack[]> | readonly RecordedParticipantTrack[]
+    registerTracks?: (
+      registrations: ParticipantTrackRegistration[],
+    ) => Promise<ParticipantTrackRegistrationResponse[]>
+    uploadTrack?: (
+      recordingId: string,
+      blob: Blob,
+    ) => Promise<MeetingRecordingUploadResponse>
+    onTrackError?: (error: Error, track: RecordedParticipantTrack) => void
+  },
 ): Promise<Blob | null> {
-  const blob = await stopBrowserRecorder()
+  const result = await stopBrowserRecorder()
+  let blob: Blob | null = null
+  let tracks: readonly RecordedParticipantTrack[] = []
+
+  if (result && typeof result === 'object' && 'blob' in result) {
+    blob = result.blob
+    tracks = result.tracks ?? []
+  } else {
+    blob = result as Blob | null
+  }
+
   await stopBackend()
   if (!blob || blob.size === 0) return null
 
@@ -110,9 +215,25 @@ export async function stopRecordingAndUpload(
   try {
     const response = await uploadBlob(blob)
     onUploadState(getRecordingUploadState(response.status))
-    return blob
   } catch (error) {
     onUploadState('error')
     throw error
   }
+
+  if (participantTrackOptions && participantTrackOptions.registerTracks && participantTrackOptions.uploadTrack) {
+    const resolvedTracks = participantTrackOptions.getTracks
+      ? await participantTrackOptions.getTracks()
+      : tracks
+
+    if (resolvedTracks && resolvedTracks.length > 0) {
+      await uploadParticipantTracks({
+        tracks: resolvedTracks,
+        registerTracks: participantTrackOptions.registerTracks,
+        uploadTrack: participantTrackOptions.uploadTrack,
+        onTrackError: participantTrackOptions.onTrackError,
+      })
+    }
+  }
+
+  return blob
 }

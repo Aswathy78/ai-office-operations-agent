@@ -215,6 +215,68 @@ export function uploadMeetingRecording(
   ).then((response) => readResponse<MeetingRecordingUploadResponse>(response))
 }
 
+export interface ParticipantTrackRegistration {
+  connection_id: string
+  participant_name: string
+  attendance_id?: string | null
+}
+
+export interface ParticipantTracksRegisterRequest {
+  tracks: ParticipantTrackRegistration[]
+}
+
+export interface ParticipantTrackRegistrationResponse {
+  recording_id: string
+  connection_id: string
+  participant_name: string
+  status: string
+  meeting_id: string
+}
+
+export function registerParticipantTracks(
+  meetingId: string,
+  organizerId: string,
+  tracks: ParticipantTrackRegistration[],
+): Promise<ParticipantTrackRegistrationResponse[]> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/tracks?${query}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracks }),
+    },
+  ).then((response) => readResponse<ParticipantTrackRegistrationResponse[]>(response))
+}
+
+export function uploadParticipantTrack(
+  meetingId: string,
+  recordingId: string,
+  organizerId: string,
+  recording: Blob,
+): Promise<MeetingRecordingUploadResponse> {
+  const mimeType = recording.type.split(';', 1)[0].trim().toLowerCase()
+  const extensionByMimeType: Record<string, string> = {
+    'audio/webm': 'webm',
+    'video/webm': 'webm',
+    'audio/ogg': 'ogg',
+    'audio/mp4': 'm4a',
+    'audio/mpeg': 'mp3',
+    'audio/wav': 'wav',
+    'audio/x-wav': 'wav',
+  }
+  const extension = extensionByMimeType[mimeType] ?? 'webm'
+
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  const formData = new FormData()
+  formData.append('file', recording, `participant_track.${extension}`)
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/${encodeURIComponent(recordingId)}/upload?${query}`,
+    { method: 'POST', body: formData },
+  ).then((response) => readResponse<MeetingRecordingUploadResponse>(response))
+}
+
+
 export function joinMeetingAttendance(
   meetingId: string,
   participant: AttendanceJoinRequest,

@@ -158,6 +158,9 @@ class MeetingRecordingResponse(BaseModel):
     retention_expires_at: datetime
     storage_uri: str | None = None
     error_message: str | None = None
+    # FR-8 participant-track fields
+    participant_name: str | None = None
+    connection_id: str | None = None
 
 
 class MeetingRecordingUploadResponse(BaseModel):
@@ -167,3 +170,30 @@ class MeetingRecordingUploadResponse(BaseModel):
     filename: str
     content_type: str
     size_bytes: int
+
+
+# -- FR-8 Participant Track Registration ---------------------------------------
+
+
+class ParticipantTrackItem(BaseModel):
+    """Describes a single participant audio track produced by Stage 1 recording."""
+
+    connection_id: str = Field(..., min_length=1, max_length=255)
+    participant_name: str = Field(..., min_length=1, max_length=255)
+    attendance_id: str | None = None
+
+
+class ParticipantTracksRegisterRequest(BaseModel):
+    """Registers multiple participant-track recording rows for a meeting."""
+
+    tracks: list[ParticipantTrackItem] = Field(..., min_length=1)
+
+
+class ParticipantTrackRegisterResponse(BaseModel):
+    """Returned per registered participant track."""
+
+    recording_id: str
+    connection_id: str
+    participant_name: str
+    status: str
+    meeting_id: str
