@@ -236,3 +236,47 @@ export interface MeetingReport {
   organizer_id: string
   attendance: AttendanceReportRow[]
 }
+
+export interface TranscriptSegment {
+  start: number
+  end: number
+  text: string
+  speaker: string
+  flagged_for_correction: boolean
+}
+
+export interface MeetingTranscript {
+  id: string
+  meeting_id: string
+  recording_id: string
+  status: string
+  language: string
+  transcript_text: string | null
+  segments: TranscriptSegment[]
+  error_message: string | null
+  created_at: string
+  processing_started_at: string | null
+  completed_at: string | null
+}
+
+export interface TranscriptSegmentUpdate {
+  text: string
+  speaker?: string
+}
+
+export interface MeetingTranscriptUpdateRequest {
+  segments: TranscriptSegmentUpdate[]
+}
+
+export interface TranscriptCorrection {
+  id: string
+  meeting_id: string
+  transcript_id: string
+  segment_index: number
+  original_text: string
+  corrected_text: string
+  original_speaker: string
+  corrected_speaker: string
+  editor_id: string
+  created_at: string
+}

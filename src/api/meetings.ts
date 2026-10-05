@@ -5,6 +5,10 @@ import type {
   MeetingDetails,
   MeetingListRecord,
   MeetingReport,
+  MeetingTranscript,
+  MeetingTranscriptUpdateRequest,
+  TranscriptCorrection,
+  TranscriptSegmentUpdate,
 } from '../types/meeting'
 
 const API_BASE_URL = 'http://127.0.0.1:9000'
@@ -77,6 +81,48 @@ export function getMeetingReport(meetingId: string, organizerId: string): Promis
   const query = new URLSearchParams({ organizer_id: organizerId })
   return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/report?${query}`)
     .then((response) => readResponse<MeetingReport>(response))
+}
+
+export function getMeetingTranscript(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingTranscript> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
+  ).then((response) => readResponse<MeetingTranscript>(response))
+}
+
+export function updateMeetingTranscript(
+  meetingId: string,
+  organizerId: string,
+  segments: TranscriptSegmentUpdate[],
+): Promise<MeetingTranscript> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  const body: MeetingTranscriptUpdateRequest = {
+    segments: segments.map(({ text, speaker }) => ({
+      text,
+      ...(speaker === undefined ? {} : { speaker }),
+    })),
+  }
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  ).then((response) => readResponse<MeetingTranscript>(response))
+}
+
+export function getMeetingTranscriptCorrections(
+  meetingId: string,
+  organizerId: string,
+): Promise<TranscriptCorrection[]> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript/corrections?${query}`,
+  ).then((response) => readResponse<TranscriptCorrection[]>(response))
 }
 
 export function meetingWebSocketUrl(meetingId: string, userId?: string | null): string {

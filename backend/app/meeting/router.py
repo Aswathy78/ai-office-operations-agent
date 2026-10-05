@@ -5,7 +5,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.meeting.models import MeetingAttendanceLog
+from app.meeting.models import Meeting,MeetingAttendanceLog
 from app.meeting.schemas import (
     AttendanceJoinRequest,
     AttendanceReportRow,
@@ -23,6 +23,10 @@ from app.meeting.schemas import (
     RecordingConsentRequest,
     RecordingConsentResponse,
     MeetingRecordingResponse,
+    MeetingTranscriptResponse,
+    MeetingTranscriptUpdateRequest,
+    TranscriptSegment,
+    TranscriptCorrectionResponse,
 )
 from app.meeting.service import (
     TERMINAL_STATUSES,
@@ -46,6 +50,9 @@ from app.meeting.service import (
     register_participant_track_recordings,
     upload_participant_track_recording,
     request_guest_join,
+    get_meeting_transcript,
+    update_meeting_transcript,
+    get_meeting_transcript_corrections,
 )
 from app.meeting.signaling import signaling_manager
 
@@ -1032,3 +1039,120 @@ async def lobby_websocket(
         pass
     finally:
         signaling_manager.disconnect(lobby_room_id, connection_id)
+@router.get(
+    "/{meeting_id}/transcript",
+    response_model=MeetingTranscriptResponse,
+)
+def get_transcript(
+    meeting_id: str,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(status_code=403, detail="Organizer access required")
+
+    transcript = get_meeting_transcript(db, meeting_id)
+
+    if transcript is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcript not found",
+        )
+
+    return MeetingTranscriptResponse(
+        id=transcript.id,
+        meeting_id=meeting_id,
+        recording_id=transcript.recording_id,
+        status=transcript.status,
+        language=transcript.language,
+        transcript_text=transcript.transcript_text,
+        segments=[
+            TranscriptSegment(**segment)
+            for segment in (transcript.segments or [])
+        ],
+        error_message=transcript.error_message,
+        created_at=transcript.created_at,
+        processing_started_at=transcript.processing_started_at,
+        completed_at=transcript.completed_at,
+    )
+@router.patch(
+    "/{meeting_id}/transcript",
+    response_model=MeetingTranscriptResponse,
+)
+def update_transcript(
+    meeting_id: str,
+    request: MeetingTranscriptUpdateRequest,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(status_code=403, detail="Organizer access required")
+
+    try:
+        transcript = update_meeting_transcript(
+            db,
+            meeting_id,
+            segments=[
+                segment.model_dump(exclude_unset=True)
+                for segment in request.segments
+            ],
+            editor_id=organizer_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if transcript is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Transcript not found",
+        )
+
+    return MeetingTranscriptResponse(
+        id=transcript.id,
+        meeting_id=meeting_id,
+        recording_id=transcript.recording_id,
+        status=transcript.status,
+        language=transcript.language,
+        transcript_text=transcript.transcript_text,
+        segments=[
+            TranscriptSegment(**segment)
+            for segment in (transcript.segments or [])
+        ],
+        error_message=transcript.error_message,
+        created_at=transcript.created_at,
+        processing_started_at=transcript.processing_started_at,
+        completed_at=transcript.completed_at,
+    )
+@router.get(
+    "/{meeting_id}/transcript/corrections",
+    response_model=list[TranscriptCorrectionResponse],
+)
+def get_transcript_corrections(
+    meeting_id: str,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
+
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(status_code=403, detail="Organizer access required")
+
+    corrections = get_meeting_transcript_corrections(
+        db,
+        meeting_id,
+    )
+
+    return corrections

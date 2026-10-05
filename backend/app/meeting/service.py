@@ -19,6 +19,7 @@ from app.meeting.models import (
     MeetingRecording,
     MeetingRecordingConsent,
     MeetingTranscript,
+    MeetingTranscriptCorrection,
     GUEST_STATUS_PENDING,
     GUEST_STATUS_ADMITTED,
     GUEST_STATUS_REJECTED,
@@ -1300,6 +1301,9 @@ def delete_meeting(db: Session, meeting_id: str, organizer_id: str) -> None:
     db.query(MeetingRecordingConsent).filter(
         MeetingRecordingConsent.meeting_id == meeting_id
     ).delete(synchronize_session=False)
+    db.query(MeetingTranscriptCorrection).filter(
+        MeetingTranscriptCorrection.meeting_id == meeting_id
+    ).delete(synchronize_session=False)
 
     recording_query = db.query(MeetingRecording).filter(
         MeetingRecording.meeting_id == meeting_id
@@ -1325,3 +1329,99 @@ def delete_meeting(db: Session, meeting_id: str, organizer_id: str) -> None:
 
     db.delete(meeting)
     db.commit()
+
+
+def get_meeting_transcript(
+    db: Session,
+    meeting_id: str,
+) -> MeetingTranscript | None:
+    return (
+        db.query(MeetingTranscript)
+        .join(
+            MeetingRecording,
+            MeetingTranscript.recording_id == MeetingRecording.id,
+        )
+        .filter(MeetingRecording.meeting_id == meeting_id)
+        .filter(MeetingTranscript.status == "completed")
+        .order_by(MeetingTranscript.created_at.desc())
+        .first()
+    )
+def update_meeting_transcript(
+    db: Session,
+    meeting_id: str,
+    segments: list[dict[str, object]],
+    editor_id: str,
+) -> MeetingTranscript | None:
+    transcript = get_meeting_transcript(db, meeting_id)
+
+    if transcript is None:
+        return None
+
+    existing_segments = transcript.segments or []
+    if len(segments) != len(existing_segments):
+        raise ValueError(
+            "Segment count must match the existing transcript"
+        )
+
+    updated_segments: list[dict[str, object]] = []
+    corrections: list[MeetingTranscriptCorrection] = []
+    for index, (existing_segment, updated_segment) in enumerate(
+        zip(existing_segments, segments)
+    ):
+        original_text = str(existing_segment.get("text", ""))
+        corrected_text = str(updated_segment.get("text", original_text))
+        original_speaker = str(existing_segment.get("speaker", ""))
+        requested_speaker = updated_segment.get("speaker", original_speaker)
+        corrected_speaker = (
+            original_speaker if requested_speaker is None else str(requested_speaker)
+        )
+
+        updated_segments.append(
+            {
+                **existing_segment,
+                "text": corrected_text,
+                "speaker": corrected_speaker,
+            }
+        )
+
+        if original_text != corrected_text or original_speaker != corrected_speaker:
+            corrections.append(
+                MeetingTranscriptCorrection(
+                    id=str(uuid.uuid4()),
+                    meeting_id=meeting_id,
+                    transcript_id=transcript.id,
+                    segment_index=index,
+                    original_text=original_text,
+                    corrected_text=corrected_text,
+                    original_speaker=original_speaker,
+                    corrected_speaker=corrected_speaker,
+                    editor_id=editor_id,
+                )
+            )
+
+    transcript.segments = updated_segments
+    transcript.transcript_text = " ".join(
+        text
+        for segment in updated_segments
+        if (text := str(segment.get("text", "")).strip())
+    )
+
+    db.add_all(corrections)
+    db.commit()
+    db.refresh(transcript)
+    return transcript
+
+
+def get_meeting_transcript_corrections(
+    db: Session,
+    meeting_id: str,
+) -> list[MeetingTranscriptCorrection]:
+    return (
+        db.query(MeetingTranscriptCorrection)
+        .filter(MeetingTranscriptCorrection.meeting_id == meeting_id)
+        .order_by(
+            MeetingTranscriptCorrection.created_at,
+            MeetingTranscriptCorrection.id,
+        )
+        .all()
+    )

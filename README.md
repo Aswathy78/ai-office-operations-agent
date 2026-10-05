@@ -713,4 +713,325 @@ Pytest
 ```
 
 
+# 🔎 Searchable & Editable Transcript — Story 2.3 / FR-9
+
+Story 2.3 extends the speaker-labelled transcript with searchable and editable transcript functionality.
+
+The completed transcript can be viewed from the meeting room by the meeting organizer.
+
+## Transcript Features
+
+The transcript interface displays:
+
+* Speaker name
+* Timestamp
+* Transcript text
+* Correction flag
+* Search results
+* Editable transcript segments
+
+Example transcript segment:
+
+```json
+{
+  "start": 0.0,
+  "end": 4.0,
+  "text": "Hello everyone.",
+  "speaker": "Rahul",
+  "flagged_for_correction": false
+}
+```
+
+## 🔍 Transcript Search
+
+Organizers can search the completed transcript using keywords.
+
+The search operates across transcript segments and returns matching segments while preserving their timestamps and speaker information.
+
+Example:
+
+```text
+Search: joining
+
+Result:
+
+Rahul
+04:00 – 04:29
+Thank you for joining the meeting.
+```
+
+This allows users to quickly locate specific discussions without manually reading the complete transcript.
+
+## ✏️ Transcript Editing
+
+Meeting organizers can correct transcript segments directly from the transcript panel.
+
+Both of the following can be edited:
+
+* Transcript text
+* Speaker name
+
+The original timestamp and other segment metadata are preserved during editing.
+
+Only authorized meeting organizers can modify the transcript.
+
+## 📝 Transcript Correction Audit History
+
+Every transcript modification is recorded in a dedicated correction history table.
+
+The system stores:
+
+* Meeting ID
+* Transcript ID
+* Segment index
+* Original transcript text
+* Corrected transcript text
+* Original speaker
+* Corrected speaker
+* Editor ID
+* Correction timestamp
+
+Example correction record:
+
+```text
+Segment: 8
+
+Original text:
+Thank you.
+
+Corrected text:
+Thank you for joining the meeting.
+
+Original speaker:
+Unknown Speaker
+
+Corrected speaker:
+Rahul
+```
+
+Multiple corrections to the same transcript segment are preserved as separate audit records.
+
+This provides traceability for transcript changes and supports future AI evaluation of human corrections.
+
+## 🗄️ Transcript Correction Storage
+
+A new database model was introduced:
+
+```text
+MeetingTranscriptCorrection
+```
+
+The correction records are associated with both the meeting and the corresponding transcript.
+
+The database migration is managed using Alembic:
+
+```text
+backend/migrations/versions/
+20261005_01_add_meeting_transcript_corrections.py
+```
+
+The migration creates:
+
+```text
+meeting_transcript_corrections
+```
+
+with indexes for meeting and transcript correction history.
+
+## 🔐 Organizer Authorization
+
+Transcript operations require organizer authorization.
+
+Organizer authorization is checked for:
+
+```text
+GET  /api/v1/meetings/{meeting_id}/transcript
+PATCH /api/v1/meetings/{meeting_id}/transcript
+GET  /api/v1/meetings/{meeting_id}/transcript/corrections
+```
+
+Unauthorized users cannot view or modify protected transcript information.
+
+## 🔗 Story 2.3 API
+
+### Get completed transcript
+
+```http
+GET /api/v1/meetings/{meeting_id}/transcript
+```
+
+Returns the completed transcript with:
+
+* Transcript metadata
+* Timestamped segments
+* Speaker information
+* Correction flags
+
+### Update transcript
+
+```http
+PATCH /api/v1/meetings/{meeting_id}/transcript
+```
+
+Allows the organizer to update transcript text and speaker names.
+
+Example request:
+
+```json
+{
+  "segments": [
+    {
+      "text": "Thank you for joining the meeting.",
+      "speaker": "Rahul"
+    }
+  ]
+}
+```
+
+The segment count must match the existing transcript to prevent accidental structural changes.
+
+### Get correction history
+
+```http
+GET /api/v1/meetings/{meeting_id}/transcript/corrections
+```
+
+Returns the audit history of transcript corrections for the meeting.
+
+## 🧩 Frontend Implementation
+
+The searchable and editable transcript UI is implemented in:
+
+```text
+src/components/meetings/TranscriptPanel.tsx
+```
+
+The transcript panel is integrated into:
+
+```text
+src/pages/MeetingRoomPage.tsx
+```
+
+The frontend API integration is implemented in:
+
+```text
+src/api/meetings.ts
+```
+
+The transcript supports:
+
+* Loading completed transcripts
+* Keyword search
+* Segment editing
+* Speaker editing
+* Save/update operations
+* Correction history display
+* Loading and error states
+
+## 🧪 Story 2.3 Testing
+
+Backend transcript API tests cover:
+
+* Completed transcript retrieval
+* Organizer authorization
+* Transcript updates
+* Speaker-name corrections
+* Text corrections
+* Correction history
+* Invalid transcript updates
+* Missing transcript handling
+
+Backend focused transcript API tests:
+
+```text
+7 passed
+```
+
+Frontend transcript tests cover:
+
+* Transcript rendering
+* Keyword search
+* Timestamp display
+* Speaker display
+* Text editing
+* Speaker editing
+* Save/update flow
+* Correction history
+* Error handling
+
+Frontend transcript tests:
+
+```text
+9 passed
+```
+
+The related frontend API tests also passed:
+
+```text
+3 passed
+```
+
+Combined focused frontend validation:
+
+```text
+12 passed
+```
+
+## 🌐 Browser Validation
+
+The complete Story 2.3 flow was validated through the actual meeting browser flow.
+
+Validation included:
+
+```text
+Meeting
+   ↓
+Recording
+   ↓
+Recording Upload
+   ↓
+Whisper Transcription
+   ↓
+Completed Transcript
+   ↓
+Transcript Display
+   ↓
+Keyword Search
+   ↓
+Edit Transcript Text
+   ↓
+Edit Speaker Name
+   ↓
+Save Correction
+   ↓
+Correction Audit History
+```
+
+The validation confirmed that transcript edits are persisted in the database and that multiple edits to the same segment are retained in the correction history.
+
+## 🏗️ Story 2.3 Implementation Summary
+
+| Component                       | Status |
+| ------------------------------- | ------ |
+| Completed transcript retrieval  | ✅      |
+| Timestamped transcript segments | ✅      |
+| Speaker-labelled transcript     | ✅      |
+| Keyword transcript search       | ✅      |
+| Timestamped search results      | ✅      |
+| Organizer transcript editing    | ✅      |
+| Transcript text correction      | ✅      |
+| Speaker-name correction         | ✅      |
+| Correction audit logging        | ✅      |
+| Correction persistence          | ✅      |
+| Correction history API          | ✅      |
+| Organizer authorization         | ✅      |
+| Alembic migration               | ✅      |
+| Backend transcript API tests    | ✅      |
+| Frontend transcript tests       | ✅      |
+| Browser validation              | ✅      |
+| Production build verification   | ✅      |
+
+Story 2.3 is implemented as a post-recording transcript workflow. The existing `faster-whisper` transcription pipeline produces the transcript after the recording is uploaded and processed, while Story 2.3 provides the searchable and editable interface for the completed transcript.
+
+The implementation is designed to be reused by the following meeting-intelligence features without recreating the transcription or transcript-management pipeline.
 
