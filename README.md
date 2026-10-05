@@ -1,55 +1,41 @@
+
 # AI Office Operations Agent
 
-> An AI-powered office operations platform designed to centralize workplace workflows, communication, meetings, and operational activities.
+An AI-powered office operations platform designed to automate meeting management, attendance, recording, transcription, speaker identification, and follow-up workflows.
+
+The system combines a React/Vite frontend with a FastAPI backend and SQLAlchemy database layer.
 
 ---
 
-## 📌 Project Overview
+## 🚀 Project Overview
 
-**AI Office Operations Agent** is a full-stack office operations platform being developed to simplify and automate common organizational workflows.
+The AI Office Operations Agent manages the complete lifecycle of an office meeting:
 
-The system is designed around different organizational roles such as:
+```text
+Create Meeting
+      ↓
+Participants Join
+      ↓
+Attendance Tracking
+      ↓
+Recording Consent
+      ↓
+Meeting Recording
+      ↓
+Participant Audio Tracks
+      ↓
+Automatic Transcription
+      ↓
+Speaker Identification
+      ↓
+Speaker-labelled Transcript
+      ↓
+Meeting Intelligence
+      ↓
+Action Items / Follow-up
+```
 
-- Employee
-- Manager
-- HR
-- Admin
-
-The application provides a centralized platform where users can interact with office operations features through a modern web interface.
-
-The project follows a modular architecture so that new features can be added incrementally through Feature Requirements (FRs).
-
----
-## 🎙️ AI Meeting Transcription
-
-The system automatically transcribes meeting recordings after the recording is completed.
-
-### Story 2.1 – Automatic Meeting Transcription
-
-- Automatically starts transcription when a meeting recording is completed.
-- Uses Whisper `large-v3` through `faster-whisper` for English speech-to-text.
-- Generates timestamped transcript segments.
-- Tracks transcription status:
-  - Pending
-  - Processing
-  - Completed
-  - Failed
-- Prevents duplicate transcripts for the same recording.
-- Securely processes encrypted meeting recordings.
-
-# 🎯 Project Goals
-
-The main goals of the project are to:
-
-- Centralize office operations
-- Improve communication between employees and management
-- Provide role-based workflows
-- Enable real-time online meetings
-- Support meeting scheduling and instant meetings
-- Provide participant admission and moderation
-- Track meeting attendance
-- Generate meeting reports
-- Provide a scalable foundation for future AI-powered office automation
+The goal is to reduce manual meeting administration and transform meeting conversations into structured, searchable and actionable information.
 
 ---
 
@@ -60,902 +46,671 @@ The main goals of the project are to:
 - React
 - TypeScript
 - Vite
-- CSS
 - WebRTC
-- WebSocket
+- MediaRecorder API
+- REST API integration
 
 ## Backend
 
 - Python
 - FastAPI
-- Uvicorn
 - SQLAlchemy
 - SQLite
-- WebSocket
-
-## Testing
-
+- Pydantic
 - Pytest
-- Backend integration tests
-- WebRTC/WebSocket signaling tests
-- Frontend production build verification
+
+## AI / Speech
+
+- faster-whisper
+- Whisper `large-v3`
+- Automatic speech-to-text
+- Participant-track based speaker identification
+
+## Security
+
+- AES-256-GCM recording encryption
+- Temporary plaintext processing
+- Secure recording storage
+- Recording consent validation
 
 ---
 
-# 🧩 System Architecture
-
-The application consists of three major layers:
+# 📁 Project Structure
 
 ```text
-┌─────────────────────────────────────────────┐
-│                Frontend                     │
-│                                             │
-│ React + TypeScript + Vite                   │
-│ Meeting UI + User Interface                 │
-└───────────────────┬─────────────────────────┘
-                    │
-                    │ REST API
-                    │ WebSocket
-                    ▼
-┌─────────────────────────────────────────────┐
-│                 Backend                     │
-│                                             │
-│ FastAPI                                     │
-│ Meeting APIs                                │
-│ Meeting Services                            │
-│ WebSocket Signaling                         │
-└───────────────────┬─────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────────┐
-│                 Database                    │
-│                                             │
-│ SQLite                                      │
-│ Meetings                                    │
-│ Attendance                                  │
-│ Meeting State                               │
-└─────────────────────────────────────────────┘
-
-PROJECT STRUCTURE:
 ai-office-operations-agent/
 │
 ├── backend/
-│   │
 │   ├── app/
-│   │   ├── db/
-│   │   │   └── database.py
+│   │   ├── meeting/
+│   │   │   ├── models.py
+│   │   │   ├── router.py
+│   │   │   ├── schemas.py
+│   │   │   ├── service.py
+│   │   │   ├── speaker_identification.py
+│   │   │   ├── transcription_worker.py
+│   │   │   ├── transcription_media.py
+│   │   │   └── recording_encryption.py
 │   │   │
-│   │   └── meeting/
-│   │       ├── models.py
-│   │       ├── router.py
-│   │       ├── schemas.py
-│   │       ├── service.py
-│   │       └── signaling.py
+│   │   └── ...
 │   │
 │   ├── tests/
-│   │   ├── test_fr2_compatibility.py
-│   │   ├── test_meeting_attendance.py
-│   │   ├── test_meeting_deletion.py
-│   │   ├── test_meeting_lobby.py
-│   │   ├── test_meeting_signaling.py
-│   │   └── test_meeting_validation.py
+│   │   ├── test_meeting_participant_tracks.py
+│   │   ├── test_speaker_identification.py
+│   │   ├── test_meeting_transcription.py
+│   │   ├── test_meeting_recording_api.py
+│   │   └── ...
 │   │
 │   └── main.py
 │
 ├── src/
-│   │
 │   ├── api/
 │   │   └── meetings.ts
 │   │
-│   ├── components/
-│   │   ├── layout/
-│   │   └── meetings/
-│   │       ├── LocalMediaPreview.tsx
-│   │       ├── OrganizerGuestLobby.tsx
-│   │       ├── VideoGrid.tsx
-│   │       └── MeetingCard.tsx
-│   │
-│   ├── contexts/
-│   │   └── AuthContext.tsx
-│   │
 │   ├── hooks/
-│   │   └── useMeetingRoom.ts
+│   │   └── meetingRecordingFlow.ts
 │   │
 │   ├── pages/
-│   │   ├── CreateMeetingPlaceholder.tsx
-│   │   ├── GuestJoinPage.tsx
-│   │   ├── GuestMeetingRoomPlaceholder.tsx
-│   │   ├── HomePage.tsx
-│   │   ├── MeetingEntryPage.tsx
-│   │   ├── MeetingReportPage.tsx
-│   │   ├── MeetingRoomPage.tsx
-│   │   ├── MeetingRoomPlaceholder.tsx
-│   │   └── MeetingsPage.tsx
+│   │   └── MeetingRoomPage.tsx
 │   │
-│   ├── types/
-│   │   └── meeting.ts
-│   │
-│   ├── App.tsx
-│   └── styles.css
+│   └── ...
 │
-├── conftest.py
-├── package.json
-├── .gitignore
+├── tests/
+│   └── frontend/
+│       └── participantTrackUpload.test.mjs
+│
 └── README.md
+```
 
-🚀 Current Development Status
+---
 
-FR-3 — Meeting Room System
-Status: ✅ Completed
-The Meeting Room System has been implemented as the major feature of FR-3.
-The implementation includes meeting creation, meeting links, participant admission, real-time signaling, audio/video communication, attendance tracking, meeting reports, host controls, meeting completion and meeting management.
-🎥 Meeting System
-The meeting system supports two types of meetings.
-1. Instant Meeting
-An instant meeting allows the user to create a meeting immediately.
-The organizer does not need to specify a future date or time.
-The meeting link can then be shared with other participants.
-2. Scheduled Meeting
-A scheduled meeting allows the organizer to specify:
-- Meeting date
-- Meeting start time
-- Meeting end time
-The meeting becomes available according to the configured schedule.
-👤 Organizer / Host
-The user who creates a meeting becomes the organizer/host of that meeting.
-The organizer is responsible for managing participants.
-The organizer can:
-- Enter the meeting
-- Share the meeting link
-- Receive participant requests
-- Accept participants
-- Reject participants
-- View participants
-- Moderate participants
-- Mute participants
-- End the meeting
-- View the meeting report
-🔗 Meeting Link
-After creating a meeting, the organizer receives a shareable meeting link.
-The organizer can:
-- Copy the meeting link
-- Share the meeting link
-- Open the meeting directly
-Participants can use the shared link to access the meeting entry flow.
-🚪 Guest Meeting Flow
-Participants joining through a shared meeting link follow the guest flow.
-Step 1 — Open Meeting Link
-The participant opens the meeting URL.
-Step 2 — Enter Details
-The participant provides:
-- Name
-- Email address
-Step 3 — Request to Join
-The participant selects:
-Request to join
+# 🎯 Meeting Workflow
 
-The participant is then placed in the meeting lobby.
-Step 4 — Organizer Decision
-The organizer receives the request.
-The organizer can:
-Accept
+## 1. Meeting Creation
 
-or
-Deny
+An organizer creates a meeting with:
 
-Step 5 — Admission
-If accepted, the participant enters the meeting.
-If rejected, the participant receives an access-denied state.
-🎙️ Audio and Video
-The meeting system uses browser-based media capabilities for real-time communication.
-Participants can control:
-- Microphone
-- Camera
-Media is handled through WebRTC.
-Signaling between participants is handled through WebSockets.
-🔄 WebSocket Signaling
-The backend provides WebSocket-based signaling for meeting participants.
-The signaling layer handles communication required for peer connections and participant state.
-Examples include:
-- Participant joining
-- Participant leaving
-- WebRTC offer
-- WebRTC answer
-- ICE candidates
-- Participant state
-- Participant moderation
-- Meeting-ended events
-👥 Participant Management
-The meeting room maintains participant information such as:
+- Title
+- Agenda
+- Meeting type
+- Start time
+- End time
+- Participants
+
+The backend validates scheduled and instant meetings.
+
+---
+
+## 2. Attendance Tracking
+
+When a participant joins:
+
+```text
+Participant joins
+       ↓
+Attendance API
+       ↓
+MeetingAttendanceLog
+       ↓
+joined_at recorded
+```
+
+When the participant leaves:
+
+```text
+Participant leaves
+       ↓
+Attendance API
+       ↓
+left_at recorded
+```
+
+Attendance records contain:
+
 - Participant name
-- Participant identity
-- Microphone state
-- Camera state
-- Organizer/host status
-- Connection state
-The video grid dynamically displays connected participants.
-🔇 Host Moderation
-The organizer has additional controls compared with normal participants.
-The organizer can:
-- Accept join requests
-- Reject join requests
-- Mute participants
-- Monitor participant states
-- End the meeting
-Host moderation is validated on the backend.
-📊 Attendance Tracking
-The system records meeting attendance.
-Attendance information includes:
-- Participant
-- Meeting
+- Email
+- User ID
+- External guest status
 - Join time
 - Leave time
-This allows the system to determine who attended the meeting and how long they remained in the meeting.
-📄 Meeting Reports
-Completed meetings can have an attendance report.
-The report provides information such as:
-Information	Description
-Participant	Person who joined
-Join Time	Time participant entered
-Leave Time	Time participant left
-Duration	Approximate time spent in meeting
-
-
-Meeting reports are restricted to the meeting organizer.
-✅ Meeting Completion
-The system tracks the lifecycle of a meeting.
-When the meeting is finished, it should no longer behave as an active meeting.
-Completed meetings are available through the previous/completed meetings area.
-Completed meetings can also be deleted by the appropriate user.
-🗑️ Meeting Deletion
-Completed meetings can be removed from the meeting list.
-Deletion is handled through the backend API.
-The system prevents inappropriate deletion of meetings that are still active according to the meeting lifecycle rules.
-⚠️ Invalid and Expired Meetings
-The application handles invalid and expired meeting links.
-Examples include:
-Invalid Meeting
-Meeting not found
-
-Expired Meeting
-This meeting has expired
-
-These states prevent the application from unnecessarily starting the meeting signaling/media flow.
-🧪 Testing
-The project contains backend tests covering the meeting system.
-Current Test Modules
-FR-2 Compatibility
-test_fr2_compatibility.py
-
-Verifies that meeting functionality does not break existing FR-2 functionality.
-Attendance
-test_meeting_attendance.py
-
-Tests participant attendance and join/leave tracking.
-Meeting Deletion
-test_meeting_deletion.py
-
-Tests completed meeting deletion behavior.
-Meeting Lobby
-test_meeting_lobby.py
-
-Tests guest requests and lobby behavior.
-Meeting Signaling
-test_meeting_signaling.py
-
-Tests WebSocket signaling and multi-participant behavior.
-Meeting Validation
-test_meeting_validation.py
-
-Tests valid, invalid and expired meeting states.
-▶️ Running the Project Locally
-The project requires two development processes:
-Backend
-Frontend
-
-Both should normally be running simultaneously.
-🐍 Backend Setup
-Navigate to the project:
-cd E:\Projects\ai-office-operations-agent
-
-Activate the virtual environment:
-.\.venv\Scripts\activate
-
-Navigate to the backend:
-cd backend
-
-Start FastAPI:
-python -m uvicorn main:app --reload --port 9000
-
-Backend:
-http://127.0.0.1:9000
-
-🌐 Frontend Setup
-Open another terminal.
-Navigate to the project:
-cd E:\Projects\ai-office-operations-agent
-
-Install dependencies if required:
-npm install
-
-Start the frontend:
-npm run dev
-
-Vite will provide the frontend URL, normally:
-http://localhost:5173
-
-🧪 Running Backend Tests
-From the project root:
-python -m pytest backend/tests -v
-
-If the backend test environment requires the configured project test path, run the test command from the location specified by the project configuration.
-🏗️ Frontend Production Build
-Before committing frontend changes, verify that the production build succeeds:
-npm run build
-
-A successful build confirms that the TypeScript/React application compiles correctly for production.
-🔍 Git Checks
-Before committing:
-git diff --check
-
-Check the working tree:
-git status
-
-🔐 Environment and Local Files
-Local development files should not be committed to GitHub.
-Examples include:
-.env
-*.db
-__pycache__/
-*.pyc
-node_modules/
-dist/
-
-The local SQLite database is intended for local development/testing and should not be used as a shared production database.
-🌿 Git Branching Strategy
-Feature development should use separate branches.
-The completed FR-3 implementation is currently associated with:
-feature/story-1.3-meeting-room
-
-The branch has been pushed to the project GitHub repository.
-Repository:
-https://github.com/Office-Operations-AI-Agent/ai-office-operations-agent
-📦 FR-3 GitHub Handoff
-The completed FR-3 implementation contains:
-- Backend meeting APIs
-- Meeting database models
-- Meeting services
-- WebSocket signaling
-- Frontend meeting pages
-- Guest lobby
-- Participant video grid
-- Meeting controls
-- Attendance tracking
-- Meeting reports
-- Meeting deletion
-- Meeting validation
-- Meeting tests
-The next developer should build on the existing implementation instead of recreating the meeting system.
-🔄 Recommended Workflow for the Next Developer
-Before starting FR-4:
-1. Get the latest repository
-git fetch origin
-
-2. Check available branches
-git branch -a
-
-3. Switch to the required development branch
-git checkout feature/story-1.3-meeting-room
-
-4. Pull the latest changes
-git pull
-
-5. Install frontend dependencies
-npm install
-
-6. Activate the Python environment
-.\.venv\Scripts\activate
-
-7. Run the backend
-cd backend
-python -m uvicorn main:app --reload --port 9000
-
-8. Run the frontend
-In another terminal:
-cd E:\Projects\ai-office-operations-agent
-npm run dev
-
-9. Verify FR-3
-Before modifying the system, verify:
-- Login/user access
-- Meeting creation
-- Instant meeting
-- Scheduled meeting
-- Meeting link
-- Guest join request
-- Organizer admission
-- Audio
-- Video
-- Host controls
-- Participant mute
-- Attendance
-- Meeting report
-- Completed meetings
-- Meeting deletion
-- Invalid meeting
-- Expired meeting
-10. Run tests
-python -m pytest backend/tests -v
-
-11. Build frontend
-npm run build
-
-Only after the existing system works should FR-4 development begin.
-🚧 Future Development
-The project is being developed incrementally through Feature Requirements.
-Completed functionality should remain backward compatible when implementing future FRs.
-Future work may include additional:
-- AI-powered office automation
-- Employee workflows
-- Manager workflows
-- HR workflows
-- Administrative workflows
-- Notifications
-- Intelligent scheduling
-- AI assistants
-- Analytics
-- Workflow automation
-- Enterprise integrations
-🛠️ Development Principles
-When implementing new features:
-1. Do not unnecessarily rewrite existing functionality.
-2. Preserve existing APIs unless a change is required.
-3. Add tests for new backend functionality.
-4. Verify the frontend production build.
-5. Test existing workflows after major changes.
-6. Keep generated files out of Git.
-7. Keep secrets and environment variables out of Git.
-8. Use feature branches for new FRs.
-9. Document significant architectural changes.
-10. Maintain backward compatibility where possible.
-📌 Current Handoff Checklist
-FR-3
-- [x] Meeting creation
-- [x] Instant meeting
-- [x] Scheduled meeting
-- [x] Meeting sharing
-- [x] Guest join flow
-- [x] Guest lobby
-- [x] Organizer admission
-- [x] Organizer rejection
-- [x] WebSocket signaling
-- [x] WebRTC communication
-- [x] Microphone control
-- [x] Camera control
-- [x] Host identification
-- [x] Participant moderation
-- [x] Attendance tracking
-- [x] Meeting reports
-- [x] Meeting completion
-- [x] Previous meetings
-- [x] Meeting deletion
-- [x] Invalid meeting handling
-- [x] Expired meeting handling
-- [x] Backend tests
-- [x] Frontend build verification
-- [x] GitHub branch pushed
-
-
-
-FR-4 — Meeting Recording & Consent
-
-Status: Completed
-
-The Meeting Recording & Consent system has been implemented as the next feature after the Meeting Room System.
-
-The implementation includes:
-
-* Participant recording consent
-* Organizer-controlled recording
-* Audio/video recording
-* Browser MediaRecorder integration
-* Recording upload
-* Encrypted recording storage
-* Recording lifecycle management
-* Recording retention
-* Backend authorization
-* Automated testing
-
-🎥 Recording System
-
-The system allows the meeting organizer to start and stop recording during an active meeting.
-
-The recording captures the existing meeting audio and video stream using the browser MediaRecorder API.
-
-The implementation reuses the existing WebRTC media stream and does not request a second camera or microphone stream.
-
-👤 Organizer / Host
-
-The meeting organizer controls the recording.
-
-The organizer can:
-
-* Start recording
-* Stop recording
-* View recording status
-* Upload the completed recording
-
-Recording permissions are validated by the backend.
-
-📝 Recording Consent
-
-Recording requires explicit participant consent.
-
-All active participants must provide consent before the organizer can start recording.
-
-Consent information includes:
-
-* Meeting
-* Participant
-* Attendance context
-* Consent status
-* Consent timestamp
-
-Repeated identical consent operations are handled safely.
 
-▶️ Recording Start
+---
 
-When the organizer starts recording:
+# 🎙️ Recording
 
-* Backend verifies the meeting
-* Organizer authorization is checked
-* Active participants are checked
-* Recording consent is verified
-* Backend recording is started
-* Browser MediaRecorder is started
+Before recording begins, participant recording consent is checked.
 
-The browser recording starts only after the backend confirms the recording start.
+The organizer starts the recording and the backend creates a recording record.
 
-If browser recording fails, the backend recording is stopped to prevent an inconsistent state.
-
-🎙️ Audio and Video
-
-The recording supports combined audio and video.
-
-The implementation uses supported WebM MIME types.
-
-The browser checks MediaRecorder support before selecting the recording format.
-
-The existing meeting media tracks are not replaced or stopped.
-
-⏹️ Recording Stop
-
-When recording is stopped:
-
-* MediaRecorder stops
-* Final recording data is collected
-* Recording Blob is created
-* Backend recording is stopped
-* Recording is uploaded
-* Recording enters processing state
-
-If upload fails, the completed Blob is preserved in memory and recording is not automatically restarted.
-
-📤 Recording Upload
-
-Completed recordings are uploaded through an organizer-authorized backend endpoint.
-
-The backend validates:
-
-* Organizer authorization
-* Meeting association
-* Recording association
-* Recording state
-* File presence
-* File format
-
-Supported browser recordings use WebM.
-
-Uploads are first written to a temporary location and then moved to the final recording location.
-
-📁 Recording Storage
-
-Recordings are stored using the following structure:
-
-backend/storage/recordings/<meeting-id>/<recording-id>.<extension>
-
-The database stores the relative recording storage URI.
-
-Runtime recording files are excluded from Git.
-
-🔐 Recording Encryption
-
-Recording files are encrypted before being stored as the final recording artifact.
-
-The implementation uses:
-
-* AES-256-GCM
-* Random nonce
-* Authenticated encryption
-* 32-byte encryption key
-* AORC encrypted recording container
-
-The final stored recording is encrypted at rest.
-
-Temporary plaintext recording files are cleaned up after encryption.
-
-🔑 Environment Configuration
-
-Recording encryption requires:
-
-RECORDING_ENCRYPTION_KEY
-
-The key must decode to exactly 32 bytes.
-
-Local configuration is stored in:
-
-backend/.env
-
-A template is provided as:
-
-backend/.env.example
-
-The actual encryption key must never be committed to GitHub.
-
-🔄 Recording Lifecycle
-
-Recording states include:
-
-* pending
-* recording
-* processing
-* completed
-* failed
-* cancelled
-
-The backend validates recording state transitions.
-
-Repeated start and stop operations are handled safely.
-
-🗄️ Database
-
-The recording system introduces:
-
+The browser uses the `MediaRecorder` API to capture audio.
+
+After recording stops:
+
+```text
+MediaRecorder
+      ↓
+Audio Blob
+      ↓
+Backend Upload
+      ↓
+AES-256-GCM Encryption
+      ↓
+Encrypted Storage
+      ↓
+Recording Completed
+      ↓
+Transcript Created
+```
+
+A completed recording automatically creates a pending transcript.
+
+---
+
+# 📝 Automatic Transcription — FR-7
+
+The transcription worker continuously checks for pending transcripts.
+
+```text
+Pending Transcript
+       ↓
+Claim Transcript
+       ↓
+Processing
+       ↓
+Decrypt Recording
+       ↓
+faster-whisper
+       ↓
+Timestamped Segments
+       ↓
+Speaker Metadata
+       ↓
+Completed Transcript
+```
+
+Whisper produces timestamped segments such as:
+
+```json
+{
+  "start": 0.25,
+  "end": 1.50,
+  "text": "Hello everyone."
+}
+```
+
+The transcript is stored in the `MeetingTranscript` database record.
+
+Transcript states are:
+
+```text
+pending
+   ↓
+processing
+   ↓
+completed
+```
+
+or:
+
+```text
+processing
+   ↓
+failed
+```
+
+---
+
+# 🗣️ Speaker Identification — FR-8
+
+FR-8 extends the transcription pipeline by associating transcript segments with participant audio tracks.
+
+Each participant track contains:
+
+- `connection_id`
+- `participant_name`
+- optional `attendance_id`
+
+Participant tracks are registered before their audio files are uploaded.
+
+### Participant Track Registration
+
+```text
+Participant
+     ↓
+WebRTC connection
+     ↓
+connection_id
+     ↓
+Participant Track
+     ↓
+Backend Registration
+     ↓
 MeetingRecording
+```
+
+The backend provides:
+
+```http
+POST /api/v1/meetings/{meeting_id}/recording/tracks
+```
 
-Stores:
+to register participant tracks.
 
-* Recording ID
-* Meeting ID
-* Status
-* Storage URI
-* Created time
-* Started time
-* Stopped time
-* Retention expiry
+Individual participant recordings are uploaded through:
 
-MeetingRecordingConsent
+```http
+POST /api/v1/meetings/{meeting_id}/recording/{recording_id}/upload
+```
 
-Stores:
+---
 
-* Consent ID
-* Meeting ID
-* Participant
-* Attendance context
-* Consent status
-* Consent timestamp
+## Speaker Metadata
 
-Recording and consent records are linked to the meeting.
+Transcript segments now contain speaker information:
 
-⏳ Recording Retention
+```json
+{
+  "start": 0.0,
+  "end": 4.0,
+  "text": "Hello.",
+  "speaker": "Rahul",
+  "flagged_for_correction": false
+}
+```
 
-The default recording retention period is 90 days.
+If the participant cannot be identified:
 
-The retention service removes only expired terminal recordings.
+```json
+{
+  "start": 0.0,
+  "end": 4.0,
+  "text": "Hello.",
+  "speaker": "Unknown Speaker",
+  "flagged_for_correction": true
+}
+```
+
+The speaker resolver is implemented in:
+
+```text
+backend/app/meeting/speaker_identification.py
+```
+
+The resolver provides:
+
+```python
+identify_recording_speaker(
+    participant_name="Rahul"
+)
+```
+
+which returns:
+
+```text
+SpeakerIdentity(
+    name="Rahul",
+    flagged_for_correction=False
+)
+```
+
+For an unidentified participant:
+
+```text
+SpeakerIdentity(
+    name="Unknown Speaker",
+    flagged_for_correction=True
+)
+```
+
+---
+
+# 🔗 FR-8 Participant Track API
+
+### Register participant tracks
+
+```http
+POST /api/v1/meetings/{meeting_id}/recording/tracks
+```
+
+Example request:
+
+```json
+{
+  "tracks": [
+    {
+      "connection_id": "conn-1",
+      "participant_name": "Alice",
+      "attendance_id": "att-1"
+    },
+    {
+      "connection_id": "conn-2",
+      "participant_name": "Bob",
+      "attendance_id": "att-2"
+    }
+  ]
+}
+```
+
+The backend creates separate recording records for the participant tracks.
+
+---
+
+### Upload participant track
+
+```http
+POST /api/v1/meetings/{meeting_id}/recording/{recording_id}/upload
+```
+
+The recording ID is explicitly associated with the participant track.
 
-Eligible states include:
+The implementation maps uploaded tracks using `connection_id`, rather than relying on array order.
+
+This prevents participant audio from being accidentally assigned to another participant.
 
-* completed
-* failed
-* cancelled
+---
 
-Active and processing recordings are protected.
+# 🧠 Speaker Identification Architecture
 
-The retention process validates the storage path before deleting files.
+```text
+             Meeting
+                │
+       ┌────────┴────────┐
+       │                 │
+ Attendance Logs     Participant Tracks
+       │                 │
+       │           connection_id
+       │           participant_name
+       │                 │
+       └────────┬────────┘
+                │
+         Transcription
+                │
+          Whisper STT
+                │
+        Timestamped Text
+                │
+        Speaker Resolver
+                │
+       ┌────────┴────────┐
+       │                 │
+ Known Participant   Unknown Speaker
+       │                 │
+ speaker = name     speaker = Unknown Speaker
+ flagged = false   flagged = true
+```
+
+---
+
+# 🧪 Testing
+
+The project contains backend and frontend tests covering meeting recording, participant tracks, transcription and speaker identification.
+
+### Speaker identification tests
 
-Missing files are handled safely and cleanup is idempotent.
+```text
+test_known_participant_is_identified
+test_missing_participant_becomes_unknown
+test_blank_participant_becomes_unknown
+test_participant_name_is_trimmed
+```
 
-A production scheduler has not yet been added; the retention service can be invoked by a future scheduled worker.
+### Participant track tests
+
+The FR-8 participant-track test suite covers:
 
-🔒 Authorization
+- Participant track registration
+- Authorization
+- Participant-track uploads
+- Recording ID validation
+- Meeting ownership validation
+- Known speaker identification
+- Unknown speaker handling
+- Existing recording endpoint compatibility
+- Meeting deletion cleanup
+- Multiple participant tracks
+- Upload failure handling
 
-Recording operations require organizer authorization.
+### Frontend tests
 
-Organizer authorization is required for:
+Frontend tests verify:
 
-* Starting recording
-* Stopping recording
-* Viewing protected recording information
-* Uploading recordings
+- Participant track registration
+- Correct connection ID mapping
+- Correct Blob-to-recording mapping
+- Multiple participant uploads
+- Failed track isolation
+- Empty track handling
 
-Organizer authorization does not bypass participant consent.
+---
 
-🧪 Testing
+# ✅ Test Results
 
-Backend recording tests cover:
+The final backend test suite completed successfully with:
 
-* Recording models
-* Consent
-* Recording API
-* Start/stop lifecycle
-* Upload
-* Encryption
-* Retention
-* Authorization
-* Invalid state transitions
+```text
+119 passed
+1 skipped
+2 warnings
+```
 
-Frontend tests cover:
+The FR-8 focused tests passed:
 
-* MediaRecorder
-* Audio/video recording
-* MIME type selection
-* Consent flow
-* Recording start
-* Recording stop
-* Upload flow
-* Upload failure handling
+```text
+test_meeting_participant_tracks.py
+12 passed
 
-Backend focused recording tests:
+test_speaker_identification.py
+4 passed
 
-31 passed
+test_meeting_transcription.py
+5 passed
+```
 
-Frontend recording tests:
+Combined FR-8/transcription/participant-track validation:
 
-25 passed
+```text
+21 passed
+```
 
-Production build:
+The remaining warnings are FastAPI deprecation warnings related to the existing:
 
-npm run build
+```python
+@app.on_event("startup")
+```
 
-Build completed successfully.
+implementation and are not FR-8 test failures.
 
-🌐 Browser Validation
+---
 
-The recording system was also tested through the actual browser meeting flow.
+# 📊 FR-8 Implementation Summary
 
-The validation confirmed:
+| Component | Status |
+|---|---|
+| Participant track registration | ✅ |
+| Participant name association | ✅ |
+| Connection ID association | ✅ |
+| Participant track upload | ✅ |
+| Explicit recording ID upload | ✅ |
+| Speaker identification module | ✅ |
+| Known speaker labeling | ✅ |
+| Unknown speaker fallback | ✅ |
+| Correction flag | ✅ |
+| Whisper integration | ✅ |
+| Transcript speaker metadata | ✅ |
+| Frontend participant-track upload flow | ✅ |
+| Backend tests | ✅ |
+| Frontend tests | ✅ |
+| Existing recording flow compatibility | ✅ |
 
-* Meeting join
-* Participant consent
-* Recording start
-* Audio/video capture
-* Recording stop
-* Upload
-* Database persistence
-* Encrypted file storage
+---
 
-The stored recording file was verified as an encrypted AORC recording container.
+# 🔐 Recording Security
 
-📦 Important Files
+Recordings are encrypted before storage using AES-256-GCM.
 
-Backend:
+The transcription worker:
 
-backend/app/meeting/models.py
+1. Retrieves the encrypted recording.
+2. Decrypts it into a temporary file.
+3. Processes the file using Whisper.
+4. Stores the transcript.
+5. Deletes the temporary plaintext file.
 
-backend/app/meeting/router.py
+This prevents decrypted recordings from remaining permanently on disk.
 
-backend/app/meeting/schemas.py
+---
 
-backend/app/meeting/service.py
+# 🛠️ Running the Backend
 
-backend/app/meeting/recording_encryption.py
+From the backend directory:
 
-backend/app/meeting/recording_retention.py
+```powershell
+cd backend
+```
 
-Frontend:
+Install dependencies:
 
-src/api/meetings.ts
+```powershell
+pip install -r requirements.txt
+```
 
-src/hooks/meetingRecordingFlow.ts
+Run the API:
 
-src/hooks/meetingRecordingSession.ts
+```powershell
+uvicorn main:app --reload
+```
 
-src/hooks/useMeetingRecording.ts
+---
 
-src/pages/MeetingRoomPage.tsx
+# 🧪 Running Tests
 
-src/types/meeting.ts
+Run the complete backend test suite:
 
-Tests:
+```powershell
+cd backend
+python -m pytest -q
+```
 
-backend/tests/test_meeting_recording_api.py
+Run FR-8 tests:
 
-backend/tests/test_meeting_recording_encryption.py
+```powershell
+python -m pytest tests/test_meeting_participant_tracks.py -q
+```
 
-backend/tests/test_meeting_recording_models.py
+Run speaker identification tests:
 
-backend/tests/test_meeting_recording_retention.py
+```powershell
+python -m pytest tests/test_speaker_identification.py -q
+```
 
-backend/tests/test_meeting_recording_upload.py
+Run transcription tests:
 
-tests/frontend/meetingRecordingFlow.test.mjs
+```powershell
+python -m pytest tests/test_meeting_transcription.py -q
+```
 
-tests/frontend/meetingRecordingSession.test.mjs
+---
 
-📦 FR-4 GitHub Handoff
+# 🌿 Git Workflow
 
-The completed FR-4 implementation contains:
+FR-8 was developed on:
 
-* Recording consent
-* Organizer recording controls
-* Audio/video recording
-* MediaRecorder integration
-* Recording upload
-* Encrypted storage
-* Recording lifecycle
-* Recording retention
-* Recording authorization
-* Backend tests
-* Frontend tests
-* Production build verification
+```text
+feature/story-2.2-speaker-identification
+```
 
-The next developer should build on the existing FR-3 and FR-4 implementation instead of recreating the meeting or recording system.
+The implementation was committed and pushed to GitHub.
 
-🔄 Recommended Workflow for the Next Developer
+The feature branch was then merged into:
 
-Before starting the next feature:
+```text
+main
+```
 
-* Get the latest repository
-* Pull the latest changes
-* Install dependencies
-* Activate the Python environment
-* Start the backend
-* Start the frontend
-* Verify the existing meeting system
-* Verify recording consent
-* Verify recording start and stop
-* Run backend tests
-* Run frontend tests
-* Build the frontend
+Final FR-8 commit:
 
-Only after the existing functionality works should the next feature be implemented.
+```text
+05c320b feat: complete meeting participant track identification
+```
 
-🛠️ Development Principles
+---
 
-When implementing future features:
+# 📌 Current Project Status
 
-* Do not unnecessarily rewrite existing functionality.
-* Preserve existing APIs unless required.
-* Reuse the existing WebRTC stream where possible.
-* Do not create duplicate media streams.
-* Add tests for new functionality.
-* Verify the frontend production build.
-* Keep recordings and generated files out of Git.
-* Keep encryption keys and secrets out of Git.
-* Preserve recording authorization and consent requirements.
-* Maintain backward compatibility where possible.
+### Epic 1 — Meeting Management
 
-📌 Current Handoff Checklist
+- Meeting creation
+- Meeting room
+- WebRTC meeting functionality
+- Attendance
+- Guest lobby
+- Recording consent
+- Meeting recording
 
-FR-4
+### Epic 2 — AI Transcription & Meeting Intelligence
 
-* [x] Participant recording consent
-* [x] Organizer recording authorization
-* [x] Recording start
-* [x] Recording stop
-* [x] Audio recording
-* [x] Video recording
-* [x] Combined audio/video recording
-* [x] WebRTC stream reuse
-* [x] MediaRecorder integration
-* [x] Recording upload
-* [x] Recording persistence
-* [x] AES-256-GCM encryption
-* [x] Recording lifecycle
-* [x] Recording retention
-* [x] Safe repeated start/stop
-* [x] Backend tests
-* [x] Frontend tests
-* [x] Browser validation
-* [x] Production build verification
-* [x] Git commit completed
+- FR-7 — Automatic transcription ✅
+- FR-8 — Speaker identification ✅
+- FR-9 — Transcript correction/search
+- FR-10 — AI meeting summary
+- FR-11 — Action item extraction
+
+---
+
+# 🚧 Future Work
+
+The next stages of the platform can build on the speaker-labelled transcript:
+
+```text
+Speaker-labelled Transcript
+          ↓
+       FR-9
+Transcript Search & Correction
+          ↓
+       FR-10
+AI Meeting Summary
+          ↓
+       FR-11
+Action Item Extraction
+          ↓
+Owner + Task + Deadline + Priority
+```
+
+Possible future improvements include:
+
+- Advanced speaker diarization
+- Speaker embeddings
+- Confidence scores
+- Better multi-speaker overlap handling
+- Transcript correction audit logs
+- AI-generated meeting summaries
+- Automatic action-item extraction
+- Searchable meeting history
+- Meeting intelligence dashboards
+
+---
+
+# 👨‍💻 Project
+
+**AI Office Operations Agent**
+
+An autonomous office operations platform that connects meetings, attendance, recordings, transcription and AI-powered meeting intelligence into one workflow.
+
+Built using:
+
+```text
+React + TypeScript
+FastAPI + Python
+SQLAlchemy
+SQLite
+WebRTC
+faster-whisper
+AES-256-GCM
+Pytest
+```
+```
+
+```
+
+
+
