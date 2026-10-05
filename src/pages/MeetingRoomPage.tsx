@@ -202,7 +202,15 @@ export function MeetingRoomPage() {
     email: user?.email,
     userId: user?.id,
   })
-  const recording = useMeetingRecording(room.localStream)
+  const recording = useMeetingRecording(room.localStream, {
+    remoteStreams: room.remoteStreams,
+    participantInfos: room.participantInfos,
+    localParticipant: {
+      connectionId: room.localParticipantId,
+      participantName: user?.name || user?.email || 'Organizer',
+      attendanceId: attendanceRecord?.id,
+    },
+  })
 
   // Show muted notification
   useEffect(() => {

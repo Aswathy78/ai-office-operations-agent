@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  createAudioOnlyMediaRecorder,
   createAudioVideoMediaRecorder,
   MeetingRecordingSession,
+  ParticipantTrackRecordingSession,
 } from '../../src/hooks/meetingRecordingSession.ts'
 
 const audioTrack = { kind: 'audio', readyState: 'live' }
@@ -239,4 +241,164 @@ test('cleans up handlers after stop and on disposal', () => {
   assert.equal(activeRecorder.ondataavailable, null)
   assert.equal(activeRecorder.onerror, null)
   assert.equal(activeRecorder.onstop, null)
+})
+
+test('createAudioOnlyMediaRecorder requires live audio and selects audio MIME type', () => {
+  resetRecorder()
+  MockMediaRecorder.supportedTypes = ['audio/webm;codecs=opus']
+
+  const recorder = createAudioOnlyMediaRecorder(meetingStream, MockMediaRecorder)
+  assert.deepEqual(recorder.options, { mimeType: 'audio/webm;codecs=opus' })
+
+  assert.throws(
+    () => createAudioOnlyMediaRecorder({ getAudioTracks: () => [] }, MockMediaRecorder),
+    /live audio track is required/i,
+  )
+})
+
+test('ParticipantTrackRecordingSession snapshots local and remote participants', async () => {
+  resetRecorder()
+  const localStream = {
+    getAudioTracks: () => [{ kind: 'audio', readyState: 'live' }],
+  }
+  const remoteStream1 = {
+    getAudioTracks: () => [{ kind: 'audio', readyState: 'live' }],
+  }
+  const remoteStreamNoAudio = {
+    getAudioTracks: () => [],
+  }
+
+  const remoteStreams = new Map([
+    ['remote-user-1', remoteStream1],
+    ['remote-user-no-mic', remoteStreamNoAudio],
+  ])
+
+  const participantInfos = new Map([
+    ['remote-user-1', { displayName: 'Alice' }],
+    ['remote-user-no-mic', { displayName: 'Bob' }],
+  ])
+
+  const session = new ParticipantTrackRecordingSession(
+    localStream,
+    {
+      localParticipant: {
+        connectionId: 'organizer-conn-id',
+        participantName: 'Host Organizer',
+        attendanceId: 'att-host-123',
+      },
+      remoteStreams,
+      participantInfos,
+    },
+    MockMediaRecorder,
+  )
+
+  assert.equal(session.start(), true)
+  // Should create 2 recorders: 1 for local + 1 for remote-user-1 (remote-user-no-mic is skipped gracefully)
+  assert.equal(MockMediaRecorder.instances.length, 2)
+
+  const tracks = await session.stopAndWait()
+  assert.equal(tracks.length, 2)
+
+  const localTrack = tracks.find((t) => t.connectionId === 'organizer-conn-id')
+  assert.ok(localTrack)
+  assert.equal(localTrack.participantName, 'Host Organizer')
+  assert.equal(localTrack.attendanceId, 'att-host-123')
+  assert.ok(localTrack.trackId.startsWith('track-organizer-conn-id'))
+  assert.ok(localTrack.blob instanceof Blob)
+  assert.equal(await localTrack.blob.text(), 'recorded audio')
+
+  const remoteTrack = tracks.find((t) => t.connectionId === 'remote-user-1')
+  assert.ok(remoteTrack)
+  assert.equal(remoteTrack.participantName, 'Alice')
+  assert.ok(remoteTrack.trackId.startsWith('track-remote-user-1'))
+  assert.ok(remoteTrack.blob instanceof Blob)
+  assert.equal(await remoteTrack.blob.text(), 'recorded audio')
+
+  session.dispose()
+})
+
+test('ParticipantTrackRecordingSession handles track ending early gracefully', async () => {
+  resetRecorder()
+  let endedListener = null
+  const localStream = {
+    getAudioTracks: () => [{
+      kind: 'audio',
+      readyState: 'live',
+      addEventListener: (evt, handler) => {
+        if (evt === 'ended') endedListener = handler
+      },
+      removeEventListener: () => {},
+    }],
+  }
+
+  const session = new ParticipantTrackRecordingSession(
+    localStream,
+    {
+      localParticipant: {
+        connectionId: 'user-ended-early',
+        participantName: 'Leaving Participant',
+      },
+    },
+    MockMediaRecorder,
+  )
+
+  session.start()
+  assert.equal(MockMediaRecorder.instances.length, 1)
+
+  // Trigger track ending early while recording
+  endedListener?.()
+
+  const tracks = await session.stopAndWait()
+  assert.equal(tracks.length, 1)
+  assert.equal(tracks[0].participantName, 'Leaving Participant')
+  assert.ok(tracks[0].blob instanceof Blob)
+
+  session.dispose()
+})
+
+test('MeetingRecordingSession coordinates both primary and multi-track recording when configured', async () => {
+  resetRecorder()
+  const localStream = {
+    getAudioTracks: () => [audioTrack],
+    getVideoTracks: () => [videoTrack],
+    getTracks: () => [audioTrack, videoTrack],
+  }
+  const remoteStream = {
+    getAudioTracks: () => [{ kind: 'audio', readyState: 'live' }],
+  }
+
+  const remoteStreams = new Map([['remote-peer-1', remoteStream]])
+  const participantInfos = new Map([['remote-peer-1', { displayName: 'Remote Peer 1' }]])
+
+  let lastSnapshot = null
+  const session = new MeetingRecordingSession(
+    localStream,
+    (snapshot) => { lastSnapshot = snapshot },
+    MockMediaRecorder,
+    {
+      localParticipant: {
+        connectionId: 'local-host',
+        participantName: 'Host',
+        attendanceId: 'att-1',
+      },
+      remoteStreams,
+      participantInfos,
+    },
+  )
+
+  assert.equal(session.start(), true)
+  // 1 primary audio-video recorder + 1 local audio track recorder + 1 remote audio track recorder = 3 recorders
+  assert.equal(MockMediaRecorder.instances.length, 3)
+
+  const blob = await session.stopAndWait()
+  assert.ok(blob instanceof Blob)
+  assert.equal(lastSnapshot.state, 'stopped')
+  assert.equal(lastSnapshot.tracks.length, 2)
+
+  const tracks = await session.stopAndWaitTracks()
+  assert.equal(tracks.length, 2)
+  assert.ok(tracks.some((t) => t.connectionId === 'local-host'))
+  assert.ok(tracks.some((t) => t.connectionId === 'remote-peer-1'))
+
+  session.dispose()
 })
