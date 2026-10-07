@@ -5,6 +5,7 @@ import type {
   MeetingDetails,
   MeetingListRecord,
   MeetingReport,
+  MeetingSummary,
   MeetingTranscript,
   MeetingTranscriptUpdateRequest,
   TranscriptCorrection,
@@ -81,6 +82,16 @@ export function getMeetingReport(meetingId: string, organizerId: string): Promis
   const query = new URLSearchParams({ organizer_id: organizerId })
   return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/report?${query}`)
     .then((response) => readResponse<MeetingReport>(response))
+}
+
+export function getMeetingSummary(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingSummary> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/summary?${query}`,
+  ).then((response) => readResponse<MeetingSummary>(response))
 }
 
 export function getMeetingTranscript(

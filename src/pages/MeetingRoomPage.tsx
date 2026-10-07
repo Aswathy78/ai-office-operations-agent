@@ -31,6 +31,7 @@ import {
 import {
   endMeetingForEveryone,
   getMeeting,
+  getMeetingSummary,
   joinMeetingAttendance,
   leaveMeetingAttendance,
   recordMeetingRecordingConsent,
@@ -44,6 +45,7 @@ import {
   type RecordingConsentStatus,
 } from '../api/meetings'
 import { LocalMediaPreview } from '../components/meetings/LocalMediaPreview'
+import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { OrganizerGuestLobby } from '../components/meetings/OrganizerGuestLobby'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { useAuth } from '../contexts/AuthContext'
@@ -59,7 +61,12 @@ import {
   type RecordingUploadState,
 } from '../hooks/meetingRecordingFlow'
 import { useMeetingRoom } from '../hooks/useMeetingRoom'
-import type { MeetingDetails, ParticipantInfo, ParticipantPeerState } from '../types/meeting'
+import type {
+  MeetingDetails,
+  MeetingSummary,
+  ParticipantInfo,
+  ParticipantPeerState,
+} from '../types/meeting'
 
 type PageState =
   | { kind: 'loading' }
@@ -178,6 +185,9 @@ export function MeetingRoomPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState<PageState>({ kind: 'loading' })
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(true)
+  const [summaryError, setSummaryError] = useState('')
   const [attendanceError, setAttendanceError] = useState('')
   const [joinedMeeting, setJoinedMeeting] = useState(false)
   const [showLobby, setShowLobby] = useState(false)
@@ -276,6 +286,32 @@ export function MeetingRoomPage() {
       })
     return () => { active = false }
   }, [meetingId])
+
+  useEffect(() => {
+    if (!meetingId || !meeting) return
+    let active = true
+    setSummaryLoading(true)
+    setMeetingSummary(null)
+    setSummaryError('')
+    getMeetingSummary(meetingId, meeting.organizer_id)
+      .then((summary) => {
+        if (active) setMeetingSummary(summary)
+      })
+      .catch((error: unknown) => {
+        if (!active) return
+        if (error instanceof MeetingApiError && error.status === 404) {
+          setMeetingSummary(null)
+          return
+        }
+        setSummaryError(
+          error instanceof Error ? error.message : 'Meeting summary could not be loaded.',
+        )
+      })
+      .finally(() => {
+        if (active) setSummaryLoading(false)
+      })
+    return () => { active = false }
+  }, [meetingId, meeting])
 
   // Attendance tracking
   useEffect(() => {
@@ -553,6 +589,11 @@ export function MeetingRoomPage() {
               </button>
             </div>
           </div>
+          <MeetingSummaryPanel
+            summary={meetingSummary}
+            loading={summaryLoading}
+            error={summaryError}
+          />
         </div>
       </div>
     )
@@ -759,6 +800,12 @@ export function MeetingRoomPage() {
           })}
         </div>
       </main>
+
+      <MeetingSummaryPanel
+        summary={meetingSummary}
+        loading={summaryLoading}
+        error={summaryError}
+      />
 
       {/* Side panels */}
       {showLobby && (

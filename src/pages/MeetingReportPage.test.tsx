@@ -6,12 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import {
   getMeetingReport,
+  getMeetingSummary,
   getMeetingTranscript,
   MeetingApiError,
   updateMeetingTranscript,
 } from '../api/meetings'
 import { MeetingReportPage } from './MeetingReportPage'
-import type { MeetingReport, MeetingTranscript } from '../types/meeting'
+import type { MeetingReport, MeetingSummary, MeetingTranscript } from '../types/meeting'
 
 const { authValue } = vi.hoisted(() => ({
   authValue: { user: { id: 'organizer-1' } },
@@ -27,6 +28,7 @@ vi.mock('../api/meetings', () => ({
     }
   },
   getMeetingReport: vi.fn(),
+  getMeetingSummary: vi.fn(),
   getMeetingTranscript: vi.fn(),
   getMeetingTranscriptCorrections: vi.fn(),
   updateMeetingTranscript: vi.fn(),
@@ -73,6 +75,21 @@ const transcript: MeetingTranscript = {
   completed_at: '2026-10-05T10:01:00Z',
 }
 
+const summary: MeetingSummary = {
+  id: 'summary-1',
+  meeting_id: 'meeting-current',
+  transcript_id: 'transcript-1',
+  status: 'completed',
+  overview: 'The team planned the next quarter.',
+  decisions: ['Start the pilot in May.'],
+  discussion_topics: ['Hiring plan'],
+  open_questions: ['Who owns onboarding?'],
+  created_at: '2026-10-05T11:00:00Z',
+  updated_at: '2026-10-05T11:01:00Z',
+  completed_at: '2026-10-05T11:01:00Z',
+  error_message: null,
+}
+
 function renderReport() {
   return render(
     <MemoryRouter initialEntries={['/meetings/meeting-current/report']}>
@@ -85,6 +102,7 @@ function renderReport() {
 
 beforeEach(() => {
   vi.mocked(getMeetingReport).mockResolvedValue(report)
+  vi.mocked(getMeetingSummary).mockResolvedValue(summary)
   vi.mocked(getMeetingTranscript).mockResolvedValue(transcript)
   vi.mocked(updateMeetingTranscript).mockResolvedValue(transcript)
 })
@@ -103,6 +121,51 @@ describe('MeetingReportPage transcript', () => {
     expect(screen.getByText('Maya')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Transcript' })).toBeInTheDocument()
     expect(getMeetingReport).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+  })
+
+  describe('MeetingReportPage summary', () => {
+    it('fetches and displays the persisted summary for the current meeting', async () => {
+      renderReport()
+
+      expect(await screen.findByRole('heading', { name: 'Meeting Summary' })).toBeInTheDocument()
+      expect(getMeetingSummary).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+      expect(screen.getByRole('heading', { name: 'Overview' })).toBeInTheDocument()
+      expect(screen.getByText('The team planned the next quarter.')).toBeInTheDocument()
+      expect(screen.getByText('Start the pilot in May.')).toBeInTheDocument()
+      expect(screen.getByText('Hiring plan')).toBeInTheDocument()
+      expect(screen.getByText('Who owns onboarding?')).toBeInTheDocument()
+      expect(screen.getByText('Attendance Log')).toBeInTheDocument()
+    })
+
+    it.each([
+      ['pending', 'Meeting summary is pending.'],
+      ['processing', 'Meeting summary is being processed.'],
+      ['failed', 'Meeting summary generation failed.'],
+    ])('displays persisted %s summary status', async (status, message) => {
+      vi.mocked(getMeetingSummary).mockResolvedValue({
+        ...summary,
+        status: status as MeetingSummary['status'],
+        error_message: status === 'failed' ? '<script>summary error</script>' : null,
+      })
+
+      renderReport()
+
+      expect(await screen.findByText(message)).toBeInTheDocument()
+      if (status === 'failed') {
+        expect(screen.getByText('<script>summary error</script>').tagName).toBe('P')
+        expect(document.querySelector('script')).not.toBeInTheDocument()
+      }
+    })
+
+    it('displays an unavailable state when no persisted summary exists', async () => {
+      vi.mocked(getMeetingSummary).mockRejectedValue(
+        new MeetingApiError('Meeting summary not found', 404),
+      )
+
+      renderReport()
+
+      expect(await screen.findByText('Meeting summary not available.')).toBeInTheDocument()
+    })
   })
 
   it('requests the current meeting transcript and renders its segments', async () => {

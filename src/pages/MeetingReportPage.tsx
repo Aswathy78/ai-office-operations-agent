@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
-import { getMeetingReport } from '../api/meetings'
+import { getMeetingReport, getMeetingSummary, MeetingApiError } from '../api/meetings'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
+import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { useAuth } from '../contexts/AuthContext'
-import type { MeetingReport } from '../types/meeting'
+import type { MeetingReport, MeetingSummary } from '../types/meeting'
 
 export function MeetingReportPage() {
   const { meetingId = '' } = useParams()
@@ -13,6 +14,9 @@ export function MeetingReportPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(true)
+  const [summaryError, setSummaryError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -28,6 +32,34 @@ export function MeetingReportPage() {
       })
       .finally(() => {
         if (active) setLoading(false)
+      })
+
+    return () => { active = false }
+  }, [meetingId, user])
+
+  useEffect(() => {
+    let active = true
+    if (!meetingId || !user) return
+
+    setSummaryLoading(true)
+    setMeetingSummary(null)
+    setSummaryError('')
+    getMeetingSummary(meetingId, user.id)
+      .then((summary) => {
+        if (active) setMeetingSummary(summary)
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        if (reason instanceof MeetingApiError && reason.status === 404) {
+          setMeetingSummary(null)
+          return
+        }
+        setSummaryError(
+          reason instanceof Error ? reason.message : 'Meeting summary could not be loaded.',
+        )
+      })
+      .finally(() => {
+        if (active) setSummaryLoading(false)
       })
 
     return () => { active = false }
@@ -67,6 +99,12 @@ export function MeetingReportPage() {
         </section>
       ) : report ? (
         <div className="report-content" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
+          <MeetingSummaryPanel
+            summary={meetingSummary}
+            loading={summaryLoading}
+            error={summaryError}
+          />
+
           <section className="report-summary" style={{ background: 'var(--surface)', padding: '1.5rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
             <h3 style={{ marginTop: 0, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <FileText size={18} /> {report.title}

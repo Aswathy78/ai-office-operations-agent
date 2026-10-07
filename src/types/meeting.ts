@@ -237,6 +237,21 @@ export interface MeetingReport {
   attendance: AttendanceReportRow[]
 }
 
+export interface MeetingSummary {
+  id: string
+  meeting_id: string
+  transcript_id: string
+  status: 'pending' | 'processing' | 'completed' | 'failed'
+  overview: string | null
+  decisions: string[] | null
+  discussion_topics: string[] | null
+  open_questions: string[] | null
+  created_at: string
+  updated_at: string
+  completed_at: string | null
+  error_message: string | null
+}
+
 export interface TranscriptSegment {
   start: number
   end: number

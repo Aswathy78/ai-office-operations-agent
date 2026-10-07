@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from typing import Callable
-
+from app.meeting.summary_service import generate_meeting_summary
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
@@ -343,6 +343,14 @@ def process_claimed_transcript(
         )
 
         db.commit()
+        try:
+            generate_meeting_summary(db, transcript.id)
+        except Exception as error:
+            logger.error(
+            "Meeting summary generation failed for transcript %s: %s",
+            transcript.id,
+            error,
+        )
 
         logger.info(
             "Transcript %s completed. Speaker=%s",
