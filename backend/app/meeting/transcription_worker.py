@@ -6,9 +6,12 @@ Run from the backend directory with:
 """
 
 from datetime import datetime, timezone
+import ctypes
+from importlib.util import find_spec
 import logging
 import os
 from pathlib import Path, PurePosixPath
+import sys
 import threading
 import time
 from typing import Callable
@@ -30,15 +33,91 @@ from app.meeting.transcription_media import decrypt_recording_to_temporary_file
 
 logger = logging.getLogger(__name__)
 
+_CUDA_DLL_PACKAGE_DIRS = ("cublas", "cudnn", "cuda_nvrtc")
+_CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
+_CUDA_DLL_LIBRARY_HANDLES: list[object] = []
+_REGISTERED_CUDA_DLL_DIRECTORIES: set[Path] = set()
+_LOADED_CUDA_DLL_LIBRARIES: set[Path] = set()
+
+
+def _configure_cuda_dll_directories(
+    *,
+    windows: bool | None = None,
+) -> tuple[Path, ...]:
+    if windows is None:
+        windows = sys.platform == "win32"
+    if not windows:
+        return ()
+
+    nvidia_spec = find_spec("nvidia")
+    package_roots = nvidia_spec.submodule_search_locations if nvidia_spec else None
+    if not package_roots:
+        logger.warning("NVIDIA Python CUDA package directory was not found")
+        return ()
+
+    added_directories: list[Path] = []
+    cublas_bin_directory: Path | None = None
+    for package_root in package_roots:
+        for package_name in _CUDA_DLL_PACKAGE_DIRS:
+            directory = (Path(package_root) / package_name / "bin").resolve()
+            if not directory.is_dir():
+                logger.warning("NVIDIA CUDA DLL directory was not found: %s", directory)
+                continue
+            if directory in _REGISTERED_CUDA_DLL_DIRECTORIES:
+                continue
+
+            _CUDA_DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(directory)))
+            _REGISTERED_CUDA_DLL_DIRECTORIES.add(directory)
+            added_directories.append(directory)
+            logger.info("Registered NVIDIA CUDA DLL directory: %s", directory)
+            if package_name == "cublas":
+                cublas_bin_directory = directory
+
+    if cublas_bin_directory is None:
+        cublas_directories = [
+            (Path(package_root) / "cublas" / "bin").resolve()
+            for package_root in package_roots
+        ]
+        cublas_bin_directory = next(
+            (directory for directory in cublas_directories if directory.is_dir()),
+            None,
+        )
+    if cublas_bin_directory is None:
+        raise RuntimeError("NVIDIA cuBLAS DLL directory was not found.")
+
+    cublas_libraries = sorted(cublas_bin_directory.glob("cublas64_*.dll"))
+    if not cublas_libraries:
+        raise RuntimeError(
+            f"NVIDIA cuBLAS runtime DLL was not found in {cublas_bin_directory}."
+        )
+
+    cublas_library = cublas_libraries[0]
+    if cublas_library not in _LOADED_CUDA_DLL_LIBRARIES:
+        cublas_handle = ctypes.WinDLL(str(cublas_library))
+        _CUDA_DLL_LIBRARY_HANDLES.append(cublas_handle)
+        _LOADED_CUDA_DLL_LIBRARIES.add(cublas_library)
+        logger.info("Loaded NVIDIA cuBLAS runtime DLL: %s", cublas_library)
+
+    return tuple(added_directories)
+
 
 def create_whisper_model():
+    _configure_cuda_dll_directories()
+
     from faster_whisper import WhisperModel
 
-    return WhisperModel(
-        "large-v3",
-        device=os.environ.get("WHISPER_DEVICE", "cpu"),
-        compute_type=os.environ.get("WHISPER_COMPUTE_TYPE", "int8"),
+    logger.info(
+        "Whisper model loading model=small device=cuda compute_type=float16"
     )
+    model = WhisperModel(
+        "small",
+        device="cuda",
+        compute_type="float16",
+    )
+    logger.info(
+        "Whisper model loaded device=cuda compute_type=float16"
+    )
+    return model
 
 
 def claim_pending_transcript(db: Session) -> str | None:
@@ -309,6 +388,7 @@ def run_worker(
     stop_event: threading.Event | None = None,
 ) -> None:
 
+    logger.info("Transcription worker started")
     model = None
 
     while (
@@ -356,8 +436,9 @@ def run_worker(
         except Exception as error:
 
             logger.exception(
-                "Unable to initialize transcription for %s",
+                "Unable to initialize transcription for %s: %s",
                 transcript_id,
+                error,
             )
 
             _persist_failure(

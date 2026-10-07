@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
 import { getMeetingReport } from '../api/meetings'
+import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { useAuth } from '../contexts/AuthContext'
 import type { MeetingReport } from '../types/meeting'
 
@@ -11,6 +12,7 @@ export function MeetingReportPage() {
   const [report, setReport] = useState<MeetingReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -117,7 +119,28 @@ export function MeetingReportPage() {
                 </table>
               </div>
             )}
+            <button
+              className="button secondary"
+              type="button"
+              aria-expanded={transcriptOpen}
+              aria-controls="meeting-transcript-panel"
+              onClick={() => setTranscriptOpen((open) => !open)}
+            >
+              <FileText size={16} aria-hidden="true" />
+              {transcriptOpen ? 'Hide Transcript' : 'View Transcript'}
+            </button>
           </section>
+
+          {transcriptOpen && (
+            <TranscriptPanel
+              meetingId={meetingId}
+              organizerId={report.organizer_id}
+              isOrganizer={user?.id === report.organizer_id}
+              isOpen
+              inline
+              onClose={() => setTranscriptOpen(false)}
+            />
+          )}
         </div>
       ) : null}
     </div>

@@ -130,12 +130,13 @@ describe('TranscriptPanel', () => {
       segments: [],
     })
     const { rerender } = renderPanel(false)
-    expect(await screen.findByText(/Transcription is in progress/)).toBeInTheDocument()
+    expect(await screen.findByText('Transcript is being processed.')).toBeInTheDocument()
     expect(screen.queryByText('Welcome.')).not.toBeInTheDocument()
 
     vi.mocked(getMeetingTranscript).mockResolvedValue({
       ...transcript,
       status: 'failed',
+      error_message: '<script>unsafe detail</script>',
       segments: [],
     })
     rerender(
@@ -148,6 +149,18 @@ describe('TranscriptPanel', () => {
       />,
     )
     expect(await screen.findByText(/Transcription failed/)).toBeInTheDocument()
+    expect(screen.getByText('<script>unsafe detail</script>')).toBeInTheDocument()
+    expect(document.querySelector('script')).not.toBeInTheDocument()
+  })
+
+  it('shows pending status separately from processing', async () => {
+    vi.mocked(getMeetingTranscript).mockResolvedValue({
+      ...transcript,
+      status: 'pending',
+      segments: [],
+    })
+    renderPanel(false)
+    expect(await screen.findByText('Transcript is pending.')).toBeInTheDocument()
   })
 
   it('shows a friendly unavailable state when no transcript exists', async () => {
@@ -155,7 +168,7 @@ describe('TranscriptPanel', () => {
       new MeetingApiError('Transcript not found', 404),
     )
     renderPanel(false)
-    expect(await screen.findByText('Transcript is not available yet.')).toBeInTheDocument()
+    expect(await screen.findByText('Transcript not available.')).toBeInTheDocument()
   })
 
   it('filters segments case-insensitively and reports no search matches', async () => {

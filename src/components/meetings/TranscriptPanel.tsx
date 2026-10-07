@@ -17,6 +17,7 @@ interface TranscriptPanelProps {
   organizerId: string
   isOrganizer: boolean
   isOpen: boolean
+  inline?: boolean
   onClose: () => void
 }
 
@@ -40,7 +41,7 @@ function formatCorrectionTimestamp(value: string): string {
 
 function safeErrorMessage(error: unknown): string {
   if (error instanceof MeetingApiError && error.status === 404) {
-    return 'Transcript is not available yet.'
+    return 'Transcript not available.'
   }
   return 'Unable to load the transcript. Check your connection and try again.'
 }
@@ -169,6 +170,7 @@ export function TranscriptPanel({
   organizerId,
   isOrganizer,
   isOpen,
+  inline = false,
   onClose,
 }: TranscriptPanelProps) {
   const [transcript, setTranscript] = useState<MeetingTranscript | null>(null)
@@ -258,7 +260,8 @@ export function TranscriptPanel({
 
   const status = transcript?.status.toLowerCase()
   const isCompleted = status === 'completed'
-  const isProcessing = status === 'processing' || status === 'pending'
+  const isPending = status === 'pending'
+  const isProcessing = status === 'processing'
   const isFailed = status === 'failed'
 
   async function saveSegment(index: number, text: string, speaker: string): Promise<boolean> {
@@ -288,11 +291,15 @@ export function TranscriptPanel({
   if (!isOpen) return null
 
   return (
-    <aside className="meet-side-panel meet-transcript-panel" aria-label="Meeting transcript">
+    <aside
+      id={inline ? 'meeting-transcript-panel' : undefined}
+      className={`meet-side-panel meet-transcript-panel${inline ? ' is-inline' : ''}`}
+      aria-label="Meeting transcript"
+    >
       <div className="meet-side-panel-header">
         <div className="meet-transcript-panel-title">
           <FileText size={17} aria-hidden="true" />
-          <h2>Transcript</h2>
+          <h2>{inline ? 'Meeting Transcript' : 'Transcript'}</h2>
         </div>
         <button className="icon-button" onClick={onClose} aria-label="Close transcript panel">
           <X size={16} aria-hidden="true" />
@@ -310,9 +317,16 @@ export function TranscriptPanel({
             <RefreshCw size={13} aria-hidden="true" /> Retry
           </button>
         </div>
+      ) : transcript && isPending ? (
+        <p className="meet-transcript-state" role="status">
+          Transcript is pending.
+          <button className="meet-transcript-action" type="button" onClick={() => void loadTranscript()}>
+            <RefreshCw size={13} aria-hidden="true" /> Refresh
+          </button>
+        </p>
       ) : transcript && isProcessing ? (
         <p className="meet-transcript-state" role="status">
-          Transcription is in progress. Refresh the transcript to check for updates.
+          Transcript is being processed.
           <button className="meet-transcript-action" type="button" onClick={() => void loadTranscript()}>
             <RefreshCw size={13} aria-hidden="true" /> Refresh
           </button>
@@ -320,6 +334,7 @@ export function TranscriptPanel({
       ) : transcript && isFailed ? (
         <p className="meet-transcript-state" role="alert">
           Transcription failed. The transcript is unavailable.
+          {transcript.error_message && <span>{transcript.error_message}</span>}
           <button className="meet-transcript-action" type="button" onClick={() => void loadTranscript()}>
             <RefreshCw size={13} aria-hidden="true" /> Retry
           </button>
@@ -418,7 +433,7 @@ export function TranscriptPanel({
           )}
         </>
       ) : (
-        <p className="meet-transcript-state" role="status">Transcript is unavailable.</p>
+        <p className="meet-transcript-state" role="status">Transcript not available.</p>
       )}
     </aside>
   )

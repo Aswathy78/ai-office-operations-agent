@@ -576,6 +576,40 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .meet-side-panel-header h2 { margin: 0; font-size: 15px; color: #dce5f5; }
 .meet-side-panel-header .icon-button { background: transparent; border: 0; color: #8a9ab8; }
 .meet-transcript-panel { width: min(420px, 100%); }
+.meet-transcript-panel.is-inline {
+  position: static; inset: auto; z-index: auto; width: 100%; min-height: 240px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+}
+.meet-transcript-panel.is-inline .meet-side-panel-header { border-bottom-color: var(--border); }
+.meet-transcript-panel.is-inline .meet-side-panel-header h2 { color: var(--navy); }
+.meet-transcript-panel.is-inline .meet-side-panel-header .icon-button { color: var(--muted); }
+.meet-transcript-panel.is-inline .meet-transcript-panel-title { color: var(--blue); }
+.meet-transcript-panel.is-inline .meet-transcript-toolbar { border-bottom-color: var(--border); }
+.meet-transcript-panel.is-inline .meet-transcript-search {
+  border-color: var(--border); color: var(--muted); background: var(--surface);
+}
+.meet-transcript-panel.is-inline .meet-transcript-search input { color: #172033; }
+.meet-transcript-panel.is-inline .meet-transcript-search input::placeholder { color: var(--muted); }
+.meet-transcript-panel.is-inline .meet-transcript-action {
+  border-color: #bfd0e5; color: #174d8e; background: #fff;
+}
+.meet-transcript-panel.is-inline .meet-transcript-segment,
+.meet-transcript-panel.is-inline .meet-transcript-correction {
+  border-color: var(--border); background: #f8faff;
+}
+.meet-transcript-panel.is-inline .meet-transcript-speaker,
+.meet-transcript-panel.is-inline .meet-transcript-subheading,
+.meet-transcript-panel.is-inline .meet-transcript-correction-index { color: var(--navy); }
+.meet-transcript-panel.is-inline .meet-transcript-time,
+.meet-transcript-panel.is-inline .meet-transcript-edit-fields label,
+.meet-transcript-panel.is-inline .meet-transcript-correction dt { color: var(--muted); }
+.meet-transcript-panel.is-inline .meet-transcript-segment-content p,
+.meet-transcript-panel.is-inline .meet-transcript-correction dd { color: #172033; }
+.meet-transcript-panel.is-inline .meet-transcript-edit-fields input,
+.meet-transcript-panel.is-inline .meet-transcript-edit-fields textarea {
+  border-color: var(--border); color: #172033; background: #fff;
+}
+.meet-transcript-panel.is-inline .meet-transcript-state { color: var(--muted); }
 .meet-transcript-panel-title { display: flex; align-items: center; gap: 9px; color: #8a9ab8; }
 .meet-transcript-toolbar { display: flex; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid rgba(255,255,255,.07); }
 .meet-transcript-search { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid rgba(255,255,255,.13); border-radius: 7px; color: #8a9ab8; background: rgba(255,255,255,.04); }
