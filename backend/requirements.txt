@@ -8,8 +8,12 @@ python-multipart==0.0.32
 # Recording encryption dependency. Install with the backend requirements before
 # implementing the AES-GCM storage integration.
 cryptography==50.0.2
+python-dotenv==1.2.4
 
-# English speech-to-text worker (Whisper large-v3).
+# OpenAI Responses API structured summary generation.
+openai>=1.66.0,<3.0.0
+
+# English speech-to-text worker (Whisper small on CUDA).
 faster-whisper==1.2.1
 
 # Dependencies used by the backend test suite.

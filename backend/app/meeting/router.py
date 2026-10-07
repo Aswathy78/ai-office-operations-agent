@@ -5,7 +5,7 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.meeting.models import Meeting,MeetingAttendanceLog
+from app.meeting.models import Meeting, MeetingAttendanceLog, MeetingSummary
 from app.meeting.schemas import (
     AttendanceJoinRequest,
     AttendanceReportRow,
@@ -23,6 +23,7 @@ from app.meeting.schemas import (
     RecordingConsentRequest,
     RecordingConsentResponse,
     MeetingRecordingResponse,
+    MeetingSummaryResponse,
     MeetingTranscriptResponse,
     MeetingTranscriptUpdateRequest,
     TranscriptSegment,
@@ -1039,8 +1040,48 @@ async def lobby_websocket(
         pass
     finally:
         signaling_manager.disconnect(lobby_room_id, connection_id)
+
+
 @router.get(
-    "/{meeting_id}/transcript",
+        "/{meeting_id}/summary",
+        response_model=MeetingSummaryResponse,
+        summary="Organizer retrieves the persisted AI meeting summary",
+)
+def get_meeting_summary(
+        meeting_id: str,
+        organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+        db: Session = Depends(get_db),
+):
+        meeting = get_meeting_by_id(db, meeting_id)
+        if meeting is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Meeting not found",
+            )
+
+        if meeting.organizer_id != organizer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the meeting organizer can access the summary",
+            )
+
+        summary = (
+            db.query(MeetingSummary)
+            .filter(MeetingSummary.meeting_id == meeting_id)
+            .order_by(MeetingSummary.created_at.desc(), MeetingSummary.id.desc())
+            .first()
+        )
+        if summary is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Meeting summary not found",
+            )
+
+        return MeetingSummaryResponse.model_validate(summary)
+
+
+@router.get(
+        "/{meeting_id}/transcript",
     response_model=MeetingTranscriptResponse,
 )
 def get_transcript(

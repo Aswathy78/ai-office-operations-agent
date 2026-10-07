@@ -168,6 +168,23 @@ class MeetingTranscriptResponse(BaseModel):
     completed_at: datetime | None = None
 
 
+class MeetingSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    meeting_id: str
+    transcript_id: str
+    status: Literal["pending", "processing", "completed", "failed"]
+    overview: str | None = None
+    decisions: list[str] | None = None
+    discussion_topics: list[str] | None = None
+    open_questions: list[str] | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    error_message: str | None = None
+
+
 class TranscriptSegmentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

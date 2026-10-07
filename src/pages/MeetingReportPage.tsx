@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
-import { getMeetingReport } from '../api/meetings'
+import { getMeetingReport, getMeetingSummary, MeetingApiError } from '../api/meetings'
+import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
+import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { useAuth } from '../contexts/AuthContext'
-import type { MeetingReport } from '../types/meeting'
+import type { MeetingReport, MeetingSummary } from '../types/meeting'
 
 export function MeetingReportPage() {
   const { meetingId = '' } = useParams()
@@ -11,6 +13,11 @@ export function MeetingReportPage() {
   const [report, setReport] = useState<MeetingReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(true)
+  const [summaryError, setSummaryError] = useState('')
 
   useEffect(() => {
     let active = true
@@ -30,6 +37,34 @@ export function MeetingReportPage() {
 
     return () => { active = false }
   }, [meetingId, user])
+
+  useEffect(() => {
+    let active = true
+    if (!summaryOpen || !meetingId || !user) return
+
+    setSummaryLoading(true)
+    setMeetingSummary(null)
+    setSummaryError('')
+    getMeetingSummary(meetingId, user.id)
+      .then((summary) => {
+        if (active) setMeetingSummary(summary)
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        if (reason instanceof MeetingApiError && reason.status === 404) {
+          setMeetingSummary(null)
+          return
+        }
+        setSummaryError(
+          reason instanceof Error ? reason.message : 'Meeting summary could not be loaded.',
+        )
+      })
+      .finally(() => {
+        if (active) setSummaryLoading(false)
+      })
+
+    return () => { active = false }
+  }, [meetingId, summaryOpen, user])
 
   function formatTime(isoStr: string) {
     return new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(new Date(isoStr))
@@ -117,7 +152,50 @@ export function MeetingReportPage() {
                 </table>
               </div>
             )}
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                className="button secondary"
+                type="button"
+                aria-expanded={transcriptOpen}
+                aria-controls="meeting-transcript-panel"
+                onClick={() => setTranscriptOpen((open) => !open)}
+              >
+                <FileText size={16} aria-hidden="true" />
+                {transcriptOpen ? 'Hide Transcript' : 'View Transcript'}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                aria-expanded={summaryOpen}
+                aria-controls="meeting-summary-panel"
+                onClick={() => setSummaryOpen((open) => !open)}
+              >
+                <FileText size={16} aria-hidden="true" />
+                {summaryOpen ? 'Hide Summary' : 'View Summary'}
+              </button>
+            </div>
           </section>
+
+          {summaryOpen && (
+            <div id="meeting-summary-panel">
+              <MeetingSummaryPanel
+                summary={meetingSummary}
+                loading={summaryLoading}
+                error={summaryError}
+              />
+            </div>
+          )}
+
+          {transcriptOpen && (
+            <TranscriptPanel
+              meetingId={meetingId}
+              organizerId={report.organizer_id}
+              isOrganizer={user?.id === report.organizer_id}
+              isOpen
+              inline
+              onClose={() => setTranscriptOpen(false)}
+            />
+          )}
         </div>
       ) : null}
     </div>

@@ -1,4 +1,4 @@
-"""Opt-in large-v3 p90 check.
+"""Opt-in small CUDA model p90 check.
 
 Set STT_PERFORMANCE_AUDIO_PATHS to at least ten 60-minute English audio files,
 separated by the platform path separator, and run this test on the target worker.
@@ -34,7 +34,7 @@ PERFORMANCE_AUDIO_PATHS = os.environ.get("STT_PERFORMANCE_AUDIO_PATHS")
 
 
 @pytest.mark.skipif(not PERFORMANCE_AUDIO_PATHS, reason="No 60-minute STT benchmark corpus configured")
-def test_large_v3_transcription_p90_is_within_ten_minutes(tmp_path):
+def test_small_cuda_transcription_p90_is_within_ten_minutes(tmp_path):
     import av
 
     audio_paths = [Path(path) for path in PERFORMANCE_AUDIO_PATHS.split(os.pathsep)]
@@ -121,4 +121,4 @@ def test_large_v3_transcription_p90_is_within_ten_minutes(tmp_path):
     engine.dispose()
     durations.sort()
     p90 = durations[math.ceil(0.9 * len(durations)) - 1]
-    assert p90 <= 600, f"large-v3 transcription p90 was {p90:.1f}s, expected <= 600s"
+    assert p90 <= 600, f"small CUDA transcription p90 was {p90:.1f}s, expected <= 600s"

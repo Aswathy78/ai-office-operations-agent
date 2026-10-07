@@ -58,6 +58,17 @@ TRANSCRIPT_STATUSES = (
     TRANSCRIPT_STATUS_FAILED,
 )
 
+SUMMARY_STATUS_PENDING = "pending"
+SUMMARY_STATUS_PROCESSING = "processing"
+SUMMARY_STATUS_COMPLETED = "completed"
+SUMMARY_STATUS_FAILED = "failed"
+SUMMARY_STATUSES = (
+    SUMMARY_STATUS_PENDING,
+    SUMMARY_STATUS_PROCESSING,
+    SUMMARY_STATUS_COMPLETED,
+    SUMMARY_STATUS_FAILED,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -81,6 +92,11 @@ class Meeting(Base):
     )
 
     guest_requests: Mapped[list["MeetingGuestRequest"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+    )
+
+    summaries: Mapped[list["MeetingSummary"]] = relationship(
         back_populates="meeting",
         cascade="all, delete-orphan",
     )
@@ -290,6 +306,66 @@ class MeetingTranscript(Base):
         nullable=True,
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    summaries: Mapped[list["MeetingSummary"]] = relationship(
+        back_populates="transcript",
+        cascade="all, delete-orphan",
+    )
+
+
+class MeetingSummary(Base):
+    __tablename__ = "meeting_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in SUMMARY_STATUSES)})",
+            name="ck_meeting_summaries_status",
+        ),
+        UniqueConstraint(
+            "transcript_id",
+            name="uq_meeting_summaries_transcript_id",
+        ),
+        Index("ix_meeting_summaries_meeting_id", "meeting_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transcript_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=SUMMARY_STATUS_PENDING,
+    )
+    overview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decisions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    discussion_topics: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    open_questions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    meeting: Mapped["Meeting"] = relationship(back_populates="summaries")
+    transcript: Mapped["MeetingTranscript"] = relationship(back_populates="summaries")
 
 
 class MeetingTranscriptCorrection(Base):

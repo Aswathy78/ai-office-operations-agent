@@ -31,6 +31,7 @@ import {
 import {
   endMeetingForEveryone,
   getMeeting,
+  getMeetingSummary,
   joinMeetingAttendance,
   leaveMeetingAttendance,
   recordMeetingRecordingConsent,
@@ -44,6 +45,7 @@ import {
   type RecordingConsentStatus,
 } from '../api/meetings'
 import { LocalMediaPreview } from '../components/meetings/LocalMediaPreview'
+import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { OrganizerGuestLobby } from '../components/meetings/OrganizerGuestLobby'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { useAuth } from '../contexts/AuthContext'
@@ -59,7 +61,12 @@ import {
   type RecordingUploadState,
 } from '../hooks/meetingRecordingFlow'
 import { useMeetingRoom } from '../hooks/useMeetingRoom'
-import type { MeetingDetails, ParticipantInfo, ParticipantPeerState } from '../types/meeting'
+import type {
+  MeetingDetails,
+  MeetingSummary,
+  ParticipantInfo,
+  ParticipantPeerState,
+} from '../types/meeting'
 
 type PageState =
   | { kind: 'loading' }
@@ -178,10 +185,14 @@ export function MeetingRoomPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
   const [pageState, setPageState] = useState<PageState>({ kind: 'loading' })
+  const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(true)
+  const [summaryError, setSummaryError] = useState('')
   const [attendanceError, setAttendanceError] = useState('')
   const [joinedMeeting, setJoinedMeeting] = useState(false)
   const [showLobby, setShowLobby] = useState(false)
-  const [showTranscript, setShowTranscript] = useState(false)
+  const [showTranscript, setShowTranscript] = useState(true)
+  const [meetingEndedLocally, setMeetingEndedLocally] = useState(false)
   const [showEndConfirm, setShowEndConfirm] = useState(false)
   const [showAskUnmutePrompt, setShowAskUnmutePrompt] = useState(false)
   const [endingMeeting, setEndingMeeting] = useState(false)
@@ -207,6 +218,7 @@ export function MeetingRoomPage() {
     email: user?.email,
     userId: user?.id,
   })
+  const meetingHasEnded = room.meetingEnded || meetingEndedLocally
   const recording = useMeetingRecording(room.localStream, {
     remoteStreams: room.remoteStreams,
     participantInfos: room.participantInfos,
@@ -233,18 +245,15 @@ export function MeetingRoomPage() {
     }
   }, [room.isAskedToUnmute])
 
-  // Handle meeting_ended from server (host ended it)
+  // Stop meeting media and attendance when the server ends the meeting.
   useEffect(() => {
     if (room.meetingEnded) {
-      // Clean up, then navigate to meetings page after a brief moment
       room.stopLocalMedia()
       room.disconnect()
       if (attendanceRef.current && meetingId) {
         void leaveMeetingAttendance(meetingId, attendanceRef.current.id).catch(() => undefined)
         attendanceRef.current = null
       }
-      const t = setTimeout(() => navigate('/meetings', { replace: true }), 2500)
-      return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.meetingEnded])
@@ -276,6 +285,41 @@ export function MeetingRoomPage() {
       })
     return () => { active = false }
   }, [meetingId])
+
+  useEffect(() => {
+    if (!meetingHasEnded || !meetingId || !meeting) return
+    let active = true
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    setSummaryLoading(true)
+    setMeetingSummary(null)
+    setSummaryError('')
+    const loadSummary = async () => {
+      try {
+        const summary = await getMeetingSummary(meetingId, meeting.organizer_id)
+        if (!active) return
+        setMeetingSummary(summary)
+        if (summary.status === 'pending' || summary.status === 'processing') {
+          retryTimer = setTimeout(() => void loadSummary(), 3000)
+        }
+      } catch (error: unknown) {
+        if (!active) return
+        if (error instanceof MeetingApiError && error.status === 404) {
+          setMeetingSummary(null)
+          return
+        }
+        setSummaryError(
+          error instanceof Error ? error.message : 'Meeting summary could not be loaded.',
+        )
+      } finally {
+        if (active) setSummaryLoading(false)
+      }
+    }
+    void loadSummary()
+    return () => {
+      active = false
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [meetingHasEnded, meetingId, meeting])
 
   // Attendance tracking
   useEffect(() => {
@@ -438,14 +482,14 @@ export function MeetingRoomPage() {
     setEndingMeeting(true)
     try {
       await endMeetingForEveryone(meetingId, user.id)
-      // The WS will receive meeting_ended and clean up; navigate immediately for the host
       room.stopLocalMedia()
       room.disconnect()
       if (attendanceRef.current) {
         void leaveMeetingAttendance(meetingId, attendanceRef.current.id).catch(() => undefined)
         attendanceRef.current = null
       }
-      navigate('/meetings', { replace: true })
+      setMeetingEndedLocally(true)
+      setShowEndConfirm(false)
     } catch (err) {
       setEndingMeeting(false)
       setShowEndConfirm(false)
@@ -558,6 +602,44 @@ export function MeetingRoomPage() {
     )
   }
 
+  if (meetingHasEnded && meeting) {
+    return (
+      <div className="meet-room meet-postmeeting">
+        <div className="meet-postmeeting-content">
+          <header className="meet-postmeeting-header">
+            <div>
+              <p className="eyebrow">Meeting ended</p>
+              <h1>{meeting.title}</h1>
+            </div>
+            <button className="button secondary" onClick={() => navigate('/meetings')}>
+              Back to meetings
+            </button>
+          </header>
+
+          <MeetingSummaryPanel
+            summary={meetingSummary}
+            loading={summaryLoading}
+            error={summaryError}
+          />
+
+          {!showTranscript && (
+            <button className="button secondary" onClick={() => setShowTranscript(true)}>
+              <FileText size={16} aria-hidden="true" /> View transcript
+            </button>
+          )}
+          <TranscriptPanel
+            meetingId={meetingId}
+            organizerId={meeting.organizer_id}
+            isOrganizer={isMeetingOrganizer(meeting.organizer_id, user?.id)}
+            isOpen={showTranscript}
+            inline
+            onClose={() => setShowTranscript(false)}
+          />
+        </div>
+      </div>
+    )
+  }
+
   // ── Live meeting room ──────────────────────────────────────────────────────
   const m = pageState.meeting
   const isHost = Boolean(room.isOrganizer || isMeetingOrganizer(m.organizer_id, user?.id))
@@ -622,18 +704,6 @@ export function MeetingRoomPage() {
           >
             Stay muted
           </button>
-        </div>
-      )}
-
-      {/* Meeting ended overlay (host ended or all participants left) */}
-      {room.meetingEnded && (
-        <div className="meet-ended-overlay" role="alert">
-          <div className="meet-center-state">
-            <div style={{ fontSize: '2rem', marginBottom: '8px' }}>👋</div>
-            <h2>Meeting ended</h2>
-            <p>{room.meetingEndedReason ?? 'The meeting has been ended by the host.'}</p>
-            <p style={{ fontSize: '13px', color: 'var(--muted)' }}>Redirecting to meetings…</p>
-          </div>
         </div>
       )}
 
@@ -818,14 +888,6 @@ export function MeetingRoomPage() {
         </aside>
       )}
 
-      <TranscriptPanel
-        meetingId={meetingId}
-        organizerId={m.organizer_id}
-        isOrganizer={isHost}
-        isOpen={showTranscript}
-        onClose={() => setShowTranscript(false)}
-      />
-
       {showSharePanel && (
         <aside className="meet-side-panel" aria-label="Share meeting">
           <div className="meet-side-panel-header">
@@ -898,20 +960,6 @@ export function MeetingRoomPage() {
           >
             <LinkIcon size={20} />
             <span>Share</span>
-          </button>
-
-          <button
-            className={`meet-ctrl-btn${showTranscript ? ' meet-ctrl-btn--active' : ''}`}
-            onClick={() => {
-              setShowTranscript((current) => !current)
-              setShowLobby(false)
-              setShowSharePanel(false)
-            }}
-            aria-label="Show transcript"
-            title="Transcript"
-          >
-            <FileText size={20} />
-            <span>Transcript</span>
           </button>
 
           {/* End meeting for everyone — host only */}

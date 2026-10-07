@@ -322,9 +322,9 @@ def test_upload_to_transcription_happy_path(
         SimpleNamespace(WhisperModel=FakeWhisperModel),
     )
     model = create_whisper_model()
-    assert constructor_calls[0][0] == "large-v3"
-    assert "device" in constructor_calls[0][1]
-    assert "compute_type" in constructor_calls[0][1]
+    assert constructor_calls == [
+        ("small", {"device": "cuda", "compute_type": "float16"})
+    ]
 
     temporary_directory = tmp_path / "decrypted-audio"
     temporary_directory.mkdir()

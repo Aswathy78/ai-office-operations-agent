@@ -977,7 +977,11 @@ export function useMeetingRoom({
 
     try {
       const stream = await getUserMedia.call(navigator.mediaDevices, {
-        audio: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
         video: true,
       })
       if (requestId !== mediaRequestIdRef.current) {
