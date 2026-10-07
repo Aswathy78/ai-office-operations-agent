@@ -14,6 +14,7 @@ export function MeetingReportPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [summaryError, setSummaryError] = useState('')
@@ -39,7 +40,7 @@ export function MeetingReportPage() {
 
   useEffect(() => {
     let active = true
-    if (!meetingId || !user) return
+    if (!summaryOpen || !meetingId || !user) return
 
     setSummaryLoading(true)
     setMeetingSummary(null)
@@ -63,7 +64,7 @@ export function MeetingReportPage() {
       })
 
     return () => { active = false }
-  }, [meetingId, user])
+  }, [meetingId, summaryOpen, user])
 
   function formatTime(isoStr: string) {
     return new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(new Date(isoStr))
@@ -99,12 +100,6 @@ export function MeetingReportPage() {
         </section>
       ) : report ? (
         <div className="report-content" style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
-          <MeetingSummaryPanel
-            summary={meetingSummary}
-            loading={summaryLoading}
-            error={summaryError}
-          />
-
           <section className="report-summary" style={{ background: 'var(--surface)', padding: '1.5rem', borderRadius: '8px', border: '1px solid var(--border)' }}>
             <h3 style={{ marginTop: 0, marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <FileText size={18} /> {report.title}
@@ -157,17 +152,39 @@ export function MeetingReportPage() {
                 </table>
               </div>
             )}
-            <button
-              className="button secondary"
-              type="button"
-              aria-expanded={transcriptOpen}
-              aria-controls="meeting-transcript-panel"
-              onClick={() => setTranscriptOpen((open) => !open)}
-            >
-              <FileText size={16} aria-hidden="true" />
-              {transcriptOpen ? 'Hide Transcript' : 'View Transcript'}
-            </button>
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              <button
+                className="button secondary"
+                type="button"
+                aria-expanded={transcriptOpen}
+                aria-controls="meeting-transcript-panel"
+                onClick={() => setTranscriptOpen((open) => !open)}
+              >
+                <FileText size={16} aria-hidden="true" />
+                {transcriptOpen ? 'Hide Transcript' : 'View Transcript'}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                aria-expanded={summaryOpen}
+                aria-controls="meeting-summary-panel"
+                onClick={() => setSummaryOpen((open) => !open)}
+              >
+                <FileText size={16} aria-hidden="true" />
+                {summaryOpen ? 'Hide Summary' : 'View Summary'}
+              </button>
+            </div>
           </section>
+
+          {summaryOpen && (
+            <div id="meeting-summary-panel">
+              <MeetingSummaryPanel
+                summary={meetingSummary}
+                loading={summaryLoading}
+                error={summaryError}
+              />
+            </div>
+          )}
 
           {transcriptOpen && (
             <TranscriptPanel

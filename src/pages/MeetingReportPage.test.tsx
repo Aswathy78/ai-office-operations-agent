@@ -120,12 +120,18 @@ describe('MeetingReportPage transcript', () => {
     expect(screen.getByText('Attendance Log')).toBeInTheDocument()
     expect(screen.getByText('Maya')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Transcript' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View Summary' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Meeting Summary' })).not.toBeInTheDocument()
+    expect(getMeetingSummary).not.toHaveBeenCalled()
     expect(getMeetingReport).toHaveBeenCalledWith('meeting-current', 'organizer-1')
   })
 
   describe('MeetingReportPage summary', () => {
-    it('fetches and displays the persisted summary for the current meeting', async () => {
+    it('fetches and displays the persisted summary when requested', async () => {
+      const user = userEvent.setup()
       renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Summary' }))
 
       expect(await screen.findByRole('heading', { name: 'Meeting Summary' })).toBeInTheDocument()
       expect(getMeetingSummary).toHaveBeenCalledWith('meeting-current', 'organizer-1')
@@ -142,6 +148,7 @@ describe('MeetingReportPage transcript', () => {
       ['processing', 'Meeting summary is being processed.'],
       ['failed', 'Meeting summary generation failed.'],
     ])('displays persisted %s summary status', async (status, message) => {
+      const user = userEvent.setup()
       vi.mocked(getMeetingSummary).mockResolvedValue({
         ...summary,
         status: status as MeetingSummary['status'],
@@ -149,6 +156,7 @@ describe('MeetingReportPage transcript', () => {
       })
 
       renderReport()
+      await user.click(await screen.findByRole('button', { name: 'View Summary' }))
 
       expect(await screen.findByText(message)).toBeInTheDocument()
       if (status === 'failed') {
@@ -158,13 +166,26 @@ describe('MeetingReportPage transcript', () => {
     })
 
     it('displays an unavailable state when no persisted summary exists', async () => {
+      const user = userEvent.setup()
       vi.mocked(getMeetingSummary).mockRejectedValue(
         new MeetingApiError('Meeting summary not found', 404),
       )
 
       renderReport()
+      await user.click(await screen.findByRole('button', { name: 'View Summary' }))
 
       expect(await screen.findByText('Meeting summary not available.')).toBeInTheDocument()
+    })
+
+    it('hides the summary without affecting transcript visibility', async () => {
+      const user = userEvent.setup()
+      renderReport()
+      await user.click(await screen.findByRole('button', { name: 'View Summary' }))
+      expect(await screen.findByRole('heading', { name: 'Meeting Summary' })).toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: 'Hide Summary' }))
+      expect(screen.queryByRole('heading', { name: 'Meeting Summary' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'View Transcript' })).toBeInTheDocument()
     })
   })
 

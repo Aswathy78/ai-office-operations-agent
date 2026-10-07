@@ -264,6 +264,31 @@ export function TranscriptPanel({
   const isProcessing = status === 'processing'
   const isFailed = status === 'failed'
 
+  useEffect(() => {
+    if (!isOpen || loading || (!isPending && !isProcessing)) return
+    let active = true
+    const timer = setTimeout(() => {
+      void getMeetingTranscript(meetingId, organizerId)
+        .then((result) => {
+          if (active) {
+            setTranscript(result)
+            setLoadError('')
+          }
+        })
+        .catch((error: unknown) => {
+          if (active) {
+            setTranscript(null)
+            setLoadError(safeErrorMessage(error))
+          }
+        })
+    }, 3000)
+
+    return () => {
+      active = false
+      clearTimeout(timer)
+    }
+  }, [isOpen, isPending, isProcessing, loading, meetingId, organizerId, transcript])
+
   async function saveSegment(index: number, text: string, speaker: string): Promise<boolean> {
     if (!transcript) return false
     const nextSegments = transcript.segments.map((segment, segmentIndex) => ({

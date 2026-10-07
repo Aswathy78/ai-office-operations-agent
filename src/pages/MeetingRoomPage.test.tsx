@@ -2,6 +2,7 @@
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { getMeeting, getMeetingSummary } from '../api/meetings'
 import { MeetingRoomPage } from './MeetingRoomPage'
@@ -48,8 +49,8 @@ vi.mock('../api/meetings', () => ({
   getMeeting: vi.fn(),
   getMeetingSummary: vi.fn(),
   endMeetingForEveryone: vi.fn(),
-  joinMeetingAttendance: vi.fn(),
-  leaveMeetingAttendance: vi.fn(),
+  joinMeetingAttendance: vi.fn().mockResolvedValue({ id: 'attendance-1' }),
+  leaveMeetingAttendance: vi.fn().mockResolvedValue(undefined),
   recordMeetingRecordingConsent: vi.fn(),
   registerParticipantTracks: vi.fn(),
   startMeetingRecording: vi.fn(),
@@ -75,7 +76,8 @@ vi.mock('../components/meetings/OrganizerGuestLobby', () => ({
 }))
 
 vi.mock('../components/meetings/TranscriptPanel', () => ({
-  TranscriptPanel: () => <div />,
+  TranscriptPanel: ({ isOpen }: { isOpen: boolean }) =>
+    isOpen ? <div aria-label="Meeting transcript" /> : null,
 }))
 
 const meeting: MeetingDetails = {
@@ -105,29 +107,41 @@ const summary: MeetingSummary = {
   error_message: null,
 }
 
-function renderMeetingRoom() {
-  return render(
+function meetingRoomElement() {
+  return (
     <MemoryRouter initialEntries={['/app/meetings/meeting-current']}>
       <Routes>
         <Route path="/app/meetings/:meetingId" element={<MeetingRoomPage />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   )
 }
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  roomValue.meetingEnded = false
 })
 
 describe('MeetingRoomPage summary', () => {
-  it('fetches and displays the persisted summary status for the current meeting', async () => {
+  it('hides transcript and summary during the meeting, then displays post-meeting states', async () => {
+    const user = userEvent.setup()
     vi.mocked(getMeeting).mockResolvedValue(meeting)
     vi.mocked(getMeetingSummary).mockResolvedValue(summary)
 
-    renderMeetingRoom()
+    const view = render(meetingRoomElement())
+    await user.click(await screen.findByRole('button', { name: 'Join meeting' }))
+
+    expect(screen.queryByRole('heading', { name: 'Meeting Summary' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Meeting transcript')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show transcript' })).not.toBeInTheDocument()
+    expect(getMeetingSummary).not.toHaveBeenCalled()
+
+    roomValue.meetingEnded = true
+    view.rerender(meetingRoomElement())
 
     expect(await screen.findByRole('heading', { name: 'Meeting Summary' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Meeting transcript')).toBeInTheDocument()
     await waitFor(() => {
       expect(getMeetingSummary).toHaveBeenCalledWith(
         'meeting-current',
