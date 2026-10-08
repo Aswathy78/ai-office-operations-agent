@@ -1035,3 +1035,54 @@ Story 2.3 is implemented as a post-recording transcript workflow. The existing `
 
 The implementation is designed to be reused by the following meeting-intelligence features without recreating the transcription or transcript-management pipeline.
 
+
+# 🤖 FR-10 — AI Meeting Summary
+
+The AI Meeting Summary feature generates a structured summary from the completed meeting transcript.
+
+### Summary includes
+
+- Meeting overview
+- Decisions
+- Discussion topics
+- Open questions
+
+### Summary workflow
+
+```text
+Completed Meeting Recording
+          ↓
+Automatic Transcription
+          ↓
+Speaker Identification
+          ↓
+Transcript Search / Correction
+          ↓
+FR-10 — AI Meeting Summary
+          ↓
+Persisted Meeting Summary
+          ↓
+Meeting Report / View History
+
+
+# 📌 Current Project Status
+
+### Epic 1 — Meeting Management
+
+- Meeting creation
+- Meeting room
+- WebRTC meeting functionality
+- Attendance
+- Guest lobby
+- Recording consent
+- Meeting recording
+
+### Epic 2 — AI Transcription & Meeting Intelligence
+
+- FR-7 — Automatic transcription ✅
+- FR-8 — Speaker identification ✅
+- FR-9 — Transcript correction/search ✅
+- FR-10 — AI meeting summary ✅
+- FR-11 — Action item extraction
+
+---

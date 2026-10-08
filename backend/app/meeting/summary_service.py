@@ -1,6 +1,7 @@
 """Generation and persistence of AI meeting summaries."""
 
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import uuid
@@ -39,10 +40,13 @@ def generate_meeting_summary(
     transcript_id: str,
 ) -> MeetingSummary:
     transcript = db.get(MeetingTranscript, transcript_id)
+
     if transcript is None:
         raise ValueError("Meeting transcript not found.")
+
     if transcript.status != TRANSCRIPT_STATUS_COMPLETED:
         raise ValueError("A completed meeting transcript is required.")
+
     if not transcript.transcript_text or not transcript.transcript_text.strip():
         raise ValueError("The completed meeting transcript has no text to summarize.")
 
@@ -51,12 +55,15 @@ def generate_meeting_summary(
         .filter(MeetingSummary.transcript_id == transcript.id)
         .one_or_none()
     )
+
     if summary is not None and summary.status == SUMMARY_STATUS_COMPLETED:
         return summary
+
     if summary is not None and summary.status == SUMMARY_STATUS_PROCESSING:
         return summary
 
     recording = db.get(MeetingRecording, transcript.recording_id)
+
     if recording is None:
         raise ValueError("Meeting transcript recording not found.")
 
@@ -76,46 +83,69 @@ def generate_meeting_summary(
     db.commit()
 
     try:
+        # Load backend/.env
         load_dotenv(
             dotenv_path=Path(__file__).resolve().parents[2] / ".env",
             override=False,
         )
-        api_key = os.environ.get("OPENAI_API_KEY")
+
+        api_key = os.environ.get("GROQ_API_KEY")
+
         if not api_key:
             raise RuntimeError(
-                "OPENAI_API_KEY is not set in the environment or backend/.env."
+                "GROQ_API_KEY is not set in the environment or backend/.env."
             )
 
-        from openai import OpenAI
+        from groq import Groq
 
-        client = OpenAI(api_key=api_key)
-        response = client.responses.parse(
-            model=os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-4o-mini"),
-            input=[
+        client = Groq(api_key=api_key)
+
+        model = os.environ.get(
+            "GROQ_SUMMARY_MODEL",
+            "openai/gpt-oss-20b",
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
                 {
                     "role": "system",
                     "content": (
                         "Summarize only the supplied persisted meeting transcript. "
                         "Do not invent, infer, or add information not stated in it. "
                         "Return an empty array for any category with no supported "
-                        "items. Return exactly overview, decisions, "
-                        "discussion_topics, and open_questions."
+                        "items. Return exactly these four fields: overview, "
+                        "decisions, discussion_topics, and open_questions. "
+                        "The response must be valid JSON."
                     ),
                 },
-                {"role": "user", "content": transcript.transcript_text},
+                {
+                    "role": "user",
+                    "content": transcript.transcript_text,
+                },
             ],
-            text_format=SummarySections,
+            temperature=0,
+            response_format={"type": "json_object"},
         )
-        if response.output_parsed is None:
+
+        content = response.choices[0].message.content
+
+        if not content:
             raise MeetingSummaryGenerationError(
-                "OpenAI returned no parsed summary."
-        )
-        sections = SummarySections.model_validate(response.output_parsed)
+                "Groq returned no summary."
+            )
+
+        parsed = json.loads(content)
+
+        sections = SummarySections.model_validate(parsed)
+
     except Exception as error:
         summary.status = SUMMARY_STATUS_FAILED
         summary.error_message = str(error)[:4000] or type(error).__name__
         summary.completed_at = datetime.now(timezone.utc)
+
         db.commit()
+
         raise MeetingSummaryGenerationError(
             f"Meeting summary generation failed: {summary.error_message}"
         ) from error
@@ -127,6 +157,8 @@ def generate_meeting_summary(
     summary.status = SUMMARY_STATUS_COMPLETED
     summary.error_message = None
     summary.completed_at = datetime.now(timezone.utc)
+
     db.commit()
     db.refresh(summary)
+
     return summary
