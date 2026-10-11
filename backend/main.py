@@ -1,5 +1,8 @@
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
 from app.db.database import create_tables
 from app.meeting.router import router as meeting_router
@@ -25,6 +28,10 @@ app.include_router(meeting_router)
 
 @app.on_event("startup")
 def startup():
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parent / ".env",
+        override=False,
+    )
     create_tables()
 
 

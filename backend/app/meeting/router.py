@@ -5,7 +5,12 @@ from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.meeting.models import Meeting, MeetingAttendanceLog, MeetingSummary
+from app.meeting.models import (
+    Meeting,
+    MeetingActionItemExtraction,
+    MeetingAttendanceLog,
+    MeetingSummary,
+)
 from app.meeting.schemas import (
     AttendanceJoinRequest,
     AttendanceReportRow,
@@ -14,6 +19,8 @@ from app.meeting.schemas import (
     GuestJoinRequest,
     GuestRequestResponse,
     MeetingCreate,
+    MeetingActionItemResponse,
+    MeetingActionItemsResponse,
     MeetingReportResponse,
     MeetingResponse,
     MeetingValidationResponse,
@@ -54,6 +61,10 @@ from app.meeting.service import (
     get_meeting_transcript,
     update_meeting_transcript,
     get_meeting_transcript_corrections,
+)
+from app.meeting.action_item_service import (
+    MeetingActionItemExtractionError,
+    generate_meeting_action_items,
 )
 from app.meeting.signaling import signaling_manager
 
@@ -1080,6 +1091,133 @@ def get_meeting_summary(
         return MeetingSummaryResponse.model_validate(summary)
 
 
+def _meeting_action_items_response(
+    extraction: MeetingActionItemExtraction,
+) -> MeetingActionItemsResponse:
+    return MeetingActionItemsResponse(
+        id=extraction.id,
+        meeting_id=extraction.meeting_id,
+        transcript_id=extraction.transcript_id,
+        status=extraction.status,
+        created_at=extraction.created_at,
+        updated_at=extraction.updated_at,
+        processing_started_at=extraction.processing_started_at,
+        completed_at=extraction.completed_at,
+        error_message=extraction.error_message,
+        action_items=[
+            MeetingActionItemResponse(
+                id=item.id,
+                owner_name=item.owner_name,
+                task_description=item.task_description,
+                deadline_at=item.deadline_at,
+                deadline_text=item.deadline_text,
+                priority=item.priority,
+                confidence=item.confidence,
+                meeting_id=extraction.meeting_id,
+                transcript_id=extraction.transcript_id,
+                source_segment_index=item.source_segment_index,
+                source_start_seconds=item.source_start_seconds,
+                source_end_seconds=item.source_end_seconds,
+                source_quote_start_seconds=item.source_quote_start_seconds,
+                source_quote_end_seconds=item.source_quote_end_seconds,
+                source_quote=item.source_quote,
+            )
+            for item in sorted(
+                extraction.items,
+                key=lambda action_item: (
+                    action_item.source_segment_index,
+                    action_item.id,
+                ),
+            )
+        ],
+    )
+
+
+@router.post(
+    "/{meeting_id}/action-items/extract",
+    response_model=MeetingActionItemsResponse,
+    summary="Extract action items from the completed meeting transcript",
+)
+def extract_meeting_action_items(
+    meeting_id: str,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can extract action items",
+        )
+
+    transcript = get_meeting_transcript(db, meeting_id)
+    if transcript is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Completed transcript not found",
+        )
+
+    try:
+        extraction = generate_meeting_action_items(db, transcript.id)
+    except MeetingActionItemExtractionError:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Action item extraction failed",
+        ) from None
+
+    return _meeting_action_items_response(extraction)
+
+
+@router.get(
+    "/{meeting_id}/action-items",
+    response_model=MeetingActionItemsResponse,
+    summary="Retrieve persisted action items for a meeting",
+)
+def get_meeting_action_items(
+    meeting_id: str,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can access action items",
+        )
+
+    transcript = get_meeting_transcript(db, meeting_id)
+    if transcript is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Completed transcript not found",
+        )
+
+    extraction = (
+        db.query(MeetingActionItemExtraction)
+        .filter(MeetingActionItemExtraction.transcript_id == transcript.id)
+        .one_or_none()
+    )
+    if extraction is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting action items not found",
+        )
+
+    return _meeting_action_items_response(extraction)
+
+
 @router.get(
         "/{meeting_id}/transcript",
     response_model=MeetingTranscriptResponse,
@@ -1087,6 +1225,7 @@ def get_meeting_summary(
 def get_transcript(
     meeting_id: str,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
@@ -1097,7 +1236,7 @@ def get_transcript(
     if meeting.organizer_id != organizer_id:
         raise HTTPException(status_code=403, detail="Organizer access required")
 
-    transcript = get_meeting_transcript(db, meeting_id)
+    transcript = get_meeting_transcript(db, meeting_id, transcript_id)
 
     if transcript is None:
         raise HTTPException(
@@ -1129,6 +1268,7 @@ def update_transcript(
     meeting_id: str,
     request: MeetingTranscriptUpdateRequest,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
@@ -1148,6 +1288,7 @@ def update_transcript(
                 for segment in request.segments
             ],
             editor_id=organizer_id,
+            transcript_id=transcript_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1181,6 +1322,7 @@ def update_transcript(
 def get_transcript_corrections(
     meeting_id: str,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
@@ -1194,6 +1336,7 @@ def get_transcript_corrections(
     corrections = get_meeting_transcript_corrections(
         db,
         meeting_id,
+        transcript_id,
     )
 
     return corrections

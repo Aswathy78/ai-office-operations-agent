@@ -123,6 +123,27 @@ describe('TranscriptPanel', () => {
     expect(screen.getByText('Flagged for correction')).toBeInTheDocument()
   })
 
+  it('preserves fractional transcript segment timestamps', async () => {
+    vi.mocked(getMeetingTranscript).mockResolvedValue({
+      ...transcript,
+      segments: [
+        {
+          ...transcript.segments[0],
+          start: 20.68,
+          end: 27.3,
+          text: 'A timestamped segment.',
+        },
+      ],
+    })
+
+    renderPanel(false)
+
+    expect(await screen.findByText('A timestamped segment.')).toBeInTheDocument()
+    expect(
+      document.querySelector('#meeting-transcript-segment-0 time'),
+    ).toHaveTextContent('0:20.68–0:27.30')
+  })
+
   it('shows processing and failed states without rendering transcript text', async () => {
     vi.mocked(getMeetingTranscript).mockResolvedValue({
       ...transcript,

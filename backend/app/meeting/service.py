@@ -1334,8 +1334,9 @@ def delete_meeting(db: Session, meeting_id: str, organizer_id: str) -> None:
 def get_meeting_transcript(
     db: Session,
     meeting_id: str,
+    transcript_id: str | None = None,
 ) -> MeetingTranscript | None:
-    return (
+    query = (
         db.query(MeetingTranscript)
         .join(
             MeetingRecording,
@@ -1343,16 +1344,23 @@ def get_meeting_transcript(
         )
         .filter(MeetingRecording.meeting_id == meeting_id)
         .filter(MeetingTranscript.status == "completed")
-        .order_by(MeetingTranscript.created_at.desc())
-        .first()
     )
+    if transcript_id is not None:
+        query = query.filter(MeetingTranscript.id == transcript_id)
+    else:
+        query = query.order_by(
+            MeetingTranscript.created_at.desc(),
+            MeetingTranscript.id.desc(),
+        )
+    return query.first()
 def update_meeting_transcript(
     db: Session,
     meeting_id: str,
     segments: list[dict[str, object]],
     editor_id: str,
+    transcript_id: str | None = None,
 ) -> MeetingTranscript | None:
-    transcript = get_meeting_transcript(db, meeting_id)
+    transcript = get_meeting_transcript(db, meeting_id, transcript_id)
 
     if transcript is None:
         return None
@@ -1415,13 +1423,15 @@ def update_meeting_transcript(
 def get_meeting_transcript_corrections(
     db: Session,
     meeting_id: str,
+    transcript_id: str | None = None,
 ) -> list[MeetingTranscriptCorrection]:
-    return (
+    query = (
         db.query(MeetingTranscriptCorrection)
         .filter(MeetingTranscriptCorrection.meeting_id == meeting_id)
-        .order_by(
-            MeetingTranscriptCorrection.created_at,
-            MeetingTranscriptCorrection.id,
-        )
-        .all()
     )
+    if transcript_id is not None:
+        query = query.filter(MeetingTranscriptCorrection.transcript_id == transcript_id)
+    return query.order_by(
+        MeetingTranscriptCorrection.created_at,
+        MeetingTranscriptCorrection.id,
+    ).all()

@@ -174,7 +174,7 @@ class FakeWhisperModel:
             SimpleNamespace(start=1.0, end=2.0, text=" World."),
         ]
 
-    def transcribe(self, audio_path, *, language):
+    def transcribe(self, audio_path, *, language, word_timestamps):
         return iter(self._segments), SimpleNamespace(language="en")
 
 

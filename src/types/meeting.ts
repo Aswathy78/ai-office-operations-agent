@@ -252,12 +252,58 @@ export interface MeetingSummary {
   error_message: string | null
 }
 
+export type MeetingActionItemExtractionStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+
+export type MeetingActionItemPriority = 'low' | 'medium' | 'high' | 'urgent'
+
+export interface MeetingActionItem {
+  id: string
+  owner_name: string | null
+  task_description: string
+  deadline_at: string | null
+  deadline_text: string | null
+  priority: MeetingActionItemPriority
+  confidence: number
+  meeting_id: string
+  transcript_id: string
+  source_segment_index: number
+  source_start_seconds: number
+  source_end_seconds: number
+  source_quote_start_seconds: number | null
+  source_quote_end_seconds: number | null
+  source_quote: string | null
+}
+
+export interface MeetingActionItems {
+  id: string
+  meeting_id: string
+  transcript_id: string
+  status: MeetingActionItemExtractionStatus
+  created_at: string
+  updated_at: string
+  processing_started_at: string | null
+  completed_at: string | null
+  error_message: string | null
+  action_items: MeetingActionItem[]
+}
+
 export interface TranscriptSegment {
   start: number
   end: number
   text: string
   speaker: string
   flagged_for_correction: boolean
+  words?: TranscriptWord[] | null
+}
+
+export interface TranscriptWord {
+  start: number
+  end: number
+  word: string
 }
 
 export interface MeetingTranscript {

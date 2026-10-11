@@ -1,23 +1,54 @@
 import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
-import { getMeetingReport, getMeetingSummary, MeetingApiError } from '../api/meetings'
+import {
+  extractMeetingActionItems,
+  getMeetingActionItems,
+  getMeetingReport,
+  getMeetingSummary,
+  MeetingApiError,
+} from '../api/meetings'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
+import { MeetingActionItemsPanel } from '../components/meetings/MeetingActionItemsPanel'
 import { useAuth } from '../contexts/AuthContext'
-import type { MeetingReport, MeetingSummary } from '../types/meeting'
+import type {
+  MeetingActionItem,
+  MeetingActionItems,
+  MeetingReport,
+  MeetingSummary,
+} from '../types/meeting'
 
 export function MeetingReportPage() {
   const { meetingId = '' } = useParams()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const { user } = useAuth()
   const [report, setReport] = useState<MeetingReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [sourceFocusRequestId, setSourceFocusRequestId] = useState(0)
+  const sourceSegmentParam = searchParams.get('segment')
+  const sourceSegmentIndex =
+    sourceSegmentParam !== null &&
+    /^\d+$/.test(sourceSegmentParam) &&
+    Number.isSafeInteger(Number(sourceSegmentParam))
+      ? Number(sourceSegmentParam)
+      : null
+  const sourceTranscriptId = searchParams.get('transcript_id')
+  const [transcriptOpen, setTranscriptOpen] = useState(sourceSegmentIndex !== null)
   const [summaryOpen, setSummaryOpen] = useState(false)
+  const [actionItems, setActionItems] = useState<MeetingActionItems | null>(null)
+  const [actionItemsLoading, setActionItemsLoading] = useState(true)
+  const [actionItemsTriggering, setActionItemsTriggering] = useState(false)
+  const [actionItemsError, setActionItemsError] = useState('')
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [summaryError, setSummaryError] = useState('')
+
+  useEffect(() => {
+    if (sourceSegmentIndex !== null) setTranscriptOpen(true)
+  }, [sourceSegmentIndex])
 
   useEffect(() => {
     let active = true
@@ -33,6 +64,33 @@ export function MeetingReportPage() {
       })
       .finally(() => {
         if (active) setLoading(false)
+      })
+
+    return () => { active = false }
+  }, [meetingId, user])
+
+  useEffect(() => {
+    let active = true
+    if (!meetingId || !user) return
+
+    setActionItemsLoading(true)
+    setActionItemsError('')
+    getMeetingActionItems(meetingId, user.id)
+      .then((result) => {
+        if (active) setActionItems(result)
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        if (reason instanceof MeetingApiError && reason.status === 404) {
+          setActionItems(null)
+          return
+        }
+        setActionItemsError(
+          reason instanceof Error ? reason.message : 'Meeting action items could not be loaded.',
+        )
+      })
+      .finally(() => {
+        if (active) setActionItemsLoading(false)
       })
 
     return () => { active = false }
@@ -76,6 +134,34 @@ export function MeetingReportPage() {
     const minutes = Math.round(diff / 60000)
     if (minutes < 1) return '< 1 min'
     return `${minutes} min`
+  }
+
+  async function triggerActionItemExtraction() {
+    if (!meetingId || !user || actionItemsTriggering) return
+    setActionItemsTriggering(true)
+    setActionItemsError('')
+    try {
+      const result = await extractMeetingActionItems(meetingId, user.id)
+      setActionItems(result)
+    } catch (reason) {
+      setActionItemsError(
+        reason instanceof Error ? reason.message : 'Action item extraction failed.',
+      )
+    } finally {
+      setActionItemsTriggering(false)
+    }
+  }
+
+  function openTranscriptSegment(item: MeetingActionItem) {
+    setTranscriptOpen(true)
+    setSourceFocusRequestId((requestId) => requestId + 1)
+    const query = new URLSearchParams({
+      transcript_id: item.transcript_id,
+      segment: String(item.source_segment_index),
+    })
+    navigate(
+      `/meetings/${encodeURIComponent(item.meeting_id)}/report?${query.toString()}`,
+    )
   }
 
   return (
@@ -186,13 +272,25 @@ export function MeetingReportPage() {
             </div>
           )}
 
+          <MeetingActionItemsPanel
+            extraction={actionItems}
+            loading={actionItemsLoading}
+            triggering={actionItemsTriggering}
+            error={actionItemsError}
+            onExtract={() => void triggerActionItemExtraction()}
+            onOpenSource={openTranscriptSegment}
+          />
+
           {transcriptOpen && (
             <TranscriptPanel
               meetingId={meetingId}
               organizerId={report.organizer_id}
+              transcriptId={sourceTranscriptId}
               isOrganizer={user?.id === report.organizer_id}
               isOpen
               inline
+              focusSegmentIndex={sourceSegmentIndex}
+              focusRequestId={sourceFocusRequestId}
               onClose={() => setTranscriptOpen(false)}
             />
           )}

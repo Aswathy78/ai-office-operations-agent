@@ -1,4 +1,5 @@
 import base64
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,8 +18,10 @@ from app.meeting.models import (
     Base,
     Meeting,
     MeetingRecording,
+    MeetingSummary,
     MeetingTranscript,
     RECORDING_STATUS_COMPLETED,
+    SUMMARY_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_FAILED,
     TRANSCRIPT_STATUS_PENDING,
@@ -215,7 +218,7 @@ def test_windows_cuda_dll_directories_are_discovered_and_registered(
     nvidia_root = tmp_path / "site-packages" / "nvidia"
     expected_directories = tuple(
         nvidia_root / package_name / "bin"
-        for package_name in ("cublas", "cudnn", "cuda_nvrtc")
+        for package_name in ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime")
     )
     for directory in expected_directories:
         directory.mkdir(parents=True)
@@ -273,7 +276,7 @@ def test_worker_initialization_registers_and_loads_cuda_before_faster_whisper(
     cublas_directory.mkdir(parents=True)
     cublas_library = cublas_directory / "cublas64_12.dll"
     cublas_library.touch()
-    for package_name in ("cudnn", "cuda_nvrtc"):
+    for package_name in ("cudnn", "cuda_nvrtc", "cuda_runtime"):
         (nvidia_root / package_name / "bin").mkdir(parents=True)
 
     events = []
@@ -315,6 +318,7 @@ def test_worker_initialization_registers_and_loads_cuda_before_faster_whisper(
                     cublas_directory,
                     nvidia_root / "cudnn" / "bin",
                     nvidia_root / "cuda_nvrtc" / "bin",
+                    nvidia_root / "cuda_runtime" / "bin",
                 )
             )
             assert ("load", "cublas64_12.dll") in events
@@ -333,12 +337,13 @@ def test_worker_initialization_registers_and_loads_cuda_before_faster_whisper(
         "register",
         "register",
         "register",
+        "register",
         "load",
         "import",
         "import",
         "construct",
     ]
-    assert events[4:6] == [("import", "faster_whisper"), ("import", "ctranslate2")]
+    assert events[5:7] == [("import", "faster_whisper"), ("import", "ctranslate2")]
     assert events[-1] == (
         "construct",
         "small",
@@ -419,6 +424,68 @@ def test_worker_logs_startup(caplog):
     assert "Transcription worker started" in caplog.text
 
 
+def test_worker_loads_dotenv_before_decrypting_recording(
+    db_session: Session,
+    tmp_path,
+    monkeypatch,
+):
+    storage_root = tmp_path / "recordings"
+    storage_root.mkdir()
+    _, transcript = _create_completed_recording(db_session, storage_root)
+    expected_key = os.environ["RECORDING_ENCRYPTION_KEY"]
+    monkeypatch.delenv("RECORDING_ENCRYPTION_KEY")
+
+    dotenv_calls: list[tuple[Path, bool]] = []
+    decryption_calls: list[str] = []
+    stop_event = threading.Event()
+    real_decrypt = transcription_worker.decrypt_recording_to_temporary_file
+
+    def load_worker_environment(*, dotenv_path, override):
+        dotenv_calls.append((Path(dotenv_path), override))
+        monkeypatch.setenv("RECORDING_ENCRYPTION_KEY", expected_key)
+
+    def decrypt_after_configuration(encrypted_path, *, temporary_directory=None):
+        assert dotenv_calls
+        assert Path(encrypted_path).is_file()
+        result = real_decrypt(
+            encrypted_path,
+            temporary_directory=temporary_directory,
+        )
+        decryption_calls.append(str(encrypted_path))
+        stop_event.set()
+        return result
+
+    class FakeWhisperModel:
+        def transcribe(self, _audio_path, *, language, word_timestamps):
+            assert language == "en"
+            assert word_timestamps is True
+            return iter(()), SimpleNamespace(language="en")
+
+    monkeypatch.setattr(transcription_worker, "load_dotenv", load_worker_environment)
+    monkeypatch.setattr(
+        transcription_worker,
+        "decrypt_recording_to_temporary_file",
+        decrypt_after_configuration,
+    )
+    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda *_: None)
+    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda *_: None)
+
+    run_worker(
+        poll_interval_seconds=0,
+        session_factory=sessionmaker(bind=db_session.get_bind()),
+        model_factory=FakeWhisperModel,
+        storage_root=storage_root,
+        stop_event=stop_event,
+    )
+
+    assert dotenv_calls == [
+        (Path(transcription_worker.__file__).resolve().parents[2] / ".env", False)
+    ]
+    assert len(decryption_calls) == 1
+    db_session.expire_all()
+    assert db_session.get(MeetingTranscript, transcript.id).status == TRANSCRIPT_STATUS_COMPLETED
+
+
 def test_worker_persists_cuda_initialization_failure(
     db_session: Session,
     tmp_path,
@@ -466,14 +533,32 @@ def test_worker_stores_english_timestamped_segments_and_cleans_plaintext(
         language = None
         input_path = None
 
-        def transcribe(self, audio_path, *, language):
+        def transcribe(self, audio_path, *, language, word_timestamps):
             self.language = language
+            self.word_timestamps = word_timestamps
             self.input_path = audio_path
             assert Path(audio_path).read_bytes() == b"decoded english audio"
             return iter(
                 [
-                    SimpleNamespace(start=0.25, end=1.5, text=" Hello there."),
-                    SimpleNamespace(start=1.5, end=2.75, text=" How are you?"),
+                    SimpleNamespace(
+                        start=0.25,
+                        end=1.5,
+                        text=" Hello there.",
+                        words=[
+                            SimpleNamespace(start=0.3, end=0.7, word=" Hello"),
+                            SimpleNamespace(start=0.7, end=1.2, word=" there."),
+                        ],
+                    ),
+                    SimpleNamespace(
+                        start=1.5,
+                        end=2.75,
+                        text=" How are you?",
+                        words=[
+                            SimpleNamespace(start=1.6, end=1.8, word=" How"),
+                            SimpleNamespace(start=1.8, end=2.0, word=" are"),
+                            SimpleNamespace(start=2.0, end=2.5, word=" you?"),
+                        ],
+                    ),
                 ]
             ), SimpleNamespace(language="en")
 
@@ -492,13 +577,221 @@ def test_worker_stores_english_timestamped_segments_and_cleans_plaintext(
     assert completed.language == "en"
     assert completed.transcript_text == "Hello there. How are you?"
     assert completed.segments == [
-        {"start": 0.25, "end": 1.5, "text": "Hello there.", "speaker": "Unknown Speaker", "flagged_for_correction": True},
-        {"start": 1.5, "end": 2.75, "text": "How are you?", "speaker": "Unknown Speaker", "flagged_for_correction": True},
+        {
+            "start": 0.25,
+            "end": 1.5,
+            "text": "Hello there.",
+            "speaker": "Unknown Speaker",
+            "flagged_for_correction": True,
+            "words": [
+                {"start": 0.3, "end": 0.7, "word": " Hello"},
+                {"start": 0.7, "end": 1.2, "word": " there."},
+            ],
+        },
+        {
+            "start": 1.5,
+            "end": 2.75,
+            "text": "How are you?",
+            "speaker": "Unknown Speaker",
+            "flagged_for_correction": True,
+            "words": [
+                {"start": 1.6, "end": 1.8, "word": " How"},
+                {"start": 1.8, "end": 2.0, "word": " are"},
+                {"start": 2.0, "end": 2.5, "word": " you?"},
+            ],
+        },
     ]
     assert model.language == "en"
+    assert model.word_timestamps is True
     assert not Path(model.input_path).exists()
     assert list(temporary_directory.iterdir()) == []
     assert db_session.get(MeetingRecording, recording.id).status == RECORDING_STATUS_COMPLETED
+
+
+def test_worker_runs_action_item_extraction_after_persisting_transcript(
+    db_session: Session,
+    tmp_path,
+    monkeypatch,
+):
+    storage_root = tmp_path / "recordings"
+    storage_root.mkdir()
+    recording, transcript = _create_completed_recording(
+        db_session,
+        storage_root,
+        media=b"meeting audio",
+    )
+    assert claim_pending_transcript(db_session) == transcript.id
+    calls: list[str] = []
+    expected_segments = [
+        {
+            "start": 0.5,
+            "end": 2.25,
+            "text": "Maya, please send the agenda.",
+            "speaker": "Unknown Speaker",
+            "flagged_for_correction": True,
+        }
+    ]
+
+    class FakeWhisperModel:
+        def transcribe(self, audio_path, *, language, word_timestamps):
+            return iter(
+                [SimpleNamespace(start=0.5, end=2.25, text=" Maya, please send the agenda.")]
+            ), SimpleNamespace(language="en")
+
+    def generate_summary(db: Session, transcript_id: str):
+        persisted = db.get(MeetingTranscript, transcript_id)
+        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
+        assert persisted.segments == expected_segments
+        calls.append("summary")
+
+    def extract_action_items(db: Session, transcript_id: str):
+        persisted = db.get(MeetingTranscript, transcript_id)
+        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
+        assert persisted.segments == expected_segments
+        calls.append("action_items")
+
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_summary",
+        generate_summary,
+    )
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_action_items",
+        extract_action_items,
+    )
+
+    assert process_claimed_transcript(
+        db_session,
+        transcript.id,
+        FakeWhisperModel(),
+        storage_root=storage_root,
+    )
+
+    db_session.expire_all()
+    completed = db_session.get(MeetingTranscript, transcript.id)
+    assert completed.status == TRANSCRIPT_STATUS_COMPLETED
+    assert completed.segments == expected_segments
+    assert calls == ["summary", "action_items"]
+    assert db_session.get(MeetingRecording, recording.id).status == RECORDING_STATUS_COMPLETED
+
+
+def test_summary_failure_does_not_prevent_action_item_extraction(
+    db_session: Session,
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    storage_root = tmp_path / "recordings"
+    storage_root.mkdir()
+    _, transcript = _create_completed_recording(db_session, storage_root)
+    assert claim_pending_transcript(db_session) == transcript.id
+    action_item_calls: list[str] = []
+
+    class FakeWhisperModel:
+        def transcribe(self, audio_path, *, language, word_timestamps):
+            return iter(
+                [SimpleNamespace(start=1.0, end=2.0, text="I will send the notes.")]
+            ), SimpleNamespace(language="en")
+
+    def fail_summary(db: Session, transcript_id: str):
+        raise RuntimeError("sensitive-summary-provider-detail")
+
+    def extract_action_items(db: Session, transcript_id: str):
+        persisted = db.get(MeetingTranscript, transcript_id)
+        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
+        action_item_calls.append(transcript_id)
+
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_summary",
+        fail_summary,
+    )
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_action_items",
+        extract_action_items,
+    )
+
+    with caplog.at_level("ERROR"):
+        assert process_claimed_transcript(
+            db_session,
+            transcript.id,
+            FakeWhisperModel(),
+            storage_root=storage_root,
+        )
+
+    db_session.expire_all()
+    assert db_session.get(MeetingTranscript, transcript.id).status == TRANSCRIPT_STATUS_COMPLETED
+    assert action_item_calls == [transcript.id]
+    assert "Meeting summary generation failed" in caplog.text
+    assert "sensitive-summary-provider-detail" not in caplog.text
+
+
+def test_action_item_failure_preserves_completed_transcript_and_summary(
+    db_session: Session,
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    storage_root = tmp_path / "recordings"
+    storage_root.mkdir()
+    recording, transcript = _create_completed_recording(db_session, storage_root)
+    existing_summary = MeetingSummary(
+        id=str(uuid.uuid4()),
+        meeting_id=recording.meeting_id,
+        transcript_id=transcript.id,
+        status=SUMMARY_STATUS_COMPLETED,
+        overview="Persisted summary must remain unchanged.",
+        decisions=["Keep the launch date."],
+        discussion_topics=["Timeline"],
+        open_questions=[],
+        completed_at=datetime.now(timezone.utc),
+    )
+    db_session.add(existing_summary)
+    db_session.commit()
+    assert claim_pending_transcript(db_session) == transcript.id
+
+    class FakeWhisperModel:
+        def transcribe(self, audio_path, *, language, word_timestamps):
+            return iter(
+                [SimpleNamespace(start=3.0, end=4.0, text="I will send the notes.")]
+            ), SimpleNamespace(language="en")
+
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_summary",
+        lambda db, transcript_id: db.get(MeetingSummary, existing_summary.id),
+    )
+
+    def fail_action_items(db: Session, transcript_id: str):
+        raise RuntimeError("sensitive-provider-detail")
+
+    monkeypatch.setattr(
+        transcription_worker,
+        "generate_meeting_action_items",
+        fail_action_items,
+    )
+
+    with caplog.at_level("ERROR"):
+        assert process_claimed_transcript(
+            db_session,
+            transcript.id,
+            FakeWhisperModel(),
+            storage_root=storage_root,
+        )
+
+    db_session.expire_all()
+    completed = db_session.get(MeetingTranscript, transcript.id)
+    persisted_summary = db_session.get(MeetingSummary, existing_summary.id)
+    assert completed.status == TRANSCRIPT_STATUS_COMPLETED
+    assert completed.segments[0]["start"] == 3.0
+    assert completed.segments[0]["end"] == 4.0
+    assert persisted_summary.status == SUMMARY_STATUS_COMPLETED
+    assert persisted_summary.overview == "Persisted summary must remain unchanged."
+    assert persisted_summary.decisions == ["Keep the launch date."]
+    assert "sensitive-provider-detail" not in caplog.text
+    assert "Meeting action item extraction failed" in caplog.text
 
 
 def test_decryption_failure_is_persisted_and_plaintext_is_removed(
@@ -544,7 +837,7 @@ def test_inference_failure_is_persisted_and_plaintext_is_removed(
     class FailingWhisperModel:
         input_path = None
 
-        def transcribe(self, audio_path, *, language):
+        def transcribe(self, audio_path, *, language, word_timestamps):
             self.input_path = audio_path
             raise RuntimeError("inference unavailable")
 

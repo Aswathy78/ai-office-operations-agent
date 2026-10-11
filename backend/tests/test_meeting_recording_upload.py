@@ -12,6 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import main as main_module
 from main import app
 from app.db.database import get_db
 from app.meeting.models import (
@@ -35,6 +36,31 @@ from app.meeting.transcription_worker import (
 )
 
 ORGANIZER_ID = "recording-organizer"
+
+
+def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeypatch):
+    events = []
+    expected_env = Path(main_module.__file__).resolve().parent / ".env"
+
+    monkeypatch.setattr(
+        main_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: events.append(
+            ("load_dotenv", Path(dotenv_path), override)
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "create_tables",
+        lambda: events.append(("create_tables",)),
+    )
+
+    main_module.startup()
+
+    assert events == [
+        ("load_dotenv", expected_env, False),
+        ("create_tables",),
+    ]
 
 
 @pytest.fixture()
@@ -305,7 +331,7 @@ def test_upload_to_transcription_happy_path(
             self.input_path = None
             self.language = None
 
-        def transcribe(self, audio_path, *, language):
+        def transcribe(self, audio_path, *, language, word_timestamps):
             self.input_path = audio_path
             self.language = language
             assert Path(audio_path).read_bytes() == media
