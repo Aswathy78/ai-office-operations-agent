@@ -1047,6 +1047,27 @@ The AI Meeting Summary feature generates a structured summary from the completed
 - Discussion topics
 - Open questions
 
+## FR-11 – Meeting Action Item Extraction
+
+The Meeting Action Item Extraction feature identifies actionable tasks from meeting transcripts and displays them in the meeting report interface.
+
+### Features
+
+- Extracts action items from meeting transcripts.
+- Captures task descriptions, owners, deadlines, priorities, and confidence scores when available.
+- Associates action items with their source meeting and transcript timestamps.
+- Provides transcript references to help users locate the relevant discussion.
+- Excludes non-actionable statements from extracted action items.
+
+### Implementation
+
+- Backend service for action-item extraction.
+- Database models and schemas for action items.
+- API endpoints for action-item operations.
+- Database migrations for action-item storage and supporting metadata.
+- Frontend action-items panel integrated into the meeting report.
+- Backend and frontend tests for action-item functionality.
+
 ### Summary workflow
 
 ```text
