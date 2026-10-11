@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  extractMeetingActionItems,
+  getMeetingActionItems,
   getMeetingTranscript,
   getMeetingTranscriptCorrections,
   updateMeetingTranscript,
 } from './meetings'
 import type {
+  MeetingActionItems,
   MeetingTranscript,
   MeetingTranscriptUpdateRequest,
   TranscriptCorrection,
@@ -46,6 +49,37 @@ const correctionFixture: TranscriptCorrection = {
   created_at: '2026-10-05T10:02:00Z',
 }
 
+const actionItemsFixture: MeetingActionItems = {
+  id: 'extraction-1',
+  meeting_id: 'meeting-1',
+  transcript_id: 'transcript-1',
+  status: 'completed',
+  created_at: '2026-10-05T10:00:00Z',
+  updated_at: '2026-10-05T10:01:00Z',
+  processing_started_at: '2026-10-05T10:00:30Z',
+  completed_at: '2026-10-05T10:01:00Z',
+  error_message: null,
+  action_items: [
+    {
+      id: 'item-1',
+      owner_name: null,
+      task_description: 'Send the notes.',
+      deadline_at: null,
+      deadline_text: 'by Friday',
+      priority: 'medium',
+      confidence: 0.85,
+      meeting_id: 'meeting-1',
+      transcript_id: 'transcript-1',
+      source_segment_index: 2,
+      source_start_seconds: 12.5,
+      source_end_seconds: 14.25,
+      source_quote_start_seconds: 12.75,
+      source_quote_end_seconds: 14.1,
+      source_quote: 'I will send the notes by Friday.',
+    },
+  ],
+}
+
 function stubFetch(responseBody: unknown = transcriptFixture) {
   const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
     new Response(JSON.stringify(responseBody), {
@@ -69,11 +103,66 @@ describe('transcript API', () => {
     const transcript = await getMeetingTranscript('meeting/one', 'organizer 1')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
     )
     const segment: TranscriptSegment = transcript.segments[0]
     expect(segment.flagged_for_correction).toBe(true)
     expect(transcript.completed_at).toBe('2026-10-05T10:01:00Z')
+  })
+
+  it('requests the exact transcript when a source reference supplies its id', async () => {
+    const fetchMock = stubFetch()
+
+    await getMeetingTranscript('meeting-1', 'organizer-1', 'transcript-2')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+    )
+  })
+
+  describe('meeting action items API', () => {
+    it('GETs action items with the organizer id and decodes the response', async () => {
+      const fetchMock = stubFetch(actionItemsFixture)
+
+      const result = await getMeetingActionItems('meeting/one', 'organizer 1')
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/action-items?organizer_id=organizer+1',
+      )
+      expect(result.status).toBe('completed')
+      expect(result.action_items[0].source_segment_index).toBe(2)
+      expect(result.action_items[0].owner_name).toBeNull()
+    })
+
+    it('POSTs an extraction request without a request body', async () => {
+      const fetchMock = stubFetch(actionItemsFixture)
+
+      const result = await extractMeetingActionItems('meeting-1', 'organizer-1')
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/action-items/extract?organizer_id=organizer-1',
+        { method: 'POST' },
+      )
+      expect(result.action_items[0].source_start_seconds).toBe(12.5)
+    })
+
+    it('surfaces API errors using MeetingApiError', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn<typeof fetch>().mockResolvedValue(
+          new Response(JSON.stringify({ detail: 'Completed transcript not found' }), {
+            status: 404,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      )
+
+      await expect(getMeetingActionItems('meeting-1', 'organizer-1')).rejects.toMatchObject({
+        name: 'MeetingApiError',
+        status: 404,
+        message: 'Completed transcript not found',
+      })
+    })
   })
 
   it('PATCHes only editable text and speaker values', async () => {
@@ -93,7 +182,7 @@ describe('transcript API', () => {
 
     const [url, options] = fetchMock.mock.calls[0]
     expect(url).toBe(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
     )
     expect(options?.method).toBe('PATCH')
     expect(options?.headers).toEqual({ 'Content-Type': 'application/json' })
@@ -105,6 +194,22 @@ describe('transcript API', () => {
     expect(String(options?.body)).not.toContain('flagged_for_correction')
   })
 
+  it('PATCHes the specifically selected transcript when one is supplied', async () => {
+    const fetchMock = stubFetch()
+
+    await updateMeetingTranscript(
+      'meeting-1',
+      'organizer-1',
+      [{ text: 'Corrected words.' }],
+      'transcript-2',
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+      expect.objectContaining({ method: 'PATCH' }),
+    )
+  })
+
   it('requests and types transcript correction history', async () => {
     const fetchMock = stubFetch([correctionFixture])
 
@@ -114,12 +219,22 @@ describe('transcript API', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
     )
     const correction: TranscriptCorrection = corrections[0]
     expect(correction.segment_index).toBe(0)
     expect(correction.original_speaker).toBe('Speaker A')
     expect(correction.corrected_speaker).toBe('Speaker B')
     expect(correction.editor_id).toBe('organizer-1')
+  })
+
+  it('filters correction history to the selected transcript when supplied', async () => {
+    const fetchMock = stubFetch([correctionFixture])
+
+    await getMeetingTranscriptCorrections('meeting-1', 'organizer-1', 'transcript-2')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
+    )
   })
 })

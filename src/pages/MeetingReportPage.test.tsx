@@ -3,8 +3,10 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import '@testing-library/jest-dom/vitest'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import {
+  extractMeetingActionItems,
+  getMeetingActionItems,
   getMeetingReport,
   getMeetingSummary,
   getMeetingTranscript,
@@ -12,7 +14,12 @@ import {
   updateMeetingTranscript,
 } from '../api/meetings'
 import { MeetingReportPage } from './MeetingReportPage'
-import type { MeetingReport, MeetingSummary, MeetingTranscript } from '../types/meeting'
+import type {
+  MeetingActionItems,
+  MeetingReport,
+  MeetingSummary,
+  MeetingTranscript,
+} from '../types/meeting'
 
 const { authValue } = vi.hoisted(() => ({
   authValue: { user: { id: 'organizer-1' } },
@@ -28,6 +35,8 @@ vi.mock('../api/meetings', () => ({
     }
   },
   getMeetingReport: vi.fn(),
+  getMeetingActionItems: vi.fn(),
+  extractMeetingActionItems: vi.fn(),
   getMeetingSummary: vi.fn(),
   getMeetingTranscript: vi.fn(),
   getMeetingTranscriptCorrections: vi.fn(),
@@ -90,18 +99,59 @@ const summary: MeetingSummary = {
   error_message: null,
 }
 
+const actionItems: MeetingActionItems = {
+  id: 'extraction-1',
+  meeting_id: 'meeting-current',
+  transcript_id: 'transcript-1',
+  status: 'completed',
+  created_at: '2026-10-05T11:00:00Z',
+  updated_at: '2026-10-05T11:01:00Z',
+  processing_started_at: '2026-10-05T11:00:30Z',
+  completed_at: '2026-10-05T11:01:00Z',
+  error_message: null,
+  action_items: [
+    {
+      id: 'item-1',
+      owner_name: 'Maya',
+      task_description: 'Send the agenda.',
+      deadline_at: null,
+      deadline_text: 'by Friday',
+      priority: 'high',
+      confidence: 0.92,
+      meeting_id: 'meeting-current',
+      transcript_id: 'transcript-1',
+      source_segment_index: 0,
+      source_start_seconds: 0,
+      source_end_seconds: 3,
+      source_quote_start_seconds: 0.92,
+      source_quote_end_seconds: 2.7,
+      source_quote: 'Thank you very much.',
+    },
+  ],
+}
+
 function renderReport() {
   return render(
     <MemoryRouter initialEntries={['/meetings/meeting-current/report']}>
       <Routes>
-        <Route path="/meetings/:meetingId/report" element={<MeetingReportPage />} />
+        <Route
+          path="/meetings/:meetingId/report"
+          element={<><MeetingReportPage /><CurrentLocation /></>}
+        />
       </Routes>
     </MemoryRouter>,
   )
 }
 
+function CurrentLocation() {
+  const location = useLocation()
+  return <div data-testid="current-location">{location.pathname}{location.search}</div>
+}
+
 beforeEach(() => {
   vi.mocked(getMeetingReport).mockResolvedValue(report)
+  vi.mocked(getMeetingActionItems).mockResolvedValue(actionItems)
+  vi.mocked(extractMeetingActionItems).mockResolvedValue(actionItems)
   vi.mocked(getMeetingSummary).mockResolvedValue(summary)
   vi.mocked(getMeetingTranscript).mockResolvedValue(transcript)
   vi.mocked(updateMeetingTranscript).mockResolvedValue(transcript)
@@ -118,7 +168,7 @@ describe('MeetingReportPage transcript', () => {
 
     expect(await screen.findByText('Quarterly planning')).toBeInTheDocument()
     expect(screen.getByText('Attendance Log')).toBeInTheDocument()
-    expect(screen.getByText('Maya')).toBeInTheDocument()
+    expect(within(screen.getByRole('table')).getByText('Maya')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Transcript' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Summary' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Meeting Summary' })).not.toBeInTheDocument()
@@ -198,11 +248,360 @@ describe('MeetingReportPage transcript', () => {
 
     expect(await screen.findByRole('heading', { name: 'Meeting Transcript' })).toBeInTheDocument()
     expect(getMeetingTranscript).toHaveBeenCalledWith('meeting-current', 'organizer-1')
-    expect(screen.getByText('Thank you very much.')).toBeInTheDocument()
+    expect(
+      within(screen.getByLabelText('Meeting transcript')).getByText('Thank you very much.'),
+    ).toBeInTheDocument()
     expect(within(screen.getByLabelText('Meeting transcript')).getByText('Maya')).toBeInTheDocument()
     expect(screen.getByText('0:00–0:03')).toBeInTheDocument()
     expect(screen.getByRole('searchbox', { name: 'Search transcript' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Edit segment 1' })).toBeInTheDocument()
+  })
+
+  describe('MeetingReportPage action items', () => {
+    it('renders extracted action items and their source reference', async () => {
+      renderReport()
+
+      expect(await screen.findByRole('heading', { name: 'Meeting Action Items' })).toBeInTheDocument()
+      expect(getMeetingActionItems).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+      const panel = screen.getByRole('heading', { name: 'Meeting Action Items' }).closest('section')
+      expect(panel).not.toBeNull()
+      expect(within(panel as HTMLElement).getByText('Send the agenda.')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('Maya')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('by Friday')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('high')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('92%')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Source transcript phrase: 0:00.92' })).toBeInTheDocument()
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Extraction status: completed. 1 action item extracted.',
+      )
+      expect(screen.queryByText('No action items were identified.')).not.toBeInTheDocument()
+    })
+
+    it('reports the actual number of extracted action items', async () => {
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          ...actionItems.action_items,
+          {
+            ...actionItems.action_items[0],
+            id: 'item-2',
+            owner_name: 'Rahul',
+            task_description: 'Review the notes.',
+          },
+        ],
+      })
+      renderReport()
+
+      expect(await screen.findByText(
+        'Extraction status: completed. 2 action items extracted.',
+      )).toBeInTheDocument()
+      expect(screen.queryByText('No action items were identified.')).not.toBeInTheDocument()
+    })
+
+    it('shows fallbacks for missing owner and deadline', async () => {
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            owner_name: null,
+            deadline_at: null,
+            deadline_text: null,
+          },
+        ],
+      })
+      renderReport()
+
+      expect(await screen.findByText('Unassigned')).toBeInTheDocument()
+      expect(screen.getByText('Not specified')).toBeInTheDocument()
+    })
+
+    it('shows the loading, empty, and failed extraction states', async () => {
+      let resolveItems!: (items: MeetingActionItems) => void
+      vi.mocked(getMeetingActionItems).mockReturnValue(
+        new Promise((resolve) => { resolveItems = resolve }),
+      )
+      renderReport()
+      await screen.findByText('Quarterly planning')
+      expect(await screen.findByText(/Loading meeting action items/)).toBeInTheDocument()
+
+      resolveItems({ ...actionItems, action_items: [] })
+      expect(await screen.findByText('No action items were identified.')).toBeInTheDocument()
+      expect(screen.getByText(
+        'Extraction status: completed. No action items were identified.',
+      )).toBeInTheDocument()
+
+      cleanup()
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        status: 'failed',
+        error_message: 'Extraction failed.',
+        action_items: [],
+      })
+      renderReport()
+      expect(await screen.findByRole('alert')).toHaveTextContent('Extraction failed.')
+      expect(screen.getByRole('button', { name: 'Retry Extraction' })).toBeInTheDocument()
+    })
+
+    it('triggers extraction and updates the displayed results', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getMeetingActionItems).mockRejectedValue(
+        new MeetingApiError('Meeting action items not found', 404),
+      )
+      vi.mocked(extractMeetingActionItems).mockResolvedValue(actionItems)
+      renderReport()
+      await user.click(await screen.findByRole('button', { name: 'Extract Action Items' }))
+
+      expect(extractMeetingActionItems).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+      expect(await screen.findByText('Send the agenda.')).toBeInTheDocument()
+    })
+
+    it('prevents duplicate clicks while extraction is pending', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getMeetingActionItems).mockRejectedValue(
+        new MeetingApiError('Meeting action items not found', 404),
+      )
+      let resolveExtraction!: (items: MeetingActionItems) => void
+      vi.mocked(extractMeetingActionItems).mockReturnValue(
+        new Promise((resolve) => { resolveExtraction = resolve }),
+      )
+      renderReport()
+      const extractButton = await screen.findByRole('button', { name: 'Extract Action Items' })
+      await user.click(extractButton)
+
+      expect(await screen.findByRole('button', { name: 'Extracting…' })).toBeDisabled()
+      await user.click(screen.getByRole('button', { name: 'Extracting…' }))
+      expect(extractMeetingActionItems).toHaveBeenCalledTimes(1)
+
+      resolveExtraction(actionItems)
+      expect(await screen.findByText('Send the agenda.')).toBeInTheDocument()
+    })
+
+    it('opens the referenced transcript segment from its source link', async () => {
+      const user = userEvent.setup()
+      const scrollToSegment = vi.fn()
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+        configurable: true,
+        value: scrollToSegment,
+      })
+      renderReport()
+      await user.click(
+        await screen.findByRole('button', { name: 'Source transcript phrase: 0:00.92' }),
+      )
+
+      expect(await screen.findByRole('heading', { name: 'Meeting Transcript' })).toBeInTheDocument()
+      expect(screen.getByTestId('current-location')).toHaveTextContent(
+        '/meetings/meeting-current/report?transcript_id=transcript-1&segment=0',
+      )
+      expect(getMeetingTranscript).toHaveBeenCalledWith(
+        'meeting-current',
+        'organizer-1',
+        'transcript-1',
+      )
+      const sourceSegment = document.getElementById('meeting-transcript-segment-0')
+      expect(sourceSegment).toHaveClass('is-source-highlighted')
+      await waitFor(() => expect(scrollToSegment).toHaveBeenCalled())
+    })
+
+    it('re-focuses the same segment on repeated clicks and follows different source links', async () => {
+      const user = userEvent.setup()
+      const scrolledSegmentIds: string[] = []
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+        configurable: true,
+        value: function (this: HTMLElement) {
+          scrolledSegmentIds.push(this.id)
+        },
+      })
+      vi.mocked(getMeetingTranscript).mockResolvedValue({
+        ...transcript,
+        segments: [
+          transcript.segments[0],
+          {
+            ...transcript.segments[0],
+            start: 3,
+            end: 5,
+            text: 'Second transcript segment.',
+          },
+        ],
+      })
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          actionItems.action_items[0],
+          {
+            ...actionItems.action_items[0],
+            id: 'item-2',
+            task_description: 'Review the second report.',
+            source_segment_index: 1,
+            source_start_seconds: 3,
+            source_end_seconds: 5,
+            source_quote_start_seconds: 3.4,
+            source_quote_end_seconds: 4.8,
+          },
+        ],
+      })
+      renderReport()
+
+      const firstSource = await screen.findByRole('button', {
+        name: 'Source transcript phrase: 0:00.92',
+      })
+      await user.click(firstSource)
+      await waitFor(() => expect(scrolledSegmentIds).toContain('meeting-transcript-segment-0'))
+      const firstSegmentScrollCount = scrolledSegmentIds.length
+      await user.click(firstSource)
+      await waitFor(() => {
+        expect(scrolledSegmentIds.length).toBeGreaterThan(firstSegmentScrollCount)
+        expect(scrolledSegmentIds[scrolledSegmentIds.length - 1])
+          .toBe('meeting-transcript-segment-0')
+      })
+      expect(document.getElementById('meeting-transcript-segment-0'))
+        .toHaveClass('is-source-highlighted')
+
+      const secondSource = screen.getByRole('button', {
+        name: 'Source transcript phrase: 0:03.40',
+      })
+      const secondSegmentScrollCount = scrolledSegmentIds.length
+      await user.click(secondSource)
+      await waitFor(() => {
+        expect(scrolledSegmentIds.length).toBeGreaterThan(secondSegmentScrollCount)
+        expect(scrolledSegmentIds[scrolledSegmentIds.length - 1])
+          .toBe('meeting-transcript-segment-1')
+      })
+      expect(screen.getByTestId('current-location')).toHaveTextContent(
+        '/meetings/meeting-current/report?transcript_id=transcript-1&segment=1',
+      )
+      expect(document.getElementById('meeting-transcript-segment-1'))
+        .toHaveClass('is-source-highlighted')
+
+      const repeatedSecondSegmentScrollCount = scrolledSegmentIds.length
+      await user.click(secondSource)
+      await waitFor(() => {
+        expect(scrolledSegmentIds.length).toBeGreaterThan(repeatedSecondSegmentScrollCount)
+        expect(scrolledSegmentIds[scrolledSegmentIds.length - 1])
+          .toBe('meeting-transcript-segment-1')
+      })
+    })
+
+    it('shows a graceful message if the referenced transcript segment is missing', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          { ...actionItems.action_items[0], source_segment_index: 4 },
+        ],
+      })
+      renderReport()
+      await user.click(
+        await screen.findByRole('button', { name: 'Source transcript phrase: 0:00.92' }),
+      )
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'The referenced transcript segment is not available.',
+      )
+    })
+
+    it('navigates to the source meeting and exact transcript segment for other source records', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            meeting_id: 'meeting-source',
+            transcript_id: 'transcript-source',
+            source_segment_index: 2,
+            source_quote_start_seconds: 13.44,
+          },
+        ],
+      })
+
+      renderReport()
+      await user.click(
+        await screen.findByRole('button', { name: 'Source transcript phrase: 0:13.44' }),
+      )
+
+      expect(screen.getByTestId('current-location')).toHaveTextContent(
+        '/meetings/meeting-source/report?transcript_id=transcript-source&segment=2',
+      )
+      expect(getMeetingTranscript).toHaveBeenCalledWith(
+        'meeting-source',
+        'organizer-1',
+        'transcript-source',
+      )
+    })
+
+    it('shows and navigates to the source segment when an exact phrase timestamp is unavailable', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getMeetingTranscript).mockResolvedValue({
+        ...transcript,
+        segments: [
+          { ...transcript.segments[0], start: 8.25, end: 9.2 },
+          {
+            ...transcript.segments[0],
+            start: 20.68,
+            end: 27.3,
+            text: 'test the IPI in points and fix existing bugs by 13 October.',
+          },
+        ],
+      })
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            source_segment_index: 1,
+            source_start_seconds: 20.68,
+            source_end_seconds: 27.3,
+            source_quote_start_seconds: null,
+            source_quote_end_seconds: null,
+          },
+        ],
+      })
+      renderReport()
+
+      expect(
+        await screen.findByRole('button', {
+          name: 'Source transcript segment starts at 0:20.68',
+        }),
+      ).toBeInTheDocument()
+      await user.click(
+        screen.getByRole('button', {
+          name: 'Source transcript segment starts at 0:20.68',
+        }),
+      )
+      expect(await screen.findByRole('heading', { name: 'Meeting Transcript' })).toBeInTheDocument()
+      expect(
+        document.querySelector('#meeting-transcript-segment-1 time'),
+      ).toHaveTextContent('0:20.68–0:27.30')
+      expect(screen.getByTestId('current-location')).toHaveTextContent(
+        '/meetings/meeting-current/report?transcript_id=transcript-1&segment=1',
+      )
+      expect(getMeetingTranscript).toHaveBeenCalledWith(
+        'meeting-current',
+        'organizer-1',
+        'transcript-1',
+      )
+      expect(document.getElementById('meeting-transcript-segment-1'))
+        .toHaveClass('is-source-highlighted')
+    })
+
+    it('displays 0:00 when word timing confirms the source phrase starts at zero', async () => {
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            source_quote_start_seconds: 0,
+            source_quote_end_seconds: 1.3,
+          },
+        ],
+      })
+      renderReport()
+
+      expect(
+        await screen.findByRole('button', { name: 'Source transcript phrase: 0:00' }),
+      ).toBeInTheDocument()
+    })
   })
 
   it.each([
@@ -253,7 +652,9 @@ describe('MeetingReportPage transcript', () => {
     const user = userEvent.setup()
     renderReport()
     await user.click(await screen.findByRole('button', { name: 'View Transcript' }))
-    expect(await screen.findByText('Thank you very much.')).toBeInTheDocument()
+    expect(
+      await within(screen.getByLabelText('Meeting transcript')).findByText('Thank you very much.'),
+    ).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Hide Transcript' }))
     await waitFor(() => {

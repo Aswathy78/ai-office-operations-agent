@@ -2,6 +2,7 @@ import type {
   GuestDecision,
   GuestJoinRequest,
   GuestRequest,
+  MeetingActionItems,
   MeetingDetails,
   MeetingListRecord,
   MeetingReport,
@@ -12,7 +13,7 @@ import type {
   TranscriptSegmentUpdate,
 } from '../types/meeting'
 
-const API_BASE_URL = 'http://127.0.0.1:9000'
+const API_BASE_URL = 'http://127.0.0.1:8000'
 
 export class MeetingApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -94,11 +95,34 @@ export function getMeetingSummary(
   ).then((response) => readResponse<MeetingSummary>(response))
 }
 
+export function getMeetingActionItems(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingActionItems> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items?${query}`,
+  ).then((response) => readResponse<MeetingActionItems>(response))
+}
+
+export function extractMeetingActionItems(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingActionItems> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/extract?${query}`,
+    { method: 'POST' },
+  ).then((response) => readResponse<MeetingActionItems>(response))
+}
+
 export function getMeetingTranscript(
   meetingId: string,
   organizerId: string,
+  transcriptId?: string,
 ): Promise<MeetingTranscript> {
   const query = new URLSearchParams({ organizer_id: organizerId })
+  if (transcriptId) query.set('transcript_id', transcriptId)
   return fetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
   ).then((response) => readResponse<MeetingTranscript>(response))
@@ -108,8 +132,10 @@ export function updateMeetingTranscript(
   meetingId: string,
   organizerId: string,
   segments: TranscriptSegmentUpdate[],
+  transcriptId?: string,
 ): Promise<MeetingTranscript> {
   const query = new URLSearchParams({ organizer_id: organizerId })
+  if (transcriptId) query.set('transcript_id', transcriptId)
   const body: MeetingTranscriptUpdateRequest = {
     segments: segments.map(({ text, speaker }) => ({
       text,
@@ -129,8 +155,10 @@ export function updateMeetingTranscript(
 export function getMeetingTranscriptCorrections(
   meetingId: string,
   organizerId: string,
+  transcriptId?: string,
 ): Promise<TranscriptCorrection[]> {
   const query = new URLSearchParams({ organizer_id: organizerId })
+  if (transcriptId) query.set('transcript_id', transcriptId)
   return fetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript/corrections?${query}`,
   ).then((response) => readResponse<TranscriptCorrection[]>(response))

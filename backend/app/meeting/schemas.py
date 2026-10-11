@@ -146,12 +146,19 @@ class RecordingConsentResponse(BaseModel):
     revoked_at: datetime | None = None
     created_at: datetime
 
+class TranscriptWord(BaseModel):
+    start: float = Field(ge=0)
+    end: float = Field(ge=0)
+    word: str = Field(min_length=1)
+
+
 class TranscriptSegment(BaseModel):
     start: float
     end: float
     text: str
     speaker: str
     flagged_for_correction: bool = False
+    words: list[TranscriptWord] | None = None
 
 
 class MeetingTranscriptResponse(BaseModel):
@@ -183,6 +190,41 @@ class MeetingSummaryResponse(BaseModel):
     updated_at: datetime
     completed_at: datetime | None = None
     error_message: str | None = None
+
+
+class MeetingActionItemResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    owner_name: str | None = None
+    task_description: str
+    deadline_at: datetime | None = None
+    deadline_text: str | None = None
+    priority: Literal["low", "medium", "high", "urgent"]
+    confidence: float = Field(ge=0, le=1)
+    meeting_id: str
+    transcript_id: str
+    source_segment_index: int = Field(ge=0)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(ge=0)
+    source_quote_start_seconds: float | None = Field(default=None, ge=0)
+    source_quote_end_seconds: float | None = Field(default=None, ge=0)
+    source_quote: str | None = None
+
+
+class MeetingActionItemsResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    meeting_id: str
+    transcript_id: str
+    status: Literal["pending", "processing", "completed", "failed"]
+    created_at: datetime
+    updated_at: datetime
+    processing_started_at: datetime | None = None
+    completed_at: datetime | None = None
+    error_message: str | None = None
+    action_items: list[MeetingActionItemResponse] = Field(default_factory=list)
 
 
 class TranscriptSegmentUpdate(BaseModel):

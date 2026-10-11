@@ -15,6 +15,8 @@ import sys
 import threading
 import time
 from typing import Callable
+from dotenv import load_dotenv
+from app.meeting.action_item_service import generate_meeting_action_items
 from app.meeting.summary_service import generate_meeting_summary
 from sqlalchemy.orm import Session
 
@@ -33,7 +35,7 @@ from app.meeting.transcription_media import decrypt_recording_to_temporary_file
 
 logger = logging.getLogger(__name__)
 
-_CUDA_DLL_PACKAGE_DIRS = ("cublas", "cudnn", "cuda_nvrtc")
+_CUDA_DLL_PACKAGE_DIRS = ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime")
 _CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
 _CUDA_DLL_LIBRARY_HANDLES: list[object] = []
 _REGISTERED_CUDA_DLL_DIRECTORIES: set[Path] = set()
@@ -296,6 +298,7 @@ def process_claimed_transcript(
         segment_iterator, _info = model.transcribe(
             str(plaintext_path),
             language="en",
+            word_timestamps=True,
         )
 
         # ---------------------------------------------------------
@@ -316,6 +319,16 @@ def process_claimed_transcript(
                 "speaker": speaker.name,
                 "flagged_for_correction": speaker.flagged_for_correction,
             }
+            word_timestamps = [
+                {
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "word": str(word.word),
+                }
+                for word in (getattr(segment, "words", None) or [])
+            ]
+            if word_timestamps:
+                segment_data["words"] = word_timestamps
 
             segments.append(segment_data)
 
@@ -345,12 +358,18 @@ def process_claimed_transcript(
         db.commit()
         try:
             generate_meeting_summary(db, transcript.id)
-        except Exception as error:
+        except Exception:
             logger.error(
-            "Meeting summary generation failed for transcript %s: %s",
-            transcript.id,
-            error,
-        )
+                "Meeting summary generation failed for transcript %s",
+                transcript.id,
+            )
+        try:
+            generate_meeting_action_items(db, transcript.id)
+        except Exception:
+            logger.error(
+                "Meeting action item extraction failed for transcript %s",
+                transcript.id,
+            )
 
         logger.info(
             "Transcript %s completed. Speaker=%s",
@@ -395,6 +414,11 @@ def run_worker(
     storage_root: str | Path = RECORDING_STORAGE_DIR,
     stop_event: threading.Event | None = None,
 ) -> None:
+
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parents[2] / ".env",
+        override=False,
+    )
 
     logger.info("Transcription worker started")
     model = None

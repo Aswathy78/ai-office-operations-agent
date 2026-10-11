@@ -69,6 +69,28 @@ SUMMARY_STATUSES = (
     SUMMARY_STATUS_FAILED,
 )
 
+ACTION_ITEM_EXTRACTION_STATUS_PENDING = "pending"
+ACTION_ITEM_EXTRACTION_STATUS_PROCESSING = "processing"
+ACTION_ITEM_EXTRACTION_STATUS_COMPLETED = "completed"
+ACTION_ITEM_EXTRACTION_STATUS_FAILED = "failed"
+ACTION_ITEM_EXTRACTION_STATUSES = (
+    ACTION_ITEM_EXTRACTION_STATUS_PENDING,
+    ACTION_ITEM_EXTRACTION_STATUS_PROCESSING,
+    ACTION_ITEM_EXTRACTION_STATUS_COMPLETED,
+    ACTION_ITEM_EXTRACTION_STATUS_FAILED,
+)
+
+ACTION_ITEM_PRIORITY_LOW = "low"
+ACTION_ITEM_PRIORITY_MEDIUM = "medium"
+ACTION_ITEM_PRIORITY_HIGH = "high"
+ACTION_ITEM_PRIORITY_URGENT = "urgent"
+ACTION_ITEM_PRIORITIES = (
+    ACTION_ITEM_PRIORITY_LOW,
+    ACTION_ITEM_PRIORITY_MEDIUM,
+    ACTION_ITEM_PRIORITY_HIGH,
+    ACTION_ITEM_PRIORITY_URGENT,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -97,6 +119,11 @@ class Meeting(Base):
     )
 
     summaries: Mapped[list["MeetingSummary"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+    )
+
+    action_item_extractions: Mapped[list["MeetingActionItemExtraction"]] = relationship(
         back_populates="meeting",
         cascade="all, delete-orphan",
     )
@@ -312,6 +339,12 @@ class MeetingTranscript(Base):
         cascade="all, delete-orphan",
     )
 
+    action_item_extraction: Mapped["MeetingActionItemExtraction | None"] = relationship(
+        back_populates="transcript",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
 
 class MeetingSummary(Base):
     __tablename__ = "meeting_summaries"
@@ -366,6 +399,139 @@ class MeetingSummary(Base):
 
     meeting: Mapped["Meeting"] = relationship(back_populates="summaries")
     transcript: Mapped["MeetingTranscript"] = relationship(back_populates="summaries")
+
+
+class MeetingActionItemExtraction(Base):
+    __tablename__ = "meeting_action_item_extractions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN "
+            f"({', '.join(repr(status) for status in ACTION_ITEM_EXTRACTION_STATUSES)})",
+            name="ck_meeting_action_item_extractions_status",
+        ),
+        UniqueConstraint(
+            "transcript_id",
+            name="uq_meeting_action_item_extractions_transcript_id",
+        ),
+        Index("ix_meeting_action_item_extractions_meeting_id", "meeting_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transcript_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=ACTION_ITEM_EXTRACTION_STATUS_PENDING,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    meeting: Mapped["Meeting"] = relationship(
+        back_populates="action_item_extractions",
+    )
+    transcript: Mapped["MeetingTranscript"] = relationship(
+        back_populates="action_item_extraction",
+    )
+    items: Mapped[list["MeetingActionItem"]] = relationship(
+        back_populates="extraction",
+        cascade="all, delete-orphan",
+    )
+
+
+class MeetingActionItem(Base):
+    __tablename__ = "meeting_action_items"
+    __table_args__ = (
+        CheckConstraint(
+            f"priority IN ({', '.join(repr(priority) for priority in ACTION_ITEM_PRIORITIES)})",
+            name="ck_meeting_action_items_priority",
+        ),
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 1",
+            name="ck_meeting_action_items_confidence_range",
+        ),
+        CheckConstraint(
+            "source_segment_index >= 0",
+            name="ck_meeting_action_items_source_segment_index",
+        ),
+        CheckConstraint(
+            "source_start_seconds >= 0 "
+            "AND source_end_seconds >= source_start_seconds",
+            name="ck_meeting_action_items_source_time_range",
+        ),
+        CheckConstraint(
+            "(source_quote_start_seconds IS NULL AND source_quote_end_seconds IS NULL) "
+            "OR (source_quote_start_seconds IS NOT NULL "
+            "AND source_quote_end_seconds IS NOT NULL "
+            "AND source_quote_start_seconds >= 0 "
+            "AND source_quote_end_seconds >= source_quote_start_seconds)",
+            name="ck_meeting_action_items_source_quote_time_range",
+        ),
+        UniqueConstraint(
+            "extraction_id",
+            "source_segment_index",
+            "task_description",
+            name="uq_meeting_action_items_extraction_segment_task",
+        ),
+        Index("ix_meeting_action_items_extraction_id", "extraction_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    extraction_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_action_item_extractions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    owner_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    task_description: Mapped[str] = mapped_column(Text, nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    deadline_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(nullable=False)
+    source_segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_start_seconds: Mapped[float] = mapped_column(nullable=False)
+    source_end_seconds: Mapped[float] = mapped_column(nullable=False)
+    source_quote_start_seconds: Mapped[float | None] = mapped_column(nullable=True)
+    source_quote_end_seconds: Mapped[float | None] = mapped_column(nullable=True)
+    source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    extraction: Mapped["MeetingActionItemExtraction"] = relationship(
+        back_populates="items",
+    )
 
 
 class MeetingTranscriptCorrection(Base):

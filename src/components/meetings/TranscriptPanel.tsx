@@ -15,22 +15,32 @@ import type {
 interface TranscriptPanelProps {
   meetingId: string
   organizerId: string
+  transcriptId?: string | null
   isOrganizer: boolean
   isOpen: boolean
   inline?: boolean
+  focusSegmentIndex?: number | null
+  focusRequestId?: number
   onClose: () => void
 }
 
 function formatTimestamp(seconds: number): string {
-  const safeSeconds = Math.max(0, Math.floor(seconds))
-  const hours = Math.floor(safeSeconds / 3600)
-  const minutes = Math.floor((safeSeconds % 3600) / 60)
-  const remainingSeconds = safeSeconds % 60
+  const centiseconds = Math.round(Math.max(0, seconds) * 100)
+  const wholeSeconds = Math.floor(centiseconds / 100)
+  const hours = Math.floor(wholeSeconds / 3600)
+  const minutes = Math.floor((wholeSeconds % 3600) / 60)
+  const remainingSeconds = wholeSeconds % 60
+  const fractionalCentiseconds = centiseconds % 100
+  const secondsLabel = `${String(remainingSeconds).padStart(2, '0')}${
+    fractionalCentiseconds > 0
+      ? `.${String(fractionalCentiseconds).padStart(2, '0')}`
+      : ''
+  }`
 
   if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+    return `${hours}:${String(minutes).padStart(2, '0')}:${secondsLabel}`
   }
-  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`
+  return `${minutes}:${secondsLabel}`
 }
 
 function formatCorrectionTimestamp(value: string): string {
@@ -47,17 +57,21 @@ function safeErrorMessage(error: unknown): string {
 }
 
 function TranscriptSegmentRow({
+  id,
   segment,
   index,
   isOrganizer,
   saving,
   onSave,
+  highlighted,
 }: {
+  id: string
   segment: TranscriptSegment
   index: number
   isOrganizer: boolean
   saving: boolean
   onSave: (index: number, text: string, speaker: string) => Promise<boolean>
+  highlighted: boolean
 }) {
   const [editing, setEditing] = useState(false)
   const [textDraft, setTextDraft] = useState(segment.text)
@@ -87,7 +101,11 @@ function TranscriptSegmentRow({
   }
 
   return (
-    <article className="meet-transcript-segment" aria-label={`Transcript segment ${index + 1}`}>
+    <article
+      id={id}
+      className={`meet-transcript-segment${highlighted ? ' is-source-highlighted' : ''}`}
+      aria-label={`Transcript segment ${index + 1}`}
+    >
       <div className="meet-transcript-segment-meta">
         <span className="meet-transcript-speaker">{segment.speaker || 'Unknown speaker'}</span>
         <span className="meet-transcript-time">
@@ -168,9 +186,12 @@ function TranscriptSegmentRow({
 export function TranscriptPanel({
   meetingId,
   organizerId,
+  transcriptId,
   isOrganizer,
   isOpen,
   inline = false,
+  focusSegmentIndex = null,
+  focusRequestId = 0,
   onClose,
 }: TranscriptPanelProps) {
   const [transcript, setTranscript] = useState<MeetingTranscript | null>(null)
@@ -185,12 +206,18 @@ export function TranscriptPanel({
   const [historyError, setHistoryError] = useState('')
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const [historyRequestVersion, setHistoryRequestVersion] = useState(0)
+  const [focusedSegment, setFocusedSegment] = useState<{
+    index: number
+    requestId: number
+  } | null>(null)
 
   const loadTranscript = useCallback(async () => {
     setLoading(true)
     setLoadError('')
     try {
-      const result = await getMeetingTranscript(meetingId, organizerId)
+      const result = transcriptId
+        ? await getMeetingTranscript(meetingId, organizerId, transcriptId)
+        : await getMeetingTranscript(meetingId, organizerId)
       setTranscript(result)
     } catch (error) {
       setTranscript(null)
@@ -198,7 +225,7 @@ export function TranscriptPanel({
     } finally {
       setLoading(false)
     }
-  }, [meetingId, organizerId])
+  }, [meetingId, organizerId, transcriptId])
 
   useEffect(() => {
     if (!isOpen || !meetingId || !organizerId) return
@@ -206,7 +233,10 @@ export function TranscriptPanel({
     setTranscript(null)
     setLoading(true)
     setLoadError('')
-    void getMeetingTranscript(meetingId, organizerId)
+    const transcriptRequest = transcriptId
+      ? getMeetingTranscript(meetingId, organizerId, transcriptId)
+      : getMeetingTranscript(meetingId, organizerId)
+    void transcriptRequest
       .then((result) => {
         if (active) setTranscript(result)
       })
@@ -222,7 +252,7 @@ export function TranscriptPanel({
     return () => {
       active = false
     }
-  }, [isOpen, meetingId, organizerId])
+  }, [isOpen, meetingId, organizerId, transcriptId])
 
   useEffect(() => {
     if (!isOpen || !isOrganizer || !showHistory) return
@@ -231,7 +261,10 @@ export function TranscriptPanel({
     setHistoryError('')
     setHistoryLoaded(false)
     setCorrections([])
-    void getMeetingTranscriptCorrections(meetingId, organizerId)
+    const correctionsRequest = transcriptId
+      ? getMeetingTranscriptCorrections(meetingId, organizerId, transcriptId)
+      : getMeetingTranscriptCorrections(meetingId, organizerId)
+    void correctionsRequest
       .then((result) => {
         if (active) {
           setCorrections(result)
@@ -258,6 +291,33 @@ export function TranscriptPanel({
       .filter(({ segment }) => segment.text.toLocaleLowerCase().includes(normalizedSearch))
   }, [search, transcript])
 
+  useEffect(() => {
+    if (focusSegmentIndex === null || !isOpen || !transcript) return
+    if (focusSegmentIndex < 0 || focusSegmentIndex >= transcript.segments.length) {
+      setFocusedSegment(null)
+      setSaveError('The referenced transcript segment is not available.')
+      return
+    }
+    setSearch('')
+    setShowHistory(false)
+    setFocusedSegment({ index: focusSegmentIndex, requestId: focusRequestId })
+  }, [focusRequestId, focusSegmentIndex, isOpen, transcript])
+
+  useEffect(() => {
+    if (focusedSegment === null || !isOpen || !transcript) return
+    requestAnimationFrame(() => {
+      document
+        .getElementById(`meeting-transcript-segment-${focusedSegment.index}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }, [
+    focusedSegment?.index,
+    focusedSegment?.requestId,
+    isOpen,
+    transcript,
+    visibleSegments,
+  ])
+
   const status = transcript?.status.toLowerCase()
   const isCompleted = status === 'completed'
   const isPending = status === 'pending'
@@ -268,7 +328,10 @@ export function TranscriptPanel({
     if (!isOpen || loading || (!isPending && !isProcessing)) return
     let active = true
     const timer = setTimeout(() => {
-      void getMeetingTranscript(meetingId, organizerId)
+      const transcriptRequest = transcriptId
+        ? getMeetingTranscript(meetingId, organizerId, transcriptId)
+        : getMeetingTranscript(meetingId, organizerId)
+      void transcriptRequest
         .then((result) => {
           if (active) {
             setTranscript(result)
@@ -299,7 +362,9 @@ export function TranscriptPanel({
     setSaving(true)
     setSaveError('')
     try {
-      const updated = await updateMeetingTranscript(meetingId, organizerId, nextSegments)
+      const updated = transcriptId
+        ? await updateMeetingTranscript(meetingId, organizerId, nextSegments, transcriptId)
+        : await updateMeetingTranscript(meetingId, organizerId, nextSegments)
       setTranscript(updated)
       if (historyLoaded) {
         setHistoryRequestVersion((version) => version + 1)
@@ -366,6 +431,7 @@ export function TranscriptPanel({
         </p>
       ) : transcript && isCompleted ? (
         <>
+          {saveError && <p className="meet-transcript-error" role="alert">{saveError}</p>}
           <div className="meet-transcript-toolbar">
             <label className="meet-transcript-search">
               <Search size={15} aria-hidden="true" />
@@ -391,8 +457,6 @@ export function TranscriptPanel({
               </button>
             )}
           </div>
-
-          {saveError && <p className="meet-transcript-error" role="alert">{saveError}</p>}
 
           {showHistory && isOrganizer ? (
             <section className="meet-transcript-scroll" aria-label="Transcript correction history">
@@ -445,11 +509,13 @@ export function TranscriptPanel({
                   {visibleSegments.map(({ segment, index }) => (
                     <TranscriptSegmentRow
                       key={`${index}-${segment.start}`}
+                      id={`meeting-transcript-segment-${index}`}
                       segment={segment}
                       index={index}
                       isOrganizer={isOrganizer && isCompleted}
                       saving={saving}
                       onSave={saveSegment}
+                      highlighted={focusedSegment?.index === index}
                     />
                   ))}
                 </div>

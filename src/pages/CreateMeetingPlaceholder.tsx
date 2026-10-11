@@ -93,7 +93,7 @@ export function CreateMeetingPlaceholder() {
       }
 
       const response = await fetch(
-        `http://127.0.0.1:9000/api/v1/meetings/?organizer_id=${encodeURIComponent(user?.id ?? 'demo-organizer')}`,
+        `http://127.0.0.1:8000/api/v1/meetings/?organizer_id=${encodeURIComponent(user?.id ?? 'demo-organizer')}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
