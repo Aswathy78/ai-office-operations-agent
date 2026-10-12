@@ -6,10 +6,16 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.meeting.models import (
+    Employee,
     Meeting,
+    MeetingActionItem,
     MeetingActionItemExtraction,
     MeetingAttendanceLog,
     MeetingSummary,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
 )
 from app.meeting.schemas import (
     AttendanceJoinRequest,
@@ -19,6 +25,8 @@ from app.meeting.schemas import (
     GuestJoinRequest,
     GuestRequestResponse,
     MeetingCreate,
+    ActionItemOwnerConfirmationRequest,
+    EmployeeResponse,
     MeetingActionItemResponse,
     MeetingActionItemsResponse,
     MeetingReportResponse,
@@ -65,6 +73,7 @@ from app.meeting.service import (
 from app.meeting.action_item_service import (
     MeetingActionItemExtractionError,
     generate_meeting_action_items,
+    refresh_missing_employee_matches,
 )
 from app.meeting.signaling import signaling_manager
 
@@ -122,6 +131,20 @@ def get_meetings(
             organizer_id=m.organizer_id,
         )
         for m in meetings
+    ]
+
+
+@router.get("/employees", response_model=list[EmployeeResponse])
+def get_active_employees(db: Session = Depends(get_db)):
+    employees = (
+        db.query(Employee)
+        .filter(Employee.is_active.is_(True))
+        .order_by(Employee.name.asc())
+        .all()
+    )
+    return [
+        EmployeeResponse(id=employee.id, name=employee.name, email=employee.email)
+        for employee in employees
     ]
 
 
@@ -1108,6 +1131,10 @@ def _meeting_action_items_response(
             MeetingActionItemResponse(
                 id=item.id,
                 owner_name=item.owner_name,
+                proposed_employee_id=item.proposed_employee_id,
+                confirmed_employee_id=item.confirmed_employee_id,
+                employee_match_status=item.employee_match_status,
+                ownership_status=item.ownership_status,
                 task_description=item.task_description,
                 deadline_at=item.deadline_at,
                 deadline_text=item.deadline_text,
@@ -1174,6 +1201,90 @@ def extract_meeting_action_items(
     return _meeting_action_items_response(extraction)
 
 
+@router.post(
+    "/{meeting_id}/action-items/{action_item_id}/confirm-owner",
+    response_model=MeetingActionItemResponse,
+    summary="Confirm or select the responsible employee for an extracted action item",
+)
+def confirm_action_item_owner(
+    meeting_id: str,
+    action_item_id: str,
+    payload: ActionItemOwnerConfirmationRequest,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can confirm ownership",
+        )
+
+    action_item = (
+        db.query(MeetingActionItem)
+        .join(
+            MeetingActionItemExtraction,
+            MeetingActionItem.extraction_id == MeetingActionItemExtraction.id,
+        )
+        .filter(
+            MeetingActionItem.id == action_item_id,
+            MeetingActionItemExtraction.meeting_id == meeting_id,
+        )
+        .one_or_none()
+    )
+    if action_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Action item not found for this meeting",
+        )
+
+    employee = db.query(Employee).filter(Employee.id == payload.employee_id).one_or_none()
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Employee not found",
+        )
+
+    if not employee.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Employee is inactive",
+        )
+
+    action_item.ownership_status = MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED
+    action_item.confirmed_employee_id = employee.id
+    db.commit()
+    db.refresh(action_item)
+
+    return MeetingActionItemResponse(
+        id=action_item.id,
+        owner_name=action_item.owner_name,
+        proposed_employee_id=action_item.proposed_employee_id,
+        confirmed_employee_id=action_item.confirmed_employee_id,
+        employee_match_status=action_item.employee_match_status,
+        ownership_status=action_item.ownership_status,
+        task_description=action_item.task_description,
+        deadline_at=action_item.deadline_at,
+        deadline_text=action_item.deadline_text,
+        priority=action_item.priority,
+        confidence=action_item.confidence,
+        meeting_id=meeting_id,
+        transcript_id=action_item.extraction.transcript_id,
+        source_segment_index=action_item.source_segment_index,
+        source_start_seconds=action_item.source_start_seconds,
+        source_end_seconds=action_item.source_end_seconds,
+        source_quote_start_seconds=action_item.source_quote_start_seconds,
+        source_quote_end_seconds=action_item.source_quote_end_seconds,
+        source_quote=action_item.source_quote,
+    )
+
+
 @router.get(
     "/{meeting_id}/action-items",
     response_model=MeetingActionItemsResponse,
@@ -1215,6 +1326,7 @@ def get_meeting_action_items(
             detail="Meeting action items not found",
         )
 
+    refresh_missing_employee_matches(db, extraction)
     return _meeting_action_items_response(extraction)
 
 

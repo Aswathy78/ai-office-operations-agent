@@ -15,12 +15,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.meeting.employee_matching import EmployeeMatchResult, match_employee_name
 from app.meeting.models import (
     ACTION_ITEM_EXTRACTION_STATUS_COMPLETED,
     ACTION_ITEM_EXTRACTION_STATUS_FAILED,
     ACTION_ITEM_EXTRACTION_STATUS_PENDING,
     ACTION_ITEM_EXTRACTION_STATUS_PROCESSING,
     ACTION_ITEM_PRIORITIES,
+    EMPLOYEE_MATCH_STATUS_AMBIGUOUS,
+    EMPLOYEE_MATCH_STATUS_MISSING_OWNER,
+    EMPLOYEE_MATCH_STATUS_NO_MATCH,
+    EMPLOYEE_MATCH_STATUS_UNIQUE,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
     MeetingActionItem,
     MeetingActionItemExtraction,
     MeetingRecording,
@@ -65,6 +74,57 @@ class MeetingActionItemExtractionError(RuntimeError):
 
 class _SafeExtractionFailure(ValueError):
     """An extraction failure whose message is safe to persist."""
+
+
+def _annotate_employee_match(
+    db: Session,
+    item: MeetingActionItem,
+) -> EmployeeMatchResult:
+    """Match an extracted owner against the active employee directory."""
+    match_result = match_employee_name(db, item.owner_name)
+    item.employee_match_status = match_result.status
+    item.proposed_employee_id = match_result.employee_id
+    item.ownership_status = _ownership_status_for_match(match_result)
+    setattr(item, "employee_match_result", match_result)
+    setattr(item, "proposed_employee_name", match_result.employee_name)
+    return match_result
+
+
+def _ownership_status_for_match(match_result: EmployeeMatchResult) -> str:
+    if match_result.status == "missing_owner":
+        return MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED
+    if match_result.status == "unique_match":
+        return MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED
+    if match_result.status == "ambiguous_match":
+        return MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED
+    if match_result.status == "no_match":
+        return MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED
+    return MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED
+
+
+def refresh_missing_employee_matches(
+    db: Session,
+    extraction: MeetingActionItemExtraction,
+) -> MeetingActionItemExtraction:
+    """Backfill match metadata on completed extractions created before matching."""
+    updated = False
+    for item in extraction.items:
+        if item.employee_match_status is not None:
+            continue
+
+        match_result = match_employee_name(db, item.owner_name)
+        item.employee_match_status = match_result.status
+        item.proposed_employee_id = match_result.employee_id
+        if item.ownership_status != MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED:
+            item.ownership_status = _ownership_status_for_match(match_result)
+        setattr(item, "employee_match_result", match_result)
+        setattr(item, "proposed_employee_name", match_result.employee_name)
+        updated = True
+
+    if updated:
+        db.commit()
+        db.refresh(extraction)
+    return extraction
 
 
 def _normalize_quote(value: str) -> str:
@@ -432,7 +492,8 @@ def generate_meeting_action_items(
     if extraction is None:
         extraction = _create_extraction(db, recording.meeting_id, transcript.id)
     if extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED:
-            return _refresh_existing_quote_timestamps(db, extraction, transcript)
+                extraction = _refresh_existing_quote_timestamps(db, extraction, transcript)
+                return refresh_missing_employee_matches(db, extraction)
     if extraction.status == ACTION_ITEM_EXTRACTION_STATUS_PROCESSING:
         return extraction
 
@@ -536,34 +597,47 @@ def generate_meeting_action_items(
         db.query(MeetingActionItem).filter(
             MeetingActionItem.extraction_id == extraction.id
         ).delete(synchronize_session=False)
+        match_results_by_item_id: dict[str, EmployeeMatchResult] = {}
         for candidate, segment, quote_timestamps in candidates:
-            db.add(
-                MeetingActionItem(
-                    id=str(uuid.uuid4()),
-                    extraction_id=extraction.id,
-                    owner_name=candidate.owner_name,
-                    task_description=candidate.task_description,
-                    deadline_at=candidate.deadline_at,
-                    deadline_text=candidate.deadline_text,
-                    priority=candidate.priority,
-                    confidence=candidate.confidence,
-                    source_segment_index=candidate.source_segment_index,
-                    source_start_seconds=segment.start,
-                    source_end_seconds=segment.end,
-                    source_quote_start_seconds=(
-                        quote_timestamps[0] if quote_timestamps else None
-                    ),
-                    source_quote_end_seconds=(
-                        quote_timestamps[1] if quote_timestamps else None
-                    ),
-                    source_quote=candidate.source_quote.strip(),
-                )
+            item = MeetingActionItem(
+                id=str(uuid.uuid4()),
+                extraction_id=extraction.id,
+                owner_name=candidate.owner_name,
+                task_description=candidate.task_description,
+                deadline_at=candidate.deadline_at,
+                deadline_text=candidate.deadline_text,
+                priority=candidate.priority,
+                confidence=candidate.confidence,
+                source_segment_index=candidate.source_segment_index,
+                source_start_seconds=segment.start,
+                source_end_seconds=segment.end,
+                source_quote_start_seconds=(
+                    quote_timestamps[0] if quote_timestamps else None
+                ),
+                source_quote_end_seconds=(
+                    quote_timestamps[1] if quote_timestamps else None
+                ),
+                source_quote=candidate.source_quote.strip(),
+                employee_match_status=None,
+                ownership_status=MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
             )
+            match_result = _annotate_employee_match(db, item)
+            match_results_by_item_id[item.id] = match_result
+            db.add(item)
         extraction.status = ACTION_ITEM_EXTRACTION_STATUS_COMPLETED
         extraction.error_message = None
         extraction.completed_at = datetime.now(timezone.utc)
+        setattr(extraction, "employee_match_results", match_results_by_item_id)
         db.commit()
         db.refresh(extraction)
+        for item in extraction.items:
+            match_result = match_results_by_item_id.get(item.id)
+            if match_result is None:
+                continue
+            setattr(item, "employee_match_result", match_result)
+            setattr(item, "employee_match_status", match_result.status)
+            setattr(item, "proposed_employee_id", match_result.employee_id)
+            setattr(item, "proposed_employee_name", match_result.employee_name)
         return extraction
 
     except Exception as error:

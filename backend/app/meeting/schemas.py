@@ -42,6 +42,12 @@ class MeetingResponse(BaseModel):
     organizer_id: str | None = None
 
 
+class EmployeeResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+
+
 class MeetingValidationResponse(BaseModel):
     id: str
     title: str
@@ -192,11 +198,19 @@ class MeetingSummaryResponse(BaseModel):
     error_message: str | None = None
 
 
+class ActionItemOwnerConfirmationRequest(BaseModel):
+    employee_id: str
+
+
 class MeetingActionItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
     owner_name: str | None = None
+    proposed_employee_id: str | None = None
+    confirmed_employee_id: str | None = None
+    employee_match_status: str | None = None
+    ownership_status: str | None = None
     task_description: str
     deadline_at: datetime | None = None
     deadline_text: str | None = None

@@ -92,7 +92,11 @@ def test_create_tables_includes_action_item_tables_and_foreign_keys(
     assert [
         (fk["constrained_columns"][0], fk["referred_table"])
         for fk in item_fks
-    ] == [("extraction_id", "meeting_action_item_extractions")]
+    ] == [
+        ("extraction_id", "meeting_action_item_extractions"),
+        ("proposed_employee_id", "employees"),
+        ("confirmed_employee_id", "employees"),
+    ]
 
 
 def test_action_item_relationships_preserve_source_and_allow_missing_owner_deadline(

@@ -15,6 +15,7 @@ from app.meeting.models import (
     ACTION_ITEM_EXTRACTION_STATUS_FAILED,
     ACTION_ITEM_EXTRACTION_STATUS_PENDING,
     Base,
+    Employee,
     Meeting,
     MeetingActionItem,
     MeetingActionItemExtraction,
@@ -115,6 +116,9 @@ def _create_extraction(
     *,
     status: str = ACTION_ITEM_EXTRACTION_STATUS_COMPLETED,
     with_item: bool = True,
+    owner_name: str | None = "Maya",
+    employee_match_status: str | None = None,
+    ownership_status: str = "unresolved",
 ) -> MeetingActionItemExtraction:
     extraction = MeetingActionItemExtraction(
         id=str(uuid.uuid4()),
@@ -132,7 +136,9 @@ def _create_extraction(
         extraction.items.append(
             MeetingActionItem(
                 id=str(uuid.uuid4()),
-                owner_name="Maya",
+                owner_name=owner_name,
+                employee_match_status=employee_match_status,
+                ownership_status=ownership_status,
                 task_description="Send the agenda.",
                 deadline_text="by Friday",
                 priority="high",
@@ -181,6 +187,10 @@ def test_post_extracts_action_items_and_returns_source_fields(
     assert item == {
         "id": item["id"],
         "owner_name": "Maya",
+        "proposed_employee_id": None,
+        "confirmed_employee_id": None,
+        "employee_match_status": None,
+        "ownership_status": "unresolved",
         "task_description": "Send the agenda.",
         "deadline_at": None,
         "deadline_text": "by Friday",
@@ -216,10 +226,364 @@ def test_get_returns_persisted_action_items_and_source_timestamps(
     item = body["action_items"][0]
     assert item["meeting_id"] == meeting.id
     assert item["transcript_id"] == transcript.id
+    assert item["employee_match_status"] == "no_match"
+    assert item["ownership_status"] == "approval_required"
+    assert item["proposed_employee_id"] is None
+    assert item["confirmed_employee_id"] is None
     assert item["source_start_seconds"] == 12.5
     assert item["source_end_seconds"] == 16.75
     assert item["source_quote_start_seconds"] == 13.25
     assert item["source_quote_end_seconds"] == 16.5
+
+
+@pytest.mark.parametrize(
+    ("owner_name", "email"),
+    [
+        ("Priya Sharma", "priya.sharma@northstar.example"),
+        ("Daniel Brooks", "daniel.brooks@northstar.example"),
+    ],
+)
+def test_get_action_items_backfills_and_returns_legacy_match_metadata(
+    client: TestClient,
+    db_session: Session,
+    owner_name: str,
+    email: str,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(
+        db_session,
+        meeting,
+        transcript,
+        owner_name=owner_name,
+    )
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name=owner_name,
+        email=email,
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/meetings/{meeting.id}/action-items"
+        f"?organizer_id={ORGANIZER_ID}"
+    )
+
+    assert response.status_code == 200
+    response_item = response.json()["action_items"][0]
+    assert response_item["owner_name"] == owner_name
+    assert response_item["employee_match_status"] == "unique_match"
+    assert response_item["ownership_status"] == "proposed"
+    assert response_item["proposed_employee_id"] == employee.id
+    assert response_item["confirmed_employee_id"] is None
+    db_session.refresh(item)
+    assert item.employee_match_status == "unique_match"
+    assert item.ownership_status == "proposed"
+    assert item.proposed_employee_id == employee.id
+    assert item.confirmed_employee_id is None
+
+
+def test_get_action_items_backfill_preserves_confirmed_owner_separate_from_match(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(
+        db_session,
+        meeting,
+        transcript,
+        owner_name="Priya Sharma",
+        ownership_status="confirmed",
+    )
+    item = extraction.items[0]
+    selected_employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Daniel Brooks",
+        email="daniel.brooks@northstar.example",
+        is_active=True,
+    )
+    matched_employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Priya Sharma",
+        email="priya.sharma@northstar.example",
+        is_active=True,
+    )
+    db_session.add_all([selected_employee, matched_employee])
+    item.proposed_employee_id = selected_employee.id
+    item.confirmed_employee_id = selected_employee.id
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/meetings/{meeting.id}/action-items"
+        f"?organizer_id={ORGANIZER_ID}"
+    )
+
+    assert response.status_code == 200
+    response_item = response.json()["action_items"][0]
+    assert response_item["owner_name"] == "Priya Sharma"
+    assert response_item["employee_match_status"] == "unique_match"
+    assert response_item["proposed_employee_id"] == matched_employee.id
+    assert response_item["confirmed_employee_id"] == selected_employee.id
+    assert response_item["ownership_status"] == "confirmed"
+    db_session.refresh(item)
+    assert item.employee_match_status == "unique_match"
+    assert item.proposed_employee_id == matched_employee.id
+    assert item.confirmed_employee_id == selected_employee.id
+    assert item.ownership_status == "confirmed"
+
+
+def test_get_active_employees_returns_only_active_employee_fields(
+    client: TestClient,
+    db_session: Session,
+):
+    active_employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    inactive_employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Marcus Chen",
+        email="marcus.chen@northstar.example",
+        is_active=False,
+    )
+    db_session.add_all([active_employee, inactive_employee])
+    db_session.commit()
+
+    response = client.get("/api/v1/meetings/employees")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "id": active_employee.id,
+            "name": active_employee.name,
+            "email": active_employee.email,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "match_status",
+    ["unique_match", "ambiguous_match", "no_match", "missing_owner"],
+)
+def test_confirm_action_item_owner_preserves_matching_result_and_original_name(
+    client: TestClient,
+    db_session: Session,
+    match_status: str,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(
+        db_session,
+        meeting,
+        transcript,
+        owner_name="Original transcript owner",
+        employee_match_status=match_status,
+        ownership_status="approval_required",
+    )
+    item = extraction.items[0]
+    proposed_employee = None
+    if match_status == "unique_match":
+        proposed_employee = Employee(
+            id=str(uuid.uuid4()),
+            name="Original Proposed Employee",
+            email="proposed@northstar.example",
+            is_active=True,
+        )
+        item.proposed_employee_id = proposed_employee.id
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    db_session.add_all(
+        [employee, *([proposed_employee] if proposed_employee is not None else [])]
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": employee.id},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["owner_name"] == "Original transcript owner"
+    assert body["employee_match_status"] == match_status
+    assert body["proposed_employee_id"] == (
+        proposed_employee.id if proposed_employee is not None else None
+    )
+    assert body["confirmed_employee_id"] == employee.id
+    assert body["ownership_status"] == "confirmed"
+    db_session.refresh(item)
+    assert item.owner_name == "Original transcript owner"
+    assert item.employee_match_status == match_status
+    assert item.proposed_employee_id == (
+        proposed_employee.id if proposed_employee is not None else None
+    )
+    assert item.confirmed_employee_id == employee.id
+    assert item.ownership_status == "confirmed"
+
+
+def test_confirm_action_item_owner_keeps_missing_owner_name_missing(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(
+        db_session,
+        meeting,
+        transcript,
+        owner_name=None,
+        employee_match_status="missing_owner",
+        ownership_status="unresolved",
+    )
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": employee.id},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["owner_name"] is None
+    assert response.json()["employee_match_status"] == "missing_owner"
+    assert response.json()["proposed_employee_id"] is None
+    assert response.json()["confirmed_employee_id"] == employee.id
+    assert response.json()["ownership_status"] == "confirmed"
+    db_session.refresh(item)
+    assert item.owner_name is None
+
+
+def test_confirm_action_item_owner_rejects_unknown_employee(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": str(uuid.uuid4())},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Employee not found"
+    db_session.refresh(item)
+    assert item.confirmed_employee_id is None
+    assert item.ownership_status == "unresolved"
+
+
+def test_confirm_action_item_owner_rejects_inactive_employee(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Inactive Employee",
+        email="inactive@northstar.example",
+        is_active=False,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": employee.id},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Employee is inactive"
+    db_session.refresh(item)
+    assert item.confirmed_employee_id is None
+    assert item.ownership_status == "unresolved"
+
+
+def test_confirm_action_item_owner_rejects_item_from_another_meeting(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    other_meeting, other_transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    assert other_transcript is not None
+    extraction = _create_extraction(db_session, other_meeting, other_transcript)
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": employee.id},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Action item not found for this meeting"
+    db_session.refresh(item)
+    assert item.confirmed_employee_id is None
+    assert item.ownership_status == "unresolved"
+
+
+def test_confirm_action_item_owner_rejects_incorrect_organizer(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    assert transcript is not None
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/confirm-owner"
+        "?organizer_id=someone-else",
+        json={"employee_id": employee.id},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Only the meeting organizer can confirm ownership"
+    db_session.refresh(item)
+    assert item.confirmed_employee_id is None
+    assert item.ownership_status == "unresolved"
 
 
 def test_transcript_api_selects_the_requested_transcript_for_the_meeting(
