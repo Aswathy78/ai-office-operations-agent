@@ -3,6 +3,7 @@ import json
 import sys
 from types import SimpleNamespace
 import uuid
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import create_engine
@@ -26,6 +27,7 @@ from app.meeting.models import (
     TRANSCRIPT_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_PENDING,
 )
+from backend.app import meeting
 
 
 @pytest.fixture()
@@ -157,6 +159,7 @@ def test_extracts_explicit_assignment_and_persists_source_timestamps(
     transcript = _create_completed_transcript(db_session)
     configured_model = "configured-action-item-model"
     monkeypatch.setenv("GROQ_ACTION_ITEM_MODEL", configured_model)
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
     transcript.segments = [
         {**transcript.segments[0], "speaker": "Alex"},
     ]
@@ -175,7 +178,26 @@ def test_extracts_explicit_assignment_and_persists_source_timestamps(
     item = extraction.items[0]
     assert item.owner_name == "Alex"
     assert item.task_description == "Send the draft."
-    assert item.deadline_at is None
+    assert item.deadline_at is not None
+
+    recording = db_session.get(MeetingRecording, transcript.recording_id)
+    meeting = db_session.get(Meeting, recording.meeting_id)
+
+    meeting_start = meeting.start_at
+    if meeting_start.tzinfo is None:
+        meeting_start = meeting_start.replace(tzinfo=timezone.utc)
+
+    meeting_date = meeting_start.astimezone(
+            ZoneInfo("Asia/Kolkata")
+
+    ).date()
+
+    days_until_friday = (4 - meeting_date.weekday()) % 7
+    expected_friday = meeting_date + timedelta(days=days_until_friday)
+
+    assert item.deadline_at.date() == expected_friday
+
+
     assert item.deadline_text == "by Friday"
     assert item.priority == "medium"
     assert item.confidence == 0.9
