@@ -2,6 +2,8 @@ import type {
   GuestDecision,
   GuestJoinRequest,
   GuestRequest,
+  Employee,
+  MeetingActionItem,
   MeetingActionItems,
   MeetingDetails,
   MeetingListRecord,
@@ -103,6 +105,28 @@ export function getMeetingActionItems(
   return fetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items?${query}`,
   ).then((response) => readResponse<MeetingActionItems>(response))
+}
+
+export function getActiveEmployees(): Promise<Employee[]> {
+  return fetch(`${API_BASE_URL}/api/v1/meetings/employees`)
+    .then((response) => readResponse<Employee[]>(response))
+}
+
+export function confirmActionItemOwner(
+  meetingId: string,
+  actionItemId: string,
+  employeeId: string,
+  organizerId: string,
+): Promise<MeetingActionItem> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/${encodeURIComponent(actionItemId)}/confirm-owner?${query}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employee_id: employeeId }),
+    },
+  ).then((response) => readResponse<MeetingActionItem>(response))
 }
 
 export function extractMeetingActionItems(

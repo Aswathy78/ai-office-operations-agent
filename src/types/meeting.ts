@@ -260,9 +260,31 @@ export type MeetingActionItemExtractionStatus =
 
 export type MeetingActionItemPriority = 'low' | 'medium' | 'high' | 'urgent'
 
+export interface Employee {
+  id: string
+  name: string
+  email: string
+}
+
+export type EmployeeMatchStatus =
+  | 'unique_match'
+  | 'ambiguous_match'
+  | 'no_match'
+  | 'missing_owner'
+
+export type MeetingActionItemOwnershipStatus =
+  | 'unresolved'
+  | 'proposed'
+  | 'approval_required'
+  | 'confirmed'
+
 export interface MeetingActionItem {
   id: string
   owner_name: string | null
+  proposed_employee_id?: string | null
+  confirmed_employee_id?: string | null
+  employee_match_status?: EmployeeMatchStatus | null
+  ownership_status?: MeetingActionItemOwnershipStatus | null
   task_description: string
   deadline_at: string | null
   deadline_text: string | null

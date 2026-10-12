@@ -2,7 +2,9 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
 import {
+  confirmActionItemOwner,
   extractMeetingActionItems,
+  getActiveEmployees,
   getMeetingActionItems,
   getMeetingReport,
   getMeetingSummary,
@@ -15,6 +17,7 @@ import { useAuth } from '../contexts/AuthContext'
 import type {
   MeetingActionItem,
   MeetingActionItems,
+  Employee,
   MeetingReport,
   MeetingSummary,
 } from '../types/meeting'
@@ -42,6 +45,15 @@ export function MeetingReportPage() {
   const [actionItemsLoading, setActionItemsLoading] = useState(true)
   const [actionItemsTriggering, setActionItemsTriggering] = useState(false)
   const [actionItemsError, setActionItemsError] = useState('')
+  const [employees, setEmployees] = useState<Employee[]>([])
+  const [employeesLoading, setEmployeesLoading] = useState(false)
+  const [employeesError, setEmployeesError] = useState('')
+  const [confirmingActionItemId, setConfirmingActionItemId] = useState<string | null>(null)
+  const [ownerConfirmationFeedback, setOwnerConfirmationFeedback] = useState<{
+    actionItemId: string
+    kind: 'success' | 'error'
+    message: string
+  } | null>(null)
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [summaryError, setSummaryError] = useState('')
@@ -68,6 +80,37 @@ export function MeetingReportPage() {
 
     return () => { active = false }
   }, [meetingId, user])
+
+  const isOrganizer = Boolean(user && report && user.id === report.organizer_id)
+
+  useEffect(() => {
+    let active = true
+    if (!isOrganizer) {
+      setEmployees([])
+      setEmployeesError('')
+      setEmployeesLoading(false)
+      return
+    }
+
+    setEmployeesLoading(true)
+    setEmployeesError('')
+    getActiveEmployees()
+      .then((activeEmployees) => {
+        if (active) setEmployees(activeEmployees)
+      })
+      .catch((reason: unknown) => {
+        if (active) {
+          setEmployeesError(
+            reason instanceof Error ? reason.message : 'Active employees could not be loaded.',
+          )
+        }
+      })
+      .finally(() => {
+        if (active) setEmployeesLoading(false)
+      })
+
+    return () => { active = false }
+  }, [isOrganizer])
 
   useEffect(() => {
     let active = true
@@ -149,6 +192,66 @@ export function MeetingReportPage() {
       )
     } finally {
       setActionItemsTriggering(false)
+    }
+  }
+
+  async function confirmOwner(item: MeetingActionItem, employeeId: string) {
+    if (
+      !meetingId ||
+      !user ||
+      !report ||
+      user.id !== report.organizer_id ||
+      !employeeId ||
+      confirmingActionItemId
+    ) {
+      return
+    }
+
+    setConfirmingActionItemId(item.id)
+    setOwnerConfirmationFeedback(null)
+    try {
+      const confirmedItem = await confirmActionItemOwner(
+        meetingId,
+        item.id,
+        employeeId,
+        user.id,
+      )
+      try {
+        const refreshedItems = await getMeetingActionItems(meetingId, user.id)
+        setActionItems(refreshedItems)
+        setOwnerConfirmationFeedback({
+          actionItemId: item.id,
+          kind: 'success',
+          message: 'Owner confirmed successfully.',
+        })
+      } catch (refreshReason) {
+        setActionItems((current) =>
+          current
+            ? {
+                ...current,
+                action_items: current.action_items.map((actionItem) =>
+                  actionItem.id === confirmedItem.id ? confirmedItem : actionItem,
+                ),
+              }
+            : current,
+        )
+        setOwnerConfirmationFeedback({
+          actionItemId: item.id,
+          kind: 'error',
+          message: `Owner was confirmed, but the action-item list could not be refreshed: ${
+            refreshReason instanceof Error ? refreshReason.message : 'Please reload the page.'
+          }`,
+        })
+      }
+    } catch (reason) {
+      setOwnerConfirmationFeedback({
+        actionItemId: item.id,
+        kind: 'error',
+        message:
+          reason instanceof Error ? reason.message : 'Owner confirmation failed.',
+      })
+    } finally {
+      setConfirmingActionItemId(null)
     }
   }
 
@@ -274,10 +377,17 @@ export function MeetingReportPage() {
 
           <MeetingActionItemsPanel
             extraction={actionItems}
+            employees={employees}
+            employeesLoading={employeesLoading}
+            employeesError={employeesError}
+            isOrganizer={isOrganizer}
             loading={actionItemsLoading}
             triggering={actionItemsTriggering}
             error={actionItemsError}
+            confirmingActionItemId={confirmingActionItemId}
+            ownerConfirmationFeedback={ownerConfirmationFeedback}
             onExtract={() => void triggerActionItemExtraction()}
+            onConfirmOwner={(item, employeeId) => void confirmOwner(item, employeeId)}
             onOpenSource={openTranscriptSegment}
           />
 

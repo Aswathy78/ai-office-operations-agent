@@ -91,6 +91,28 @@ ACTION_ITEM_PRIORITIES = (
     ACTION_ITEM_PRIORITY_URGENT,
 )
 
+EMPLOYEE_MATCH_STATUS_UNIQUE = "unique_match"
+EMPLOYEE_MATCH_STATUS_AMBIGUOUS = "ambiguous_match"
+EMPLOYEE_MATCH_STATUS_NO_MATCH = "no_match"
+EMPLOYEE_MATCH_STATUS_MISSING_OWNER = "missing_owner"
+EMPLOYEE_MATCH_STATUSES = (
+    EMPLOYEE_MATCH_STATUS_UNIQUE,
+    EMPLOYEE_MATCH_STATUS_AMBIGUOUS,
+    EMPLOYEE_MATCH_STATUS_NO_MATCH,
+    EMPLOYEE_MATCH_STATUS_MISSING_OWNER,
+)
+
+MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED = "unresolved"
+MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED = "proposed"
+MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED = "approval_required"
+MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED = "confirmed"
+MEETING_ACTION_ITEM_OWNERSHIP_STATUSES = (
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED,
+    MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -140,6 +162,28 @@ class MeetingParticipant(Base):
         String(50),
         nullable=False,
         default="participant",
+    )
+
+
+class Employee(Base):
+    __tablename__ = "employees"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        unique=True,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 
@@ -473,6 +517,14 @@ class MeetingActionItem(Base):
             name="ck_meeting_action_items_priority",
         ),
         CheckConstraint(
+            f"employee_match_status IN ({', '.join(repr(status) for status in EMPLOYEE_MATCH_STATUSES)}) OR employee_match_status IS NULL",
+            name="ck_meeting_action_items_employee_match_status",
+        ),
+        CheckConstraint(
+            f"ownership_status IN ({', '.join(repr(status) for status in MEETING_ACTION_ITEM_OWNERSHIP_STATUSES)})",
+            name="ck_meeting_action_items_ownership_status",
+        ),
+        CheckConstraint(
             "confidence >= 0 AND confidence <= 1",
             name="ck_meeting_action_items_confidence_range",
         ),
@@ -509,6 +561,28 @@ class MeetingActionItem(Base):
         nullable=False,
     )
     owner_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    proposed_employee_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    confirmed_employee_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    employee_match_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+        default=None,
+    )
+    ownership_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+    )
     task_description: Mapped[str] = mapped_column(Text, nullable=False)
     deadline_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -531,6 +605,14 @@ class MeetingActionItem(Base):
 
     extraction: Mapped["MeetingActionItemExtraction"] = relationship(
         back_populates="items",
+    )
+    proposed_employee: Mapped["Employee | None"] = relationship(
+        foreign_keys="[MeetingActionItem.proposed_employee_id]",
+        overlaps="confirmed_employee",
+    )
+    confirmed_employee: Mapped["Employee | None"] = relationship(
+        foreign_keys="[MeetingActionItem.confirmed_employee_id]",
+        overlaps="proposed_employee",
     )
 
 

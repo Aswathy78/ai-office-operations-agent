@@ -1,13 +1,55 @@
 import { ClipboardList, RefreshCw } from 'lucide-react'
-import type { MeetingActionItem, MeetingActionItems } from '../../types/meeting'
+import { useState } from 'react'
+import type {
+  Employee,
+  EmployeeMatchStatus,
+  MeetingActionItem,
+  MeetingActionItems,
+  MeetingActionItemOwnershipStatus,
+} from '../../types/meeting'
 
 interface MeetingActionItemsPanelProps {
   extraction: MeetingActionItems | null
+  employees: Employee[]
+  employeesLoading: boolean
+  employeesError?: string
+  isOrganizer: boolean
   loading: boolean
   triggering: boolean
   error?: string
+  confirmingActionItemId: string | null
+  ownerConfirmationFeedback: {
+    actionItemId: string
+    kind: 'success' | 'error'
+    message: string
+  } | null
   onExtract: () => void
+  onConfirmOwner: (item: MeetingActionItem, employeeId: string) => void
   onOpenSource: (item: MeetingActionItem) => void
+}
+
+const matchStatusLabels: Record<EmployeeMatchStatus, string> = {
+  unique_match: 'Unique match',
+  ambiguous_match: 'Ambiguous match',
+  no_match: 'No match',
+  missing_owner: 'Missing owner',
+}
+
+const ownershipStatusLabels: Record<MeetingActionItemOwnershipStatus, string> = {
+  unresolved: 'Unresolved',
+  proposed: 'Proposed',
+  approval_required: 'Approval required',
+  confirmed: 'Confirmed',
+}
+
+function matchStatusLabel(status: EmployeeMatchStatus | null | undefined): string {
+  return status ? matchStatusLabels[status] : 'Not available'
+}
+
+function ownershipStatusLabel(
+  status: MeetingActionItemOwnershipStatus | null | undefined,
+): string {
+  return status ? ownershipStatusLabels[status] : 'Unresolved'
 }
 
 function formatTimestamp(seconds: number): string {
@@ -49,12 +91,20 @@ function statusMessage(
 
 export function MeetingActionItemsPanel({
   extraction,
+  employees,
+  employeesLoading,
+  employeesError = '',
+  isOrganizer,
   loading,
   triggering,
   error = '',
+  confirmingActionItemId,
+  ownerConfirmationFeedback,
   onExtract,
+  onConfirmOwner,
   onOpenSource,
 }: MeetingActionItemsPanelProps) {
+  const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<Record<string, string>>({})
   const status = extraction?.status
   const canExtract = !loading && !triggering && status !== 'processing'
 
@@ -117,6 +167,8 @@ export function MeetingActionItemsPanel({
                 <p><strong>{item.task_description}</strong></p>
                 <dl>
                   <div><dt>Owner</dt><dd>{item.owner_name || 'Unassigned'}</dd></div>
+                  <div><dt>Matching status</dt><dd>{matchStatusLabel(item.employee_match_status)}</dd></div>
+                  <div><dt>Ownership status</dt><dd>{ownershipStatusLabel(item.ownership_status)}</dd></div>
                   <div>
                     <dt>Deadline</dt>
                     <dd>
@@ -138,6 +190,67 @@ export function MeetingActionItemsPanel({
                     : `Source transcript phrase: ${formatTimestamp(item.source_quote_start_seconds)}`}
                 </button>
                 {item.source_quote && <blockquote>{item.source_quote}</blockquote>}
+                {isOrganizer && item.ownership_status !== 'confirmed' && (
+                  <div style={{ display: 'grid', gap: '0.5rem', marginTop: '0.75rem' }}>
+                    {employeesLoading ? (
+                      <p role="status">Loading active employees…</p>
+                    ) : employeesError ? (
+                      <p role="alert">Unable to load active employees: {employeesError}</p>
+                    ) : employees.length === 0 ? (
+                      <p role="status">No active employees are available to assign.</p>
+                    ) : (
+                      <>
+                        <label htmlFor={`owner-select-${item.id}`}>Select owner</label>
+                        <select
+                          id={`owner-select-${item.id}`}
+                          value={selectedEmployeeIds[item.id] ?? item.proposed_employee_id ?? ''}
+                          onChange={(event) => {
+                            setSelectedEmployeeIds((current) => ({
+                              ...current,
+                              [item.id]: event.target.value,
+                            }))
+                          }}
+                          disabled={confirmingActionItemId === item.id}
+                        >
+                          <option value="">Select an employee</option>
+                          {employees.map((employee) => (
+                            <option key={employee.id} value={employee.id}>
+                              {employee.name} ({employee.email})
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="button secondary"
+                          type="button"
+                          onClick={() => {
+                            const employeeId =
+                              selectedEmployeeIds[item.id] ?? item.proposed_employee_id ?? ''
+                            onConfirmOwner(item, employeeId)
+                          }}
+                          disabled={
+                            !(
+                              selectedEmployeeIds[item.id] ??
+                              item.proposed_employee_id ??
+                              ''
+                            ) ||
+                            confirmingActionItemId === item.id
+                          }
+                        >
+                          {confirmingActionItemId === item.id
+                            ? 'Confirming…'
+                            : 'Confirm Owner'}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                )}
+                {ownerConfirmationFeedback?.actionItemId === item.id && (
+                  <p
+                    role={ownerConfirmationFeedback.kind === 'error' ? 'alert' : 'status'}
+                  >
+                    {ownerConfirmationFeedback.message}
+                  </p>
+                )}
               </article>
             </li>
           ))}

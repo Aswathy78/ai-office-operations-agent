@@ -5,7 +5,9 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import {
+  confirmActionItemOwner,
   extractMeetingActionItems,
+  getActiveEmployees,
   getMeetingActionItems,
   getMeetingReport,
   getMeetingSummary,
@@ -37,6 +39,8 @@ vi.mock('../api/meetings', () => ({
   getMeetingReport: vi.fn(),
   getMeetingActionItems: vi.fn(),
   extractMeetingActionItems: vi.fn(),
+  getActiveEmployees: vi.fn(),
+  confirmActionItemOwner: vi.fn(),
   getMeetingSummary: vi.fn(),
   getMeetingTranscript: vi.fn(),
   getMeetingTranscriptCorrections: vi.fn(),
@@ -152,6 +156,16 @@ beforeEach(() => {
   vi.mocked(getMeetingReport).mockResolvedValue(report)
   vi.mocked(getMeetingActionItems).mockResolvedValue(actionItems)
   vi.mocked(extractMeetingActionItems).mockResolvedValue(actionItems)
+  vi.mocked(getActiveEmployees).mockResolvedValue([
+    { id: 'employee-1', name: 'Ava Patel', email: 'ava.patel@northstar.example' },
+  ])
+  vi.mocked(confirmActionItemOwner).mockResolvedValue({
+    ...actionItems.action_items[0],
+    proposed_employee_id: 'employee-1',
+    confirmed_employee_id: 'employee-1',
+    employee_match_status: 'unique_match',
+    ownership_status: 'confirmed',
+  })
   vi.mocked(getMeetingSummary).mockResolvedValue(summary)
   vi.mocked(getMeetingTranscript).mockResolvedValue(transcript)
   vi.mocked(updateMeetingTranscript).mockResolvedValue(transcript)
@@ -259,6 +273,17 @@ describe('MeetingReportPage transcript', () => {
 
   describe('MeetingReportPage action items', () => {
     it('renders extracted action items and their source reference', async () => {
+      vi.mocked(getMeetingActionItems).mockResolvedValue({
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            proposed_employee_id: 'employee-1',
+            employee_match_status: 'unique_match',
+            ownership_status: 'proposed',
+          },
+        ],
+      })
       renderReport()
 
       expect(await screen.findByRole('heading', { name: 'Meeting Action Items' })).toBeInTheDocument()
@@ -267,14 +292,52 @@ describe('MeetingReportPage transcript', () => {
       expect(panel).not.toBeNull()
       expect(within(panel as HTMLElement).getByText('Send the agenda.')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('Maya')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('Unique match')).toBeInTheDocument()
+      expect(within(panel as HTMLElement).getByText('Proposed')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('by Friday')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('high')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('92%')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Source transcript phrase: 0:00.92' })).toBeInTheDocument()
-      expect(screen.getByRole('status')).toHaveTextContent(
+      expect(within(panel as HTMLElement).getByText(
         'Extraction status: completed. 1 action item extracted.',
-      )
+      )).toBeInTheDocument()
       expect(screen.queryByText('No action items were identified.')).not.toBeInTheDocument()
+    })
+
+    it('confirms a selected active employee and refreshes action-item data', async () => {
+      const user = userEvent.setup()
+      const confirmedActionItems: MeetingActionItems = {
+        ...actionItems,
+        action_items: [
+          {
+            ...actionItems.action_items[0],
+            proposed_employee_id: 'employee-1',
+            confirmed_employee_id: 'employee-1',
+            employee_match_status: 'unique_match',
+            ownership_status: 'confirmed',
+          },
+        ],
+      }
+      vi.mocked(getMeetingActionItems)
+        .mockResolvedValueOnce(actionItems)
+        .mockResolvedValueOnce(confirmedActionItems)
+
+      renderReport()
+      await user.selectOptions(
+        await screen.findByRole('combobox', { name: 'Select owner' }),
+        'employee-1',
+      )
+      await user.click(screen.getByRole('button', { name: 'Confirm Owner' }))
+
+      expect(confirmActionItemOwner).toHaveBeenCalledWith(
+        'meeting-current',
+        'item-1',
+        'employee-1',
+        'organizer-1',
+      )
+      expect(await screen.findByText('Owner confirmed successfully.')).toBeInTheDocument()
+      expect(screen.getByText('Confirmed')).toBeInTheDocument()
+      expect(getMeetingActionItems).toHaveBeenCalledTimes(2)
     })
 
     it('reports the actual number of extracted action items', async () => {
@@ -305,6 +368,8 @@ describe('MeetingReportPage transcript', () => {
           {
             ...actionItems.action_items[0],
             owner_name: null,
+            employee_match_status: null,
+            ownership_status: null,
             deadline_at: null,
             deadline_text: null,
           },
@@ -313,6 +378,8 @@ describe('MeetingReportPage transcript', () => {
       renderReport()
 
       expect(await screen.findByText('Unassigned')).toBeInTheDocument()
+      expect(screen.getByText('Not available')).toBeInTheDocument()
+      expect(screen.getByText('Unresolved')).toBeInTheDocument()
       expect(screen.getByText('Not specified')).toBeInTheDocument()
     })
 
