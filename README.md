@@ -1049,6 +1049,52 @@ The AI Meeting Summary feature generates a structured summary from the completed
 - Discussion topics
 - Open questions
 
+## FR-11 – Meeting Action Item Extraction
+
+The Meeting Action Item Extraction feature identifies actionable tasks from meeting transcripts and displays them in the meeting report interface.
+
+### Features
+
+- Extracts action items from meeting transcripts.
+- Captures task descriptions, owners, deadlines, priorities, and confidence scores when available.
+- Associates action items with their source meeting and transcript timestamps.
+- Provides transcript references to help users locate the relevant discussion.
+- Excludes non-actionable statements from extracted action items.
+
+### Implementation
+
+- Backend service for action-item extraction.
+- Database models and schemas for action items.
+- API endpoints for action-item operations.
+- Database migrations for action-item storage and supporting metadata.
+- Frontend action-items panel integrated into the meeting report.
+- Backend and frontend tests for action-item functionality.
+
+
+## FR-12 – Meeting Action Item Owner Identification
+
+The Meeting Action Item Owner Identification feature matches extracted meeting action-item owner names against the active employee directory and allows organizers to resolve ownership when the match is uncertain.
+
+### Features
+
+- Matches extracted owner names against the active employee directory using fuzzy matching.
+- Proposes an employee when a single confident match is found.
+- Requires organizer approval when multiple confident matches are found.
+- Requires organizer approval when no confident match is found.
+- Allows organizers to select and confirm the correct employee.
+- Tracks employee matching status and ownership confirmation status.
+
+### Implementation
+
+- Employee directory model and database integration.
+- Fuzzy employee-matching service.
+- Backend service for action-item owner identification.
+- API endpoints and schemas for owner selection and confirmation.
+- Database migrations for employee records and action-item ownership fields.
+- Frontend owner-matching status and employee selection integrated into the meeting report.
+- Backend and frontend tests for owner matching and ownership confirmation.
+
+  
 ### Summary workflow
 
 ```text
