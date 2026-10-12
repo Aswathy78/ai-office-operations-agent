@@ -172,11 +172,38 @@ export function MeetingActionItemsPanel({
                   <div>
                     <dt>Deadline</dt>
                     <dd>
-                      {item.deadline_text || (item.deadline_at
-                        ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(item.deadline_at))
-                        : 'Not specified')}
-                    </dd>
-                  </div>
+                      {item.deadline_at ? (
+                        <>
+                          <time dateTime={item.deadline_at}>
+                            {new Intl.DateTimeFormat(undefined, {
+                              dateStyle: 'medium',
+                              timeZone: 'Asia/Kolkata',
+                            }).format(new Date(item.deadline_at))}
+                          </time>
+                          {item.deadline_text && (
+                            <small style={{ display: 'block' }}>
+                              Mentioned: {item.deadline_text}
+                            </small>
+                        )}
+                      </>
+                    ) : (
+                      <span
+                        role="status"
+                        style={{
+                          display: 'inline-block',
+                          padding: '0.2rem 0.45rem',
+                          borderRadius: '4px',
+                          backgroundColor: '#fff3cd',
+                          color: '#664d03',
+                          fontWeight: 600,
+                        }}
+                      >
+                        No due date — Review required
+                      </span>
+                    )}
+                  </dd>
+                </div>
+
                   <div><dt>Priority</dt><dd>{item.priority}</dd></div>
                   <div><dt>Confidence</dt><dd>{Math.round(item.confidence * 100)}%</dd></div>
                 </dl>
