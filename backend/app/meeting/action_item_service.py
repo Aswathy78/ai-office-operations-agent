@@ -1,6 +1,7 @@
 """Generation and persistence of timestamped meeting action items."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import json
 import logging
 import math
@@ -30,6 +31,7 @@ from app.meeting.models import (
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+    Meeting,
     MeetingActionItem,
     MeetingActionItemExtraction,
     MeetingRecording,
@@ -38,8 +40,120 @@ from app.meeting.models import (
 )
 from app.meeting.schemas import TranscriptSegment
 
+
 logger = logging.getLogger(__name__)
 
+def _resolve_deadline_text(
+    deadline_text: str | None,
+    meeting_start_at: datetime,
+    organization_timezone: ZoneInfo,
+) -> datetime | None:
+    """Resolve supported relative deadlines using the meeting's local date.
+
+    Unsupported or ambiguous phrases return None so they can be reviewed.
+    """
+    if not deadline_text or not deadline_text.strip():
+        return None
+
+    if meeting_start_at.tzinfo is None:
+        # SQLite may return UTC datetimes without timezone information.
+        meeting_start_at = meeting_start_at.replace(tzinfo=timezone.utc)
+
+    local_meeting_start = meeting_start_at.astimezone(
+        organization_timezone
+    )
+
+    meeting_date = local_meeting_start.date()
+    phrase = deadline_text.strip().lower()
+    phrase = re.sub(r"[.,!?]+$", "", phrase).strip()
+
+    # "Next week" alone is a period, not an exact deadline.
+    if phrase in {"next week", "sometime next week", "during next week"}:
+        return None
+
+    # "By next Friday" means Friday of the following calendar week.
+    if phrase in {"by next friday", "next friday"}:
+        days_until_next_monday = 7 - meeting_date.weekday()
+        deadline_date = meeting_date + timedelta(
+            days=days_until_next_monday + 4
+        )
+        return datetime.combine(
+            deadline_date,
+            datetime.min.time(),
+            tzinfo=organization_timezone,
+        )
+
+    # Remove common deadline prefixes.
+    phrase = re.sub(
+        r"^(?:by|on|due|due on|due by)\s+",
+        "",
+        phrase,
+    ).strip()
+
+    # "Tomorrow" means the next calendar day.
+    if phrase in {"tomorrow", "the next day"}:
+        deadline_date = meeting_date + timedelta(days=1)
+
+    # "Today" means the meeting's local calendar date.
+    elif phrase in {"today", "by today"}:
+        deadline_date = meeting_date
+
+    # "In N days" / "N days from now".
+    else:
+        days_match = re.fullmatch(
+            r"(?:in\s+)?(\d+)\s+days?(?:\s+from\s+now)?",
+            phrase,
+        )
+        if days_match:
+            number_of_days = int(days_match.group(1))
+
+            # Avoid unreasonable or accidental dates.
+            if not 0 <= number_of_days <= 365:
+                return None
+
+            deadline_date = meeting_date + timedelta(
+                days=number_of_days
+            )
+
+        else:
+            # Weekday names: Monday through Sunday.
+            weekdays = {
+                "monday": 0,
+                "tuesday": 1,
+                "wednesday": 2,
+                "thursday": 3,
+                "friday": 4,
+                "saturday": 5,
+                "sunday": 6,
+            }
+
+            # Support "this Friday" and "by Friday".
+            weekday_phrase = re.sub(
+                r"^(?:this|coming)\s+",
+                "",
+                phrase,
+            ).strip()
+
+            if weekday_phrase in weekdays:
+                target_weekday = weekdays[weekday_phrase]
+                days_ahead = (
+                    target_weekday - meeting_date.weekday()
+                ) % 7
+
+                # If the meeting is on that weekday, use the same day.
+                deadline_date = meeting_date + timedelta(
+                    days=days_ahead
+                )
+
+            else:
+                # Unknown or ambiguous phrases must be reviewed.
+                return None
+
+    return datetime.combine(
+        deadline_date,
+        datetime.min.time(),
+        tzinfo=organization_timezone,
+    )
 
 class ActionItemCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -277,6 +391,8 @@ def _candidate_source_text(
 def _validate_candidates(
     candidates: ActionItemCandidates,
     segments: list[TranscriptSegment],
+    meeting_start_at: datetime,
+    organization_timezone: ZoneInfo,
 ) -> list[tuple[ActionItemCandidate, TranscriptSegment, tuple[float, float] | None]]:
     validated: list[
         tuple[ActionItemCandidate, TranscriptSegment, tuple[float, float] | None]
@@ -320,16 +436,30 @@ def _validate_candidates(
             continue
         quote_timestamps = _find_quote_timestamps(quote, segment)
 
-        if candidate.deadline_text and (
-            _normalize_quote(candidate.deadline_text)
+        deadline_text = candidate.deadline_text
+
+        if deadline_text and (
+            _normalize_quote(deadline_text)
             not in _normalize_quote(evidence_text)
         ):
-            candidate = candidate.model_copy(update={"deadline_text": None})
-        if (
-            candidate.deadline_at
-            and candidate.deadline_at.date().isoformat() not in evidence_text
-        ):
-            candidate = candidate.model_copy(update={"deadline_at": None})
+            deadline_text = None
+
+        # Never trust a model-generated date without validating the spoken evidence.
+        deadline_at = None
+
+        if deadline_text:
+            deadline_at = _resolve_deadline_text(
+                deadline_text=deadline_text,
+                meeting_start_at=meeting_start_at,
+                organization_timezone=organization_timezone,
+            )
+
+        candidate = candidate.model_copy(
+            update={
+                "deadline_text": deadline_text,
+                "deadline_at": deadline_at,
+            }
+        )
 
         owner_name = candidate.owner_name.strip() if candidate.owner_name else None
         if owner_name and (
@@ -392,6 +522,7 @@ def _create_extraction(
         transcript_id=transcript_id,
         status=ACTION_ITEM_EXTRACTION_STATUS_PENDING,
     )
+
     db.add(extraction)
     try:
         db.commit()
@@ -483,6 +614,26 @@ def generate_meeting_action_items(
     recording = db.get(MeetingRecording, transcript.recording_id)
     if recording is None:
         raise ValueError("Meeting transcript recording not found.")
+    meeting = db.get(Meeting, recording.meeting_id)
+    if meeting is None:
+        raise ValueError("Meeting associated with transcript was not found.")
+
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parents[2] / ".env",
+        override=False,
+    )
+
+    timezone_name = os.getenv("ORGANIZATION_TIMEZONE", "UTC")
+
+    try:
+        organization_timezone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.exception(
+            "Invalid ORGANIZATION_TIMEZONE configuration: %s",
+            timezone_name,
+        )
+        organization_timezone = ZoneInfo("UTC")
+
 
     extraction = (
         db.query(MeetingActionItemExtraction)
@@ -592,7 +743,12 @@ def generate_meeting_action_items(
                 raise _SafeExtractionFailure(
                     "Groq returned malformed action-item data."
                 ) from error
-            candidates = _validate_candidates(parsed_candidates, segments)
+            candidates = _validate_candidates(
+                parsed_candidates,
+                segments,
+                meeting_start_at=meeting.start_at,
+                organization_timezone=organization_timezone,
+            )
 
         db.query(MeetingActionItem).filter(
             MeetingActionItem.extraction_id == extraction.id

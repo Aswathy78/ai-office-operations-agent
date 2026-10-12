@@ -304,6 +304,11 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
     try:
         baseline_metadata = sa.MetaData()
         sa.Table(
+            "meetings",
+            baseline_metadata,
+            sa.Column("id", sa.String(length=36), primary_key=True),
+        )
+        sa.Table(
             "meeting_recordings",
             baseline_metadata,
             sa.Column("id", sa.String(length=36), primary_key=True),
@@ -320,6 +325,17 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
             ),
             sa.Column("storage_uri", sa.String(length=1000), nullable=True),
             sa.Column("error_message", sa.Text(), nullable=True),
+        )
+        sa.Table(
+            "meeting_transcripts",
+            baseline_metadata,
+            sa.Column("id", sa.String(length=36), primary_key=True),
+            sa.Column(
+                "recording_id",
+                sa.String(length=36),
+                sa.ForeignKey("meeting_recordings.id"),
+                nullable=False,
+            ),
         )
         baseline_metadata.create_all(baseline_engine)
     finally:
