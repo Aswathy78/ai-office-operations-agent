@@ -653,7 +653,8 @@ Final FR-8 commit:
 - FR-8 — Speaker identification ✅
 - FR-9 — Transcript correction/search
 - FR-10 — AI meeting summary
-- FR-11 — Action item extraction
+- FR-11 — Action item extraction ✅
+- Story 3.1 — Owner identification ✅
 
 ---
 
@@ -671,9 +672,11 @@ Transcript Search & Correction
 AI Meeting Summary
           ↓
        FR-11
-Action Item Extraction
+Action Item Extraction ✅
           ↓
-Owner + Task + Deadline + Priority
+Story 3.1 — Owner Identification ✅
+          ↓
+Task Automation — Story 3.4 (future)
 ```
 
 Possible future improvements include:
@@ -683,10 +686,9 @@ Possible future improvements include:
 - Confidence scores
 - Better multi-speaker overlap handling
 - Transcript correction audit logs
-- AI-generated meeting summaries
-- Automatic action-item extraction
 - Searchable meeting history
 - Meeting intelligence dashboards
+- Automatic task creation from confirmed action items (Story 3.4)
 
 ---
 
@@ -1063,6 +1065,61 @@ FR-10 — AI Meeting Summary
 Persisted Meeting Summary
           ↓
 Meeting Report / View History
+```
+
+# 👤 Story 3.1 — Owner Identification
+
+Story 3.1 matches extracted meeting action-item owner names against the
+active employee directory and lets the organizer resolve ownership when
+the result is uncertain.
+
+### Owner identification workflow
+
+```text
+Extracted Action Item
+          ↓
+Match Owner Against Active Employees
+          ↓
+Single Confident Match ──→ Proposed Owner
+          ↓
+Multiple Matches or No Match
+          ↓
+Approval Required
+          ↓
+Organizer Selects and Confirms Owner
+```
+
+A unique match is proposed, not automatically confirmed. Ambiguous and
+unmatched owners require organizer action. The original extracted owner
+name and matching result remain available after confirmation.
+
+### Implementation
+
+- Employee directory records include a unique employee ID, name, email,
+  and active status.
+- Employee and action-item ownership schema changes are applied through
+  database migrations.
+- The meeting action-items UI displays matching and ownership status and
+  supports selecting and confirming an active employee.
+- Backend tests cover employee matching and owner confirmation; frontend
+  tests cover owner status display and selection flow.
+
+### Story 3.1 implementation summary
+
+| Component                               | Status          |
+| --------------------------------------- | --------------- |
+| Active employee directory integration  | ✅               |
+| Unique-match owner proposal             | ✅               |
+| Ambiguous-match approval handling       | ✅               |
+| No-match approval handling              | ✅               |
+| Organizer owner selection/confirmation  | ✅               |
+| Employee and ownership migrations       | ✅               |
+| Backend and frontend tests              | ✅               |
+| Task creation                           | Not implemented |
+
+Story 3.1 does not create tasks. AC4—verifying that no task is created
+before owner selection—requires end-to-end verification after Story 3.4
+introduces the task-creation workflow.
 
 
 # 📌 Current Project Status
@@ -1083,6 +1140,7 @@ Meeting Report / View History
 - FR-8 — Speaker identification ✅
 - FR-9 — Transcript correction/search ✅
 - FR-10 — AI meeting summary ✅
-- FR-11 — Action item extraction
+- FR-11 — Action item extraction ✅
+- Story 3.1 — Owner identification ✅
 
 ---
