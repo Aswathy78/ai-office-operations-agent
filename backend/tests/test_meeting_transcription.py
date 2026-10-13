@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.db import database
 from app.meeting.models import (
     Base,
     Meeting,
@@ -422,6 +423,41 @@ def test_worker_logs_startup(caplog):
         run_worker(stop_event=stop_event)
 
     assert "Transcription worker started" in caplog.text
+
+
+def test_worker_uses_database_path_independent_of_working_directory(
+    monkeypatch,
+    tmp_path,
+):
+    expected_database = (
+        Path(database.__file__).resolve().parents[3] / "office_operations.db"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert Path(database.engine.url.database) == expected_database
+    assert transcription_worker.SessionLocal is database.SessionLocal
+
+
+def test_worker_logs_when_polling_without_pending_transcripts(
+    db_session: Session,
+    caplog,
+):
+    stop_event = threading.Event()
+    session_factory = sessionmaker(bind=db_session.get_bind())
+
+    def stop_after_one_poll():
+        stop_event.set()
+        return session_factory()
+
+    with caplog.at_level("INFO", logger=transcription_worker.__name__):
+        run_worker(
+            poll_interval_seconds=0,
+            session_factory=stop_after_one_poll,
+            stop_event=stop_event,
+        )
+
+    assert "poll_interval_seconds=0" in caplog.text
+    assert "No pending transcripts" in caplog.text
 
 
 def test_worker_loads_dotenv_before_decrypting_recording(

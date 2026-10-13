@@ -17,6 +17,7 @@ from app.meeting.models import (
     MeetingTranscriptCorrection,
     RECORDING_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_COMPLETED,
+    TRANSCRIPT_STATUS_PENDING,
 )
 
 ORGANIZER_ID = "transcript-api-organizer"
@@ -115,6 +116,23 @@ def test_get_transcript_returns_complete_segments_and_requires_organizer(
         f"/api/v1/meetings/{meeting.id}/transcript?organizer_id=someone-else"
     )
     assert unauthorized.status_code == 403
+
+
+def test_get_transcript_returns_pending_status_until_worker_completes_it(
+    client: TestClient,
+    db_session: Session,
+):
+    meeting, transcript = _create_transcript(db_session)
+    transcript.status = TRANSCRIPT_STATUS_PENDING
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/meetings/{meeting.id}/transcript?organizer_id={ORGANIZER_ID}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == TRANSCRIPT_STATUS_PENDING
+    assert response.json()["transcript_text"] == transcript.transcript_text
 
 
 def test_get_transcript_returns_404_for_missing_meeting_or_transcript(

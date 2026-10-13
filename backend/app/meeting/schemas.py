@@ -276,6 +276,27 @@ class MeetingActionItemsResponse(BaseModel):
     action_items: list[MeetingActionItemResponse] = Field(default_factory=list)
 
 
+class TaskResponse(BaseModel):
+    id: str
+    title: str
+    assignee_id: str
+    assignee_name: str
+    creator_id: str
+    source: str
+    source_action_item_id: str
+    meeting_id: str
+    meeting_title: str
+    transcript_id: str
+    source_segment_index: int
+    source_timestamp_seconds: float
+    due_at: datetime
+    priority: Literal["low", "medium", "high", "urgent"]
+    status: Literal["pending"]
+    assignment_email_status: Literal["pending", "sent", "failed"]
+    assignment_email_error: str | None = None
+    created_at: datetime
+
+
 class TranscriptSegmentUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

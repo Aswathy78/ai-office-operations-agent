@@ -354,6 +354,7 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
         inspector = inspect(engine)
         assert "meeting_action_item_extractions" in inspector.get_table_names()
         assert "meeting_action_items" in inspector.get_table_names()
+        assert "tasks" in inspector.get_table_names()
         assert {
             "participant_name",
             "connection_id",
@@ -387,6 +388,35 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
                 column["name"]
                 for column in inspector.get_columns("meeting_action_items")
             }
+        )
+        assert {
+            "title",
+            "assignee_id",
+            "creator_id",
+            "source",
+            "source_action_item_id",
+            "idempotency_key",
+            "meeting_id",
+            "transcript_id",
+            "source_segment_index",
+            "source_timestamp_seconds",
+            "due_at",
+            "priority",
+            "status",
+            "assignment_email_status",
+        }.issubset(
+            {
+                column["name"]
+                for column in inspector.get_columns("tasks")
+            }
+        )
+        assert any(
+            unique["name"] == "uq_tasks_idempotency_key"
+            for unique in inspector.get_unique_constraints("tasks")
+        )
+        assert any(
+            unique["name"] == "uq_tasks_source_action_item_id"
+            for unique in inspector.get_unique_constraints("tasks")
         )
     finally:
         engine.dispose()

@@ -17,7 +17,7 @@ import type {
   TranscriptSegmentUpdate,
 } from '../types/meeting'
 
-const API_BASE_URL = 'http://127.0.0.1:9000'
+const API_BASE_URL = 'http://127.0.0.1:8000'
 
 export class MeetingApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -83,8 +83,13 @@ export function decideGuestRequest(
   ).then((response) => readResponse<GuestRequest>(response))
 }
 
-export function getMeetingReport(meetingId: string, organizerId: string): Promise<MeetingReport> {
+export function getMeetingReport(
+  meetingId: string,
+  organizerId: string,
+  employeeEmail?: string,
+): Promise<MeetingReport> {
   const query = new URLSearchParams({ organizer_id: organizerId })
+  if (employeeEmail) query.set('employee_email', employeeEmail)
   return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/report?${query}`)
     .then((response) => readResponse<MeetingReport>(response))
 }
@@ -175,9 +180,11 @@ export function getMeetingTranscript(
   meetingId: string,
   organizerId: string,
   transcriptId?: string,
+  employeeEmail?: string,
 ): Promise<MeetingTranscript> {
   const query = new URLSearchParams({ organizer_id: organizerId })
   if (transcriptId) query.set('transcript_id', transcriptId)
+  if (employeeEmail) query.set('employee_email', employeeEmail)
   return fetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
   ).then((response) => readResponse<MeetingTranscript>(response))
@@ -440,8 +447,8 @@ export async function createMeeting(
     title: string
     agenda?: string | null
     meeting_type: string
-    start_at: string
-    end_at: string
+    start_at?: string
+    end_at?: string
     participants: { email?: string; user_id?: string }[]
   },
   organizerId: string,

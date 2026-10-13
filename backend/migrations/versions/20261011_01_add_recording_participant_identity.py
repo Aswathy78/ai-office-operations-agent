@@ -17,14 +17,20 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "meeting_recordings",
-        sa.Column("participant_name", sa.String(length=255), nullable=True),
-    )
-    op.add_column(
-        "meeting_recordings",
-        sa.Column("connection_id", sa.String(length=255), nullable=True),
-    )
+    columns = {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns("meeting_recordings")
+    }
+    if "participant_name" not in columns:
+        op.add_column(
+            "meeting_recordings",
+            sa.Column("participant_name", sa.String(length=255), nullable=True),
+        )
+    if "connection_id" not in columns:
+        op.add_column(
+            "meeting_recordings",
+            sa.Column("connection_id", sa.String(length=255), nullable=True),
+        )
 
 
 def downgrade() -> None:

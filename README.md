@@ -598,6 +598,32 @@ Run the API:
 uvicorn main:app --reload
 ```
 
+Populate the development-only employee directory explicitly from the backend
+directory. This command requires `APP_ENV=development`; it is not run when the
+API starts:
+
+``` powershell
+$env:APP_ENV = "development"
+python -m app.db.seed_employees
+```
+
+The seed is idempotent and includes the fictional test employee Rahul at
+`rahul@example.test`. The `.test` address is reserved for testing and is not a
+deliverable email address.
+
+Run the transcription worker in a second terminal from the same `backend`
+directory:
+
+``` powershell
+python -m app.meeting.transcription_worker
+```
+
+The API only stores uploaded recordings and creates pending transcript records.
+The worker must be running to transcribe recordings; action-item retrieval
+requires a completed transcript. The worker uses the configured faster-whisper
+CUDA runtime, so initialization or transcription errors are logged and recorded
+as a failed transcript rather than treated as completed.
+
 ------------------------------------------------------------------------
 
 # 🧪 Running Tests
@@ -1196,6 +1222,33 @@ Owner Identification
 Action Item Review in Meeting Report
 ```
 
+## Story 3.4 — Automatic Task Creation
+
+Confirming a meeting action item creates one Pending task, provided the
+action item has a confirmed active employee and a resolved due date. The
+task keeps the action-item source ID, meeting, transcript, segment index,
+and transcript timestamp. A unique key derived from the action-item ID
+prevents duplicate tasks when the same item is confirmed again.
+
+Assignment email is sent using SMTP configuration in `backend/.env`:
+`SMTP_HOST`, `SMTP_PORT`, and `SMTP_FROM_EMAIL` are required;
+`SMTP_USERNAME` and `SMTP_PASSWORD` are optional and must be configured
+together. `SMTP_USE_STARTTLS` defaults to `true`. Delivery failures are
+shown on the task dashboard and can be retried through
+`POST /api/v1/tasks/{task_id}/assignment-email/retry`.
+
+Task deadlines are available as an employee-specific iCalendar feed at
+`GET /api/v1/tasks/calendar.ics?assignee_email={employee_email}`. The My Tasks,
+Calendar, and manager Dashboard routes display the corresponding task
+data; the dashboard API is `GET /api/v1/tasks/dashboard`.
+
+Apply the new task table migration with:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
 ## 📌 Current Project Status
 
 ### Epic 1 --- Meeting Management
@@ -1215,6 +1268,8 @@ Action Item Review in Meeting Report
 -   FR-12 --- Meeting action item owner identification
 -   Story 3.3 --- Meeting action item review implemented and pushed to
     its feature branch
+-   Story 3.4 --- Confirmed action items create idempotent tasks with
+    assignment email and calendar-feed integration
 
 ### Story 3.3 validation note
 
@@ -1959,7 +2014,7 @@ Action Item Extraction ✅
           ↓
 Story 3.1 — Owner Identification ✅
           ↓
-Task Automation — Story 3.4 (future)
+Story 3.4 — Automatic Task Creation ✅
 ```
 
 Possible future improvements include:
@@ -1971,7 +2026,7 @@ Possible future improvements include:
 - Transcript correction audit logs
 - Searchable meeting history
 - Meeting intelligence dashboards
-- Automatic task creation from confirmed action items (Story 3.4)
+- Automatic task creation from confirmed action items is implemented in Story 3.4.
 
 ---
 
@@ -2446,9 +2501,9 @@ name and matching result remain available after confirmation.
 | Backend and frontend tests              | ✅               |
 | Task creation                           | Not implemented |
 
-Story 3.1 does not create tasks. AC4—verifying that no task is created
-before owner selection—requires end-to-end verification after Story 3.4
-introduces the task-creation workflow.
+Story 3.1 does not itself create tasks. Story 3.4 creates a task only
+after the action item has a confirmed owner, a resolved due date, and
+organizer review confirmation.
 
 
 # 📌 Current Project Status

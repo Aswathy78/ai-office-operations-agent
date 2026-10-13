@@ -111,6 +111,43 @@ const extraction: MeetingActionItems = {
 }
 
 describe('MeetingActionItemsPanel — Story 3.3 Action Item Review (FR-14)', () => {
+  it('shows automatic no-match separately from organizer-confirmed ownership', () => {
+    render(
+      <MeetingActionItemsPanel
+        extraction={{
+          ...extraction,
+          action_items: [
+            {
+              ...sampleItems[0],
+              owner_name: 'Rahul',
+              proposed_employee_id: null,
+              confirmed_employee_id: 'emp-1',
+              employee_match_status: 'no_match',
+              ownership_status: 'confirmed',
+              review_status: 'confirmed',
+            },
+          ],
+        }}
+        employees={employees}
+        employeesLoading={false}
+        isOrganizer={true}
+        loading={false}
+        triggering={false}
+        confirmingActionItemId={null}
+        ownerConfirmationFeedback={null}
+        onExtract={vi.fn()}
+        onConfirmOwner={vi.fn()}
+        onOpenSource={vi.fn()}
+      />,
+    )
+
+    const automaticMatchStatus = screen.getByText('Automatic match status').parentElement
+    const ownershipStatus = screen.getByText('Ownership status').parentElement
+    expect(automaticMatchStatus).toHaveTextContent('Automatic match statusNo match')
+    expect(ownershipStatus).toHaveTextContent('Ownership statusConfirmed')
+    expect(screen.getByText('Rahul')).toBeInTheDocument()
+  })
+
   it('renders review status badges and approval required warning', () => {
     render(
       <MeetingActionItemsPanel
@@ -287,6 +324,42 @@ describe('MeetingActionItemsPanel — Story 3.3 Action Item Review (FR-14)', () 
       expect.objectContaining({
         action: 'edit',
         task_description: 'Finalize the Q4 project budget immediately.',
+      }),
+    )
+  })
+
+  it('saves a resolved due date and confirmed employee for task creation', async () => {
+    const user = userEvent.setup()
+    const onReviewActionItem = vi.fn().mockResolvedValue(sampleItems[0])
+
+    render(
+      <MeetingActionItemsPanel
+        extraction={extraction}
+        employees={employees}
+        employeesLoading={false}
+        isOrganizer={true}
+        loading={false}
+        triggering={false}
+        confirmingActionItemId={null}
+        ownerConfirmationFeedback={null}
+        onExtract={vi.fn()}
+        onConfirmOwner={vi.fn()}
+        onOpenSource={vi.fn()}
+        onReviewActionItem={onReviewActionItem}
+      />,
+    )
+
+    await user.click(screen.getAllByRole('button', { name: /^Edit$/ })[0])
+    await user.selectOptions(screen.getByLabelText('Linked Employee'), 'emp-1')
+    await user.type(screen.getByLabelText('Due date and time'), '2026-10-16T18:00')
+    await user.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    expect(onReviewActionItem).toHaveBeenCalledWith(
+      sampleItems[0],
+      expect.objectContaining({
+        action: 'edit',
+        confirmed_employee_id: 'emp-1',
+        deadline_at: expect.any(String),
       }),
     )
   })

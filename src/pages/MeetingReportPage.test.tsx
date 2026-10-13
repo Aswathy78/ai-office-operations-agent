@@ -24,7 +24,7 @@ import type {
 } from '../types/meeting'
 
 const { authValue } = vi.hoisted(() => ({
-  authValue: { user: { id: 'organizer-1' } },
+  authValue: { user: { id: 'organizer-1', email: undefined as string | undefined } },
 }))
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => authValue,
@@ -134,9 +134,11 @@ const actionItems: MeetingActionItems = {
   ],
 }
 
-function renderReport() {
+function renderReport(
+  initialEntry = '/meetings/meeting-current/report',
+) {
   return render(
-    <MemoryRouter initialEntries={['/meetings/meeting-current/report']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <Routes>
         <Route
           path="/meetings/:meetingId/report"
@@ -153,6 +155,7 @@ function CurrentLocation() {
 }
 
 beforeEach(() => {
+  authValue.user = { id: 'organizer-1', email: undefined }
   vi.mocked(getMeetingReport).mockResolvedValue(report)
   vi.mocked(getMeetingActionItems).mockResolvedValue(actionItems)
   vi.mocked(extractMeetingActionItems).mockResolvedValue(actionItems)
@@ -177,6 +180,53 @@ afterEach(() => {
 })
 
 describe('MeetingReportPage transcript', () => {
+  it('loads the exact source transcript as the assigned employee', async () => {
+    authValue.user = {
+      id: 'employee-user',
+      email: 'maya.employee@example.test',
+    }
+    vi.mocked(getMeetingReport).mockResolvedValue({ ...report, attendance: [] })
+    renderReport(
+      '/meetings/meeting-current/report?transcript_id=transcript-1&segment=0',
+    )
+
+    expect(await screen.findByText('Thank you very much.')).toBeInTheDocument()
+    expect(getMeetingReport).toHaveBeenCalledWith(
+      'meeting-current',
+      'employee-user',
+      'maya.employee@example.test',
+    )
+    expect(getMeetingTranscript).toHaveBeenCalledWith(
+      'meeting-current',
+      'employee-user',
+      'transcript-1',
+      'maya.employee@example.test',
+    )
+    await waitFor(() =>
+      expect(document.getElementById('meeting-transcript-segment-0'))
+      .toHaveClass('is-source-highlighted')
+    )
+    expect(getMeetingActionItems).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'View Summary' })).not.toBeInTheDocument()
+  })
+
+  it('keeps meeting report access organizer-only for an unrelated employee', async () => {
+    authValue.user = {
+      id: 'unrelated-user',
+      email: 'unrelated@example.test',
+    }
+    vi.mocked(getMeetingReport).mockRejectedValue(new Error('Forbidden'))
+    renderReport('/meetings/meeting-current/report')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Forbidden')
+    expect(getMeetingReport).toHaveBeenCalledWith(
+      'meeting-current',
+      'unrelated-user',
+      'unrelated@example.test',
+    )
+    expect(getMeetingTranscript).not.toHaveBeenCalled()
+  })
+
   it('shows the transcript action while preserving report content', async () => {
     renderReport()
 
@@ -272,6 +322,26 @@ describe('MeetingReportPage transcript', () => {
   })
 
   describe('MeetingReportPage action items', () => {
+    it('refreshes the employee directory when the loaded list is empty', async () => {
+      const user = userEvent.setup()
+      vi.mocked(getActiveEmployees)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          { id: 'rahul-1', name: 'Rahul', email: 'rahul@example.test' },
+        ])
+      renderReport()
+
+      expect(await screen.findByText(
+        'No active employees are available to assign.',
+      )).toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Refresh employee list' }))
+
+      expect(await screen.findByRole('option', {
+        name: 'Rahul (rahul@example.test)',
+      })).toBeInTheDocument()
+      expect(getActiveEmployees).toHaveBeenCalledTimes(2)
+    })
+
     it('renders extracted action items and their source reference', async () => {
       vi.mocked(getMeetingActionItems).mockResolvedValue({
         ...actionItems,

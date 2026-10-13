@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import uuid
 
+from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app.meeting.models import Employee
@@ -15,6 +18,7 @@ DEVELOPMENT_EMPLOYEES = [
     {"name": "Noah Martin", "email": "noah.martin@northstar.example"},
     {"name": "Chloe Nguyen", "email": "chloe.nguyen@northstar.example"},
     {"name": "Ethan Walker", "email": "ethan.walker@northstar.example"},
+    {"name": "Rahul", "email": "ananashraf0506@gmail.com"},
 ]
 
 
@@ -42,3 +46,32 @@ def seed_development_employees(db: Session) -> list[Employee]:
             db.refresh(employee)
 
     return created
+
+
+def require_development_environment() -> None:
+    if os.environ.get("APP_ENV", "").strip().casefold() != "development":
+        raise SystemExit(
+            "Refusing to seed employees unless APP_ENV=development is set."
+        )
+
+
+def main() -> None:
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parents[2] / ".env",
+        override=False,
+    )
+    require_development_environment()
+
+    from app.db.database import DATABASE_PATH, SessionLocal
+
+    with SessionLocal() as db:
+        created = seed_development_employees(db)
+
+    print(
+        f"Development employee seed complete: created {len(created)} employee(s) "
+        f"in {DATABASE_PATH}."
+    )
+
+
+if __name__ == "__main__":
+    main()

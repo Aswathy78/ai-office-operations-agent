@@ -8,8 +8,11 @@ from sqlalchemy import engine_from_config, pool
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.meeting.models import Base
+from app.db.database import DATABASE_URL
 
 config = context.config
+if config.get_main_option("sqlalchemy.url") == "sqlite:///./office_operations.db":
+    config.set_main_option("sqlalchemy.url", DATABASE_URL)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
