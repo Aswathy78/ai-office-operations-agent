@@ -8,7 +8,7 @@ export const demoUsers: Record<UserRole, User> = {
   employee: {
     id: 'user-001',
     name: 'Rahul',
-    email: 'ananashraf0506@gmail.com',
+    email: 'rahulexample.test@gmail.com',
     role: 'employee',
     department: 'Engineering',
   },
