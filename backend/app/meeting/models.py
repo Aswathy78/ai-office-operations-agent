@@ -113,6 +113,17 @@ MEETING_ACTION_ITEM_OWNERSHIP_STATUSES = (
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
 )
 
+ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW = "pending_review"
+ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED = "approval_required"
+ACTION_ITEM_REVIEW_STATUS_CONFIRMED = "confirmed"
+ACTION_ITEM_REVIEW_STATUS_REJECTED = "rejected"
+ACTION_ITEM_REVIEW_STATUSES = (
+    ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+    ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED,
+    ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+    ACTION_ITEM_REVIEW_STATUS_REJECTED,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -525,6 +536,10 @@ class MeetingActionItem(Base):
             name="ck_meeting_action_items_ownership_status",
         ),
         CheckConstraint(
+            f"review_status IN ({', '.join(repr(status) for status in ACTION_ITEM_REVIEW_STATUSES)})",
+            name="ck_meeting_action_items_review_status",
+        ),
+        CheckConstraint(
             "confidence >= 0 AND confidence <= 1",
             name="ck_meeting_action_items_confidence_range",
         ),
@@ -552,6 +567,7 @@ class MeetingActionItem(Base):
             name="uq_meeting_action_items_extraction_segment_task",
         ),
         Index("ix_meeting_action_items_extraction_id", "extraction_id"),
+        Index("ix_meeting_action_items_review_status", "review_status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -597,11 +613,30 @@ class MeetingActionItem(Base):
     source_quote_start_seconds: Mapped[float | None] = mapped_column(nullable=True)
     source_quote_end_seconds: Mapped[float | None] = mapped_column(nullable=True)
     source_quote: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        default=None,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+    @property
+    def is_task_eligible(self) -> bool:
+        return self.review_status == ACTION_ITEM_REVIEW_STATUS_CONFIRMED
 
     extraction: Mapped["MeetingActionItemExtraction"] = relationship(
         back_populates="items",

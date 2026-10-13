@@ -23,6 +23,10 @@ from app.meeting.models import (
     ACTION_ITEM_EXTRACTION_STATUS_PENDING,
     ACTION_ITEM_EXTRACTION_STATUS_PROCESSING,
     ACTION_ITEM_PRIORITIES,
+    ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED,
+    ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+    ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+    ACTION_ITEM_REVIEW_STATUS_REJECTED,
     EMPLOYEE_MATCH_STATUS_AMBIGUOUS,
     EMPLOYEE_MATCH_STATUS_MISSING_OWNER,
     EMPLOYEE_MATCH_STATUS_NO_MATCH,
@@ -31,6 +35,7 @@ from app.meeting.models import (
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+    Employee,
     Meeting,
     MeetingActionItem,
     MeetingActionItemExtraction,
@@ -42,6 +47,32 @@ from app.meeting.schemas import TranscriptSegment
 
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD = 0.85
+
+
+def get_action_item_confidence_threshold() -> float:
+    """Retrieve the configurable action-item confidence threshold (defaults to 0.85)."""
+    raw = os.getenv("ACTION_ITEM_CONFIDENCE_THRESHOLD")
+    if raw is None or not raw.strip():
+        return DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD
+    try:
+        val = float(raw.strip())
+        if 0.0 <= val <= 1.0:
+            return val
+        logger.warning(
+            "ACTION_ITEM_CONFIDENCE_THRESHOLD %r is outside [0.0, 1.0], using default %f",
+            raw,
+            DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD,
+        )
+        return DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD
+    except (ValueError, TypeError):
+        logger.warning(
+            "Invalid ACTION_ITEM_CONFIDENCE_THRESHOLD %r, using default %f",
+            raw,
+            DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD,
+        )
+        return DEFAULT_ACTION_ITEM_CONFIDENCE_THRESHOLD
 
 def _resolve_deadline_text(
     deadline_text: str | None,
@@ -667,16 +698,21 @@ def generate_meeting_action_items(
                 override=False,
             )
             api_key = os.environ.get("GROQ_API_KEY")
-            if not api_key:
+            if api_key:
+                from groq import Groq
+
+                client = Groq(api_key=api_key)
+                model = os.environ.get(
+                    "GROQ_ACTION_ITEM_MODEL",
+                    os.environ.get("GROQ_SUMMARY_MODEL", "llama-3.3-70b-versatile"),
+                )
+            elif os.environ.get("OPENAI_API_KEY"):
+                from openai import OpenAI
+
+                client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+                model = os.environ.get("OPENAI_ACTION_ITEM_MODEL", "gpt-4o-mini")
+            else:
                 raise RuntimeError("GROQ_API_KEY is not set.")
-
-            from groq import Groq
-
-            client = Groq(api_key=api_key)
-            model = os.environ.get(
-                "GROQ_ACTION_ITEM_MODEL",
-                os.environ.get("GROQ_SUMMARY_MODEL", "openai/gpt-oss-20b"),
-            )
             segment_payload = [
                 {
                     "index": index,
@@ -754,7 +790,13 @@ def generate_meeting_action_items(
             MeetingActionItem.extraction_id == extraction.id
         ).delete(synchronize_session=False)
         match_results_by_item_id: dict[str, EmployeeMatchResult] = {}
+        confidence_threshold = get_action_item_confidence_threshold()
         for candidate, segment, quote_timestamps in candidates:
+            initial_review_status = (
+                ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED
+                if candidate.confidence < confidence_threshold
+                else ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW
+            )
             item = MeetingActionItem(
                 id=str(uuid.uuid4()),
                 extraction_id=extraction.id,
@@ -776,6 +818,9 @@ def generate_meeting_action_items(
                 source_quote=candidate.source_quote.strip(),
                 employee_match_status=None,
                 ownership_status=MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+                review_status=initial_review_status,
+                reviewed_by=None,
+                reviewed_at=None,
             )
             match_result = _annotate_employee_match(db, item)
             match_results_by_item_id[item.id] = match_result
@@ -826,3 +871,138 @@ def generate_meeting_action_items(
         raise MeetingActionItemExtractionError(
             "Meeting action item extraction failed."
         ) from None
+
+
+def review_action_item(
+    db: Session,
+    meeting_id: str,
+    action_item_id: str,
+    reviewer_id: str,
+    action: str | None = None,
+    decision: str | None = None,
+    review_status: str | None = None,
+    task_description: str | None = None,
+    owner_name: str | None = None,
+    confirmed_employee_id: str | None = None,
+    deadline_at: datetime | None = None,
+    deadline_text: str | None = None,
+    priority: str | None = None,
+) -> MeetingActionItem:
+    """Organizer review of an individual action item (confirm, edit, or reject)."""
+    item = (
+        db.query(MeetingActionItem)
+        .join(
+            MeetingActionItemExtraction,
+            MeetingActionItem.extraction_id == MeetingActionItemExtraction.id,
+        )
+        .filter(
+            MeetingActionItem.id == action_item_id,
+            MeetingActionItemExtraction.meeting_id == meeting_id,
+        )
+        .one_or_none()
+    )
+    if item is None:
+        raise ValueError("Action item not found for this meeting.")
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Update confirmed employee if specified
+    if confirmed_employee_id is not None:
+        if confirmed_employee_id == "":
+            item.confirmed_employee_id = None
+        else:
+            employee = db.get(Employee, confirmed_employee_id)
+            if employee is None:
+                raise ValueError("Employee not found.")
+            if not employee.is_active:
+                raise ValueError("Employee is inactive.")
+            item.confirmed_employee_id = employee.id
+            item.ownership_status = MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED
+
+    # 2. Update editable fields if provided
+    if task_description is not None:
+        cleaned_desc = task_description.strip()
+        if not cleaned_desc:
+            raise ValueError("Task description cannot be empty.")
+        item.task_description = cleaned_desc
+
+    if owner_name is not None:
+        item.owner_name = owner_name.strip() if owner_name.strip() else None
+
+    if deadline_at is not None:
+        item.deadline_at = deadline_at
+
+    if deadline_text is not None:
+        item.deadline_text = deadline_text.strip() if deadline_text.strip() else None
+
+    if priority is not None:
+        if priority not in ACTION_ITEM_PRIORITIES:
+            raise ValueError(f"Priority must be one of {ACTION_ITEM_PRIORITIES}")
+        item.priority = priority
+
+    # 3. Determine review decision / status
+    target_decision = (action or decision or review_status or "").lower()
+    if target_decision in ("reject", "rejected"):
+        item.review_status = ACTION_ITEM_REVIEW_STATUS_REJECTED
+        item.reviewed_by = reviewer_id
+        item.reviewed_at = now
+    elif target_decision in ("confirm", "confirmed", "approved"):
+        item.review_status = ACTION_ITEM_REVIEW_STATUS_CONFIRMED
+        item.reviewed_by = reviewer_id
+        item.reviewed_at = now
+    elif target_decision in ("edit", "save"):
+        item.reviewed_by = reviewer_id
+        item.reviewed_at = now
+        if review_status in (
+            ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+            ACTION_ITEM_REVIEW_STATUS_REJECTED,
+            ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+            ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED,
+        ):
+            item.review_status = review_status
+    elif review_status in (
+        ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+        ACTION_ITEM_REVIEW_STATUS_REJECTED,
+        ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+        ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED,
+    ):
+        item.review_status = review_status
+        item.reviewed_by = reviewer_id
+        item.reviewed_at = now
+    else:
+        item.reviewed_by = reviewer_id
+        item.reviewed_at = now
+
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+def assert_action_item_eligible_for_task(item: MeetingActionItem) -> None:
+    """Story 3.4 safeguard: Ensures rejected or unconfirmed items cannot become tasks."""
+    if item.review_status == ACTION_ITEM_REVIEW_STATUS_REJECTED:
+        raise ValueError(
+            f"Action item {item.id} is rejected and cannot be converted to a task."
+        )
+    if item.review_status != ACTION_ITEM_REVIEW_STATUS_CONFIRMED:
+        raise ValueError(
+            f"Action item {item.id} must be confirmed by the meeting organizer before task creation."
+        )
+
+
+def get_task_eligible_action_items(
+    db: Session, meeting_id: str
+) -> list[MeetingActionItem]:
+    """Story 3.4 boundary helper: returns confirmed action items eligible for task creation."""
+    return (
+        db.query(MeetingActionItem)
+        .join(
+            MeetingActionItemExtraction,
+            MeetingActionItem.extraction_id == MeetingActionItemExtraction.id,
+        )
+        .filter(
+            MeetingActionItemExtraction.meeting_id == meeting_id,
+            MeetingActionItem.review_status == ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+        )
+        .all()
+    )

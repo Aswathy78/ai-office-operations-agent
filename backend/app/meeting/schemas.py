@@ -1,6 +1,13 @@
 from datetime import datetime
 from typing import Literal
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_serializer,
+    model_validator,
+)
 
 
 class ParticipantCreate(BaseModel):
@@ -166,6 +173,13 @@ class TranscriptSegment(BaseModel):
     flagged_for_correction: bool = False
     words: list[TranscriptWord] | None = None
 
+    @model_serializer(mode="wrap")
+    def _serialize_segment(self, handler):
+        data = handler(self)
+        if data.get("words") is None:
+            data.pop("words", None)
+        return data
+
 
 class MeetingTranscriptResponse(BaseModel):
     id: str
@@ -202,6 +216,22 @@ class ActionItemOwnerConfirmationRequest(BaseModel):
     employee_id: str
 
 
+class ActionItemReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    action: Literal["confirm", "reject", "edit", "save"] | None = None
+    decision: Literal["confirm", "reject", "edit", "confirmed", "rejected"] | None = None
+    review_status: Literal[
+        "pending_review", "approval_required", "confirmed", "rejected", "approved"
+    ] | None = None
+    task_description: str | None = None
+    owner_name: str | None = None
+    confirmed_employee_id: str | None = None
+    deadline_at: datetime | None = None
+    deadline_text: str | None = None
+    priority: Literal["low", "medium", "high", "urgent"] | None = None
+
+
 class MeetingActionItemResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -211,6 +241,11 @@ class MeetingActionItemResponse(BaseModel):
     confirmed_employee_id: str | None = None
     employee_match_status: str | None = None
     ownership_status: str | None = None
+    review_status: str = "pending_review"
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
+    is_task_eligible: bool = False
+    requires_approval: bool = False
     task_description: str
     deadline_at: datetime | None = None
     deadline_text: str | None = None

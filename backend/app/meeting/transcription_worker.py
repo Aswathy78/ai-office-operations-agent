@@ -16,6 +16,9 @@ import threading
 import time
 from typing import Callable
 from dotenv import load_dotenv
+
+# Ensure backend .env is loaded
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=False)
 from app.meeting.action_item_service import generate_meeting_action_items
 from app.meeting.summary_service import generate_meeting_summary
 from sqlalchemy.orm import Session

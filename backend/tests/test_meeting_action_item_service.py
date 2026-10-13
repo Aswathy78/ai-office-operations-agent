@@ -27,7 +27,6 @@ from app.meeting.models import (
     TRANSCRIPT_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_PENDING,
 )
-from backend.app import meeting
 
 
 @pytest.fixture()

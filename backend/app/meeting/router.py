@@ -16,8 +16,14 @@ from app.meeting.models import (
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_UNRESOLVED,
+    ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED,
+    ACTION_ITEM_REVIEW_STATUS_CONFIRMED,
+    ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
+    ACTION_ITEM_REVIEW_STATUS_REJECTED,
+    TRANSCRIPT_STATUS_COMPLETED,
 )
 from app.meeting.schemas import (
+    ActionItemReviewRequest,
     AttendanceJoinRequest,
     AttendanceReportRow,
     AttendanceResponse,
@@ -73,7 +79,9 @@ from app.meeting.service import (
 from app.meeting.action_item_service import (
     MeetingActionItemExtractionError,
     generate_meeting_action_items,
+    get_action_item_confidence_threshold,
     refresh_missing_employee_matches,
+    review_action_item,
 )
 from app.meeting.signaling import signaling_manager
 
@@ -1114,6 +1122,52 @@ def get_meeting_summary(
         return MeetingSummaryResponse.model_validate(summary)
 
 
+def _single_action_item_response(
+    action_item: MeetingActionItem,
+    meeting_id: str,
+    transcript_id: str,
+) -> MeetingActionItemResponse:
+    threshold = get_action_item_confidence_threshold()
+    review_status = (
+        action_item.review_status or ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW
+    )
+    requires_approval = (
+        review_status == ACTION_ITEM_REVIEW_STATUS_APPROVAL_REQUIRED
+        or (
+            review_status == ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW
+            and action_item.confidence < threshold
+        )
+    )
+    is_task_eligible = review_status == ACTION_ITEM_REVIEW_STATUS_CONFIRMED
+
+    return MeetingActionItemResponse(
+        id=action_item.id,
+        owner_name=action_item.owner_name,
+        proposed_employee_id=action_item.proposed_employee_id,
+        confirmed_employee_id=action_item.confirmed_employee_id,
+        employee_match_status=action_item.employee_match_status,
+        ownership_status=action_item.ownership_status,
+        review_status=review_status,
+        reviewed_by=action_item.reviewed_by,
+        reviewed_at=action_item.reviewed_at,
+        is_task_eligible=is_task_eligible,
+        requires_approval=requires_approval,
+        task_description=action_item.task_description,
+        deadline_at=action_item.deadline_at,
+        deadline_text=action_item.deadline_text,
+        priority=action_item.priority,
+        confidence=action_item.confidence,
+        meeting_id=meeting_id,
+        transcript_id=transcript_id,
+        source_segment_index=action_item.source_segment_index,
+        source_start_seconds=action_item.source_start_seconds,
+        source_end_seconds=action_item.source_end_seconds,
+        source_quote_start_seconds=action_item.source_quote_start_seconds,
+        source_quote_end_seconds=action_item.source_quote_end_seconds,
+        source_quote=action_item.source_quote,
+    )
+
+
 def _meeting_action_items_response(
     extraction: MeetingActionItemExtraction,
 ) -> MeetingActionItemsResponse:
@@ -1128,26 +1182,10 @@ def _meeting_action_items_response(
         completed_at=extraction.completed_at,
         error_message=extraction.error_message,
         action_items=[
-            MeetingActionItemResponse(
-                id=item.id,
-                owner_name=item.owner_name,
-                proposed_employee_id=item.proposed_employee_id,
-                confirmed_employee_id=item.confirmed_employee_id,
-                employee_match_status=item.employee_match_status,
-                ownership_status=item.ownership_status,
-                task_description=item.task_description,
-                deadline_at=item.deadline_at,
-                deadline_text=item.deadline_text,
-                priority=item.priority,
-                confidence=item.confidence,
-                meeting_id=extraction.meeting_id,
-                transcript_id=extraction.transcript_id,
-                source_segment_index=item.source_segment_index,
-                source_start_seconds=item.source_start_seconds,
-                source_end_seconds=item.source_end_seconds,
-                source_quote_start_seconds=item.source_quote_start_seconds,
-                source_quote_end_seconds=item.source_quote_end_seconds,
-                source_quote=item.source_quote,
+            _single_action_item_response(
+                item,
+                extraction.meeting_id,
+                extraction.transcript_id,
             )
             for item in sorted(
                 extraction.items,
@@ -1184,7 +1222,7 @@ def extract_meeting_action_items(
         )
 
     transcript = get_meeting_transcript(db, meeting_id)
-    if transcript is None:
+    if transcript is None or transcript.status != TRANSCRIPT_STATUS_COMPLETED:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Completed transcript not found",
@@ -1262,26 +1300,87 @@ def confirm_action_item_owner(
     db.commit()
     db.refresh(action_item)
 
-    return MeetingActionItemResponse(
-        id=action_item.id,
-        owner_name=action_item.owner_name,
-        proposed_employee_id=action_item.proposed_employee_id,
-        confirmed_employee_id=action_item.confirmed_employee_id,
-        employee_match_status=action_item.employee_match_status,
-        ownership_status=action_item.ownership_status,
-        task_description=action_item.task_description,
-        deadline_at=action_item.deadline_at,
-        deadline_text=action_item.deadline_text,
-        priority=action_item.priority,
-        confidence=action_item.confidence,
-        meeting_id=meeting_id,
-        transcript_id=action_item.extraction.transcript_id,
-        source_segment_index=action_item.source_segment_index,
-        source_start_seconds=action_item.source_start_seconds,
-        source_end_seconds=action_item.source_end_seconds,
-        source_quote_start_seconds=action_item.source_quote_start_seconds,
-        source_quote_end_seconds=action_item.source_quote_end_seconds,
-        source_quote=action_item.source_quote,
+    return _single_action_item_response(
+        action_item,
+        meeting_id,
+        action_item.extraction.transcript_id,
+    )
+
+
+@router.patch(
+    "/{meeting_id}/action-items/{action_item_id}/review",
+    response_model=MeetingActionItemResponse,
+    summary="Review an extracted action item (confirm, edit, or reject)",
+)
+@router.post(
+    "/{meeting_id}/action-items/{action_item_id}/review",
+    response_model=MeetingActionItemResponse,
+    summary="Review an extracted action item (confirm, edit, or reject)",
+)
+def review_action_item_endpoint(
+    meeting_id: str,
+    action_item_id: str,
+    payload: ActionItemReviewRequest,
+    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    if meeting.organizer_id != organizer_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can review action items",
+        )
+
+    action_item = (
+        db.query(MeetingActionItem)
+        .join(
+            MeetingActionItemExtraction,
+            MeetingActionItem.extraction_id == MeetingActionItemExtraction.id,
+        )
+        .filter(
+            MeetingActionItem.id == action_item_id,
+            MeetingActionItemExtraction.meeting_id == meeting_id,
+        )
+        .one_or_none()
+    )
+    if action_item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Action item not found for this meeting",
+        )
+
+    try:
+        updated_item = review_action_item(
+            db=db,
+            meeting_id=meeting_id,
+            action_item_id=action_item_id,
+            reviewer_id=organizer_id,
+            action=payload.action,
+            decision=payload.decision,
+            review_status=payload.review_status,
+            task_description=payload.task_description,
+            owner_name=payload.owner_name,
+            confirmed_employee_id=payload.confirmed_employee_id,
+            deadline_at=payload.deadline_at,
+            deadline_text=payload.deadline_text,
+            priority=payload.priority,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return _single_action_item_response(
+        updated_item,
+        meeting_id,
+        updated_item.extraction.transcript_id,
     )
 
 
@@ -1309,7 +1408,7 @@ def get_meeting_action_items(
         )
 
     transcript = get_meeting_transcript(db, meeting_id)
-    if transcript is None:
+    if transcript is None or transcript.status != TRANSCRIPT_STATUS_COMPLETED:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Completed transcript not found",
