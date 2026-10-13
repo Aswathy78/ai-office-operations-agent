@@ -23,7 +23,7 @@ from app.meeting.action_item_service import generate_meeting_action_items
 from app.meeting.summary_service import generate_meeting_summary
 from sqlalchemy.orm import Session
 
-from app.db.database import SessionLocal
+from app.db.database import DATABASE_URL, SessionLocal
 from app.meeting.models import (
     MeetingRecording,
     MeetingTranscript,
@@ -39,6 +39,7 @@ from app.meeting.transcription_media import decrypt_recording_to_temporary_file
 logger = logging.getLogger(__name__)
 
 _CUDA_DLL_PACKAGE_DIRS = ("cublas", "cudnn", "cuda_nvrtc", "cuda_runtime")
+_IDLE_LOG_INTERVAL_SECONDS = 30
 _CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
 _CUDA_DLL_LIBRARY_HANDLES: list[object] = []
 _REGISTERED_CUDA_DLL_DIRECTORIES: set[Path] = set()
@@ -423,8 +424,13 @@ def run_worker(
         override=False,
     )
 
-    logger.info("Transcription worker started")
+    logger.info(
+        "Transcription worker started database=%s poll_interval_seconds=%s",
+        DATABASE_URL,
+        poll_interval_seconds,
+    )
     model = None
+    last_idle_log_at = 0.0
 
     while (
         stop_event is None
@@ -442,6 +448,13 @@ def run_worker(
             claim_session.close()
 
         if transcript_id is None:
+            now = time.monotonic()
+            if now - last_idle_log_at >= _IDLE_LOG_INTERVAL_SECONDS:
+                logger.info(
+                    "No pending transcripts; continuing to poll every %.1f seconds",
+                    poll_interval_seconds,
+                )
+                last_idle_log_at = now
 
             if stop_event is None:
                 time.sleep(
@@ -454,6 +467,8 @@ def run_worker(
 
             continue
 
+        last_idle_log_at = 0.0
+        logger.info("Claimed pending transcript %s", transcript_id)
         work_session = session_factory()
 
         try:
@@ -487,4 +502,8 @@ def run_worker(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     run_worker()

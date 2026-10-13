@@ -91,6 +91,9 @@ ACTION_ITEM_PRIORITIES = (
     ACTION_ITEM_PRIORITY_URGENT,
 )
 
+TASK_STATUS_PENDING = "pending"
+TASK_STATUSES = (TASK_STATUS_PENDING,)
+
 EMPLOYEE_MATCH_STATUS_UNIQUE = "unique_match"
 EMPLOYEE_MATCH_STATUS_AMBIGUOUS = "ambiguous_match"
 EMPLOYEE_MATCH_STATUS_NO_MATCH = "no_match"
@@ -648,6 +651,77 @@ class MeetingActionItem(Base):
     confirmed_employee: Mapped["Employee | None"] = relationship(
         foreign_keys="[MeetingActionItem.confirmed_employee_id]",
         overlaps="proposed_employee",
+    )
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in TASK_STATUSES)})",
+            name="ck_tasks_status",
+        ),
+        CheckConstraint(
+            f"priority IN ({', '.join(repr(priority) for priority in ACTION_ITEM_PRIORITIES)})",
+            name="ck_tasks_priority",
+        ),
+        CheckConstraint(
+            "assignment_email_status IN ('pending', 'sent', 'failed')",
+            name="ck_tasks_assignment_email_status",
+        ),
+        UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
+        UniqueConstraint(
+            "source_action_item_id",
+            name="uq_tasks_source_action_item_id",
+        ),
+        Index("ix_tasks_assignee_due_at", "assignee_id", "due_at"),
+        Index("ix_tasks_meeting_id", "meeting_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    assignee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    creator_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_action_item_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_action_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transcript_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_transcripts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_timestamp_seconds: Mapped[float] = mapped_column(nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    priority: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=TASK_STATUS_PENDING,
+    )
+    assignment_email_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+    )
+    assignment_email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
     )
 
 

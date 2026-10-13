@@ -4,7 +4,10 @@ import pytest
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session
 
-from app.db.seed_employees import seed_development_employees
+from app.db.seed_employees import (
+    require_development_environment,
+    seed_development_employees,
+)
 from app.meeting.models import Base, Employee
 
 
@@ -54,13 +57,15 @@ def test_employee_record_can_be_created(db_session: Session):
     assert saved.created_at is not None
 
 
-def test_seed_development_employees_is_idempotent(db_session: Session):
+def test_seed_development_employees_is_idempotent_and_includes_rahul(
+    db_session: Session,
+):
     first_run = seed_development_employees(db_session)
     second_run = seed_development_employees(db_session)
 
-    assert len(first_run) == 8
+    assert len(first_run) == 9
     assert len(second_run) == 0
-    assert db_session.query(Employee).count() == 8
+    assert db_session.query(Employee).count() == 9
     assert {employee.email for employee in db_session.query(Employee).all()} == {
         "ava.patel@northstar.example",
         "marcus.chen@northstar.example",
@@ -70,4 +75,28 @@ def test_seed_development_employees_is_idempotent(db_session: Session):
         "noah.martin@northstar.example",
         "chloe.nguyen@northstar.example",
         "ethan.walker@northstar.example",
+        "rahul@example.test",
     }
+    rahul = db_session.query(Employee).filter_by(email="rahul@example.test").one()
+    assert rahul.name == "Rahul"
+    assert rahul.is_active is True
+
+
+@pytest.mark.parametrize("app_env", [None, "production", "development-test"])
+def test_seed_command_requires_explicit_development_environment(
+    monkeypatch,
+    app_env: str | None,
+):
+    if app_env is None:
+        monkeypatch.delenv("APP_ENV", raising=False)
+    else:
+        monkeypatch.setenv("APP_ENV", app_env)
+
+    with pytest.raises(SystemExit, match="APP_ENV=development"):
+        require_development_environment()
+
+
+def test_seed_command_allows_development_environment(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "development")
+
+    require_development_environment()

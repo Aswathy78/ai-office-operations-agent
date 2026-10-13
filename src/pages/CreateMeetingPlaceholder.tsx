@@ -3,6 +3,7 @@ import { CalendarPlus, CalendarClock, Zap, Check, Copy, Share2, Video } from 'lu
 import { useNavigate } from 'react-router-dom'
 import { demoUsers } from '../mocks/mockUser'
 import { useAuth } from '../contexts/AuthContext'
+import { createMeeting } from '../api/meetings'
 
 type Mode = 'pick' | 'instant' | 'scheduled' | 'created'
 
@@ -81,7 +82,14 @@ export function CreateMeetingPlaceholder() {
     }
 
     try {
-      const body: Record<string, unknown> = {
+      const body: {
+        title: string
+        agenda: string | null
+        meeting_type: 'instant' | 'scheduled'
+        participants: Participant[]
+        start_at?: string
+        end_at?: string
+      } = {
         title: title.trim(),
         agenda: agenda.trim() || null,
         meeting_type: isInstant ? 'instant' : 'scheduled',
@@ -92,16 +100,7 @@ export function CreateMeetingPlaceholder() {
         body.end_at = endAt
       }
 
-      const response = await fetch(
-        `http://127.0.0.1:9000/api/v1/meetings/?organizer_id=${encodeURIComponent(user?.id ?? 'demo-organizer')}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        },
-      )
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.detail || 'Failed to create meeting.')
+      const data = await createMeeting(body, user?.id ?? 'demo-organizer')
 
       setCreated({ id: data.id, title: data.title, join_url: data.join_url, status: data.status })
       setMode('created')

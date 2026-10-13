@@ -17,58 +17,90 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("meeting_action_items")
+    }
+    indexes = {
+        index["name"]
+        for index in inspector.get_indexes("meeting_action_items")
+    }
+    foreign_keys = {
+        (tuple(foreign_key["constrained_columns"]), foreign_key["referred_table"])
+        for foreign_key in inspector.get_foreign_keys("meeting_action_items")
+    }
+    check_constraints = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("meeting_action_items")
+    }
+
     with op.batch_alter_table("meeting_action_items") as batch_op:
-        batch_op.add_column(
-            sa.Column("proposed_employee_id", sa.String(length=36), nullable=True)
-        )
-        batch_op.add_column(
-            sa.Column("confirmed_employee_id", sa.String(length=36), nullable=True)
-        )
-        batch_op.add_column(
-            sa.Column("employee_match_status", sa.String(length=30), nullable=True)
-        )
-        batch_op.add_column(
-            sa.Column(
-                "ownership_status",
-                sa.String(length=30),
-                nullable=False,
-                server_default="unresolved",
+        if "proposed_employee_id" not in columns:
+            batch_op.add_column(
+                sa.Column("proposed_employee_id", sa.String(length=36), nullable=True)
             )
-        )
-        batch_op.create_foreign_key(
-            "fk_meeting_action_items_proposed_employee_id_employees",
-            "employees",
-            ["proposed_employee_id"],
-            ["id"],
-            ondelete="SET NULL",
-        )
-        batch_op.create_foreign_key(
-            "fk_meeting_action_items_confirmed_employee_id_employees",
-            "employees",
-            ["confirmed_employee_id"],
-            ["id"],
-            ondelete="SET NULL",
-        )
-        batch_op.create_index(
-            "ix_meeting_action_items_proposed_employee_id",
-            ["proposed_employee_id"],
-            unique=False,
-        )
-        batch_op.create_index(
-            "ix_meeting_action_items_confirmed_employee_id",
-            ["confirmed_employee_id"],
-            unique=False,
-        )
-        batch_op.create_check_constraint(
-            "ck_meeting_action_items_employee_match_status",
-            "employee_match_status IS NULL OR employee_match_status IN "
-            "('unique_match', 'ambiguous_match', 'no_match', 'missing_owner')",
-        )
-        batch_op.create_check_constraint(
-            "ck_meeting_action_items_ownership_status",
-            "ownership_status IN "
-            "('unresolved', 'proposed', 'approval_required', 'confirmed')",
-        )
+        if "confirmed_employee_id" not in columns:
+            batch_op.add_column(
+                sa.Column("confirmed_employee_id", sa.String(length=36), nullable=True)
+            )
+        if "employee_match_status" not in columns:
+            batch_op.add_column(
+                sa.Column("employee_match_status", sa.String(length=30), nullable=True)
+            )
+        if "ownership_status" not in columns:
+            batch_op.add_column(
+                sa.Column(
+                    "ownership_status",
+                    sa.String(length=30),
+                    nullable=False,
+                    server_default="unresolved",
+                )
+            )
+        if (
+            (("proposed_employee_id",), "employees") not in foreign_keys
+        ):
+            batch_op.create_foreign_key(
+                "fk_meeting_action_items_proposed_employee_id_employees",
+                "employees",
+                ["proposed_employee_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+        if (
+            (("confirmed_employee_id",), "employees") not in foreign_keys
+        ):
+            batch_op.create_foreign_key(
+                "fk_meeting_action_items_confirmed_employee_id_employees",
+                "employees",
+                ["confirmed_employee_id"],
+                ["id"],
+                ondelete="SET NULL",
+            )
+        if "ix_meeting_action_items_proposed_employee_id" not in indexes:
+            batch_op.create_index(
+                "ix_meeting_action_items_proposed_employee_id",
+                ["proposed_employee_id"],
+                unique=False,
+            )
+        if "ix_meeting_action_items_confirmed_employee_id" not in indexes:
+            batch_op.create_index(
+                "ix_meeting_action_items_confirmed_employee_id",
+                ["confirmed_employee_id"],
+                unique=False,
+            )
+        if "ck_meeting_action_items_employee_match_status" not in check_constraints:
+            batch_op.create_check_constraint(
+                "ck_meeting_action_items_employee_match_status",
+                "employee_match_status IS NULL OR employee_match_status IN "
+                "('unique_match', 'ambiguous_match', 'no_match', 'missing_owner')",
+            )
+        if "ck_meeting_action_items_ownership_status" not in check_constraints:
+            batch_op.create_check_constraint(
+                "ck_meeting_action_items_ownership_status",
+                "ownership_status IN "
+                "('unresolved', 'proposed', 'approval_required', 'confirmed')",
+            )
 
 
 def downgrade() -> None:

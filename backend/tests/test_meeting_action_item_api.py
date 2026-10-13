@@ -10,6 +10,7 @@ from sqlalchemy.pool import StaticPool
 from main import app
 from app.meeting.action_item_service import MeetingActionItemExtractionError
 from app.db.database import get_db
+from app.db.seed_employees import seed_development_employees
 from app.meeting.models import (
     ACTION_ITEM_EXTRACTION_STATUS_COMPLETED,
     ACTION_ITEM_EXTRACTION_STATUS_FAILED,
@@ -372,6 +373,23 @@ def test_get_active_employees_returns_only_active_employee_fields(
     ]
 
 
+def test_development_seed_makes_rahul_available_from_employee_api(
+    client: TestClient,
+    db_session: Session,
+):
+    seed_development_employees(db_session)
+
+    response = client.get("/api/v1/meetings/employees")
+
+    assert response.status_code == 200
+    rahul = next(
+        employee
+        for employee in response.json()
+        if employee["email"] == "rahul@example.test"
+    )
+    assert rahul["name"] == "Rahul"
+
+
 @pytest.mark.parametrize(
     "match_status",
     ["unique_match", "ambiguous_match", "no_match", "missing_owner"],
@@ -392,6 +410,9 @@ def test_confirm_action_item_owner_preserves_matching_result_and_original_name(
         ownership_status="approval_required",
     )
     item = extraction.items[0]
+    item.review_status = "confirmed"
+    item.reviewed_by = ORGANIZER_ID
+    item.reviewed_at = datetime.now(timezone.utc)
     proposed_employee = None
     if match_status == "unique_match":
         proposed_employee = Employee(
@@ -427,6 +448,7 @@ def test_confirm_action_item_owner_preserves_matching_result_and_original_name(
     )
     assert body["confirmed_employee_id"] == employee.id
     assert body["ownership_status"] == "confirmed"
+    assert body["review_status"] == "confirmed"
     db_session.refresh(item)
     assert item.owner_name == "Original transcript owner"
     assert item.employee_match_status == match_status
@@ -435,6 +457,7 @@ def test_confirm_action_item_owner_preserves_matching_result_and_original_name(
     )
     assert item.confirmed_employee_id == employee.id
     assert item.ownership_status == "confirmed"
+    assert item.review_status == "confirmed"
 
 
 def test_confirm_action_item_owner_keeps_missing_owner_name_missing(
@@ -893,10 +916,28 @@ def test_pending_extraction_status_is_returned(
 # ---------------------------------------------------------------------------
 
 
-def test_review_action_item_confirm(client: TestClient, db_session: Session):
+def test_review_action_item_confirm(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
     meeting, transcript = _create_meeting_and_transcript(db_session)
     extraction = _create_extraction(db_session, meeting, transcript)
     item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Maya",
+        email="maya@example.test",
+        is_active=True,
+    )
+    item.confirmed_employee_id = employee.id
+    item.deadline_at = datetime.now(timezone.utc) + timedelta(days=3)
+    db_session.add(employee)
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.task_service.send_assignment_email",
+        lambda task, assigned_employee, meeting_title: None,
+    )
 
     response = client.patch(
         f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"

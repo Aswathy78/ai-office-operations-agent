@@ -69,7 +69,10 @@ export function MeetingReportPage() {
     if (!meetingId || !user) return
 
     setLoading(true)
-    getMeetingReport(meetingId, user.id)
+    const reportRequest = user.email
+      ? getMeetingReport(meetingId, user.id, user.email)
+      : getMeetingReport(meetingId, user.id)
+    reportRequest
       .then((data) => {
         if (active) setReport(data)
       })
@@ -94,29 +97,43 @@ export function MeetingReportPage() {
       return
     }
 
+    void loadActiveEmployees(() => active)
+
+    return () => { active = false }
+  }, [isOrganizer])
+
+  function loadActiveEmployees(isActive: () => boolean = () => true) {
     setEmployeesLoading(true)
     setEmployeesError('')
-    getActiveEmployees()
+    return getActiveEmployees()
       .then((activeEmployees) => {
-        if (active) setEmployees(activeEmployees)
+        if (isActive()) setEmployees(activeEmployees)
       })
       .catch((reason: unknown) => {
-        if (active) {
+        if (isActive()) {
           setEmployeesError(
             reason instanceof Error ? reason.message : 'Active employees could not be loaded.',
           )
         }
       })
       .finally(() => {
-        if (active) setEmployeesLoading(false)
+        if (isActive()) setEmployeesLoading(false)
       })
+  }
 
-    return () => { active = false }
-  }, [isOrganizer])
+  function handleRefreshEmployees() {
+    if (isOrganizer) void loadActiveEmployees()
+  }
 
   useEffect(() => {
     let active = true
     if (!meetingId || !user) return
+    if (!isOrganizer) {
+      setActionItems(null)
+      setActionItemsError('')
+      setActionItemsLoading(false)
+      return
+    }
 
     setActionItemsLoading(true)
     setActionItemsError('')
@@ -139,7 +156,7 @@ export function MeetingReportPage() {
       })
 
     return () => { active = false }
-  }, [meetingId, user])
+  }, [isOrganizer, meetingId, user])
 
   useEffect(() => {
     let active = true
@@ -383,20 +400,22 @@ export function MeetingReportPage() {
                 <FileText size={16} aria-hidden="true" />
                 {transcriptOpen ? 'Hide Transcript' : 'View Transcript'}
               </button>
-              <button
-                className="button secondary"
-                type="button"
-                aria-expanded={summaryOpen}
-                aria-controls="meeting-summary-panel"
-                onClick={() => setSummaryOpen((open) => !open)}
-              >
-                <FileText size={16} aria-hidden="true" />
-                {summaryOpen ? 'Hide Summary' : 'View Summary'}
-              </button>
+              {isOrganizer && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  aria-expanded={summaryOpen}
+                  aria-controls="meeting-summary-panel"
+                  onClick={() => setSummaryOpen((open) => !open)}
+                >
+                  <FileText size={16} aria-hidden="true" />
+                  {summaryOpen ? 'Hide Summary' : 'View Summary'}
+                </button>
+              )}
             </div>
           </section>
 
-          {summaryOpen && (
+          {isOrganizer && summaryOpen && (
             <div id="meeting-summary-panel">
               <MeetingSummaryPanel
                 summary={meetingSummary}
@@ -406,29 +425,33 @@ export function MeetingReportPage() {
             </div>
           )}
 
-          <MeetingActionItemsPanel
-            extraction={actionItems}
-            employees={employees}
-            employeesLoading={employeesLoading}
-            employeesError={employeesError}
-            isOrganizer={isOrganizer}
-            loading={actionItemsLoading}
-            triggering={actionItemsTriggering}
-            error={actionItemsError}
-            confirmingActionItemId={confirmingActionItemId}
-            ownerConfirmationFeedback={ownerConfirmationFeedback}
-            onExtract={() => void triggerActionItemExtraction()}
-            onConfirmOwner={(item, employeeId) => void confirmOwner(item, employeeId)}
-            onOpenSource={openTranscriptSegment}
-            onReviewActionItem={handleReviewActionItem}
-            onRefresh={handleRefreshActionItems}
-          />
+          {isOrganizer && (
+            <MeetingActionItemsPanel
+              extraction={actionItems}
+              employees={employees}
+              employeesLoading={employeesLoading}
+              employeesError={employeesError}
+              isOrganizer={isOrganizer}
+              loading={actionItemsLoading}
+              triggering={actionItemsTriggering}
+              error={actionItemsError}
+              confirmingActionItemId={confirmingActionItemId}
+              ownerConfirmationFeedback={ownerConfirmationFeedback}
+              onExtract={() => void triggerActionItemExtraction()}
+              onConfirmOwner={(item, employeeId) => void confirmOwner(item, employeeId)}
+              onOpenSource={openTranscriptSegment}
+              onReviewActionItem={handleReviewActionItem}
+              onRefresh={handleRefreshActionItems}
+              onRefreshEmployees={handleRefreshEmployees}
+            />
+          )}
 
           {transcriptOpen && (
             <TranscriptPanel
               meetingId={meetingId}
-              organizerId={report.organizer_id}
+              organizerId={user?.id ?? ''}
               transcriptId={sourceTranscriptId}
+              employeeEmail={user?.email}
               isOrganizer={user?.id === report.organizer_id}
               isOpen
               inline

@@ -14,6 +14,7 @@ import { MeetingReportPage } from './pages/MeetingReportPage'
 import { MeetingRoomPage } from './pages/MeetingRoomPage'
 import { MeetingsPage } from './pages/MeetingsPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
+import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -59,9 +60,9 @@ function AppRoutes() {
 
       {/* Other authenticated routes inside AppShell */}
       <Route path="/chat" element={<ProtectedAppPage path="/chat"><PlaceholderPage /></ProtectedAppPage>} />
-      <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><PlaceholderPage /></ProtectedAppPage>} />
-      <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><PlaceholderPage /></ProtectedAppPage>} />
-      <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><TaskWorkspacePage view="mine" /></ProtectedAppPage>} />
+      <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
+      <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
       <Route path="/documents" element={<ProtectedAppPage path="/documents"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />

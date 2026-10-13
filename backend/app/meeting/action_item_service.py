@@ -44,6 +44,10 @@ from app.meeting.models import (
     TRANSCRIPT_STATUS_COMPLETED,
 )
 from app.meeting.schemas import TranscriptSegment
+from app.task_service import (
+    attempt_assignment_email,
+    prepare_task_from_confirmed_action_item,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -485,6 +489,14 @@ def _validate_candidates(
                 organization_timezone=organization_timezone,
             )
 
+
+        print(
+           "[DEADLINE DEBUG]",
+           "text =", repr(deadline_text),
+           "resolved =", repr(deadline_at),
+           "meeting_start =", repr(meeting_start_at),
+           "timezone =", str(organization_timezone),
+        )
         candidate = candidate.model_copy(
             update={
                 "deadline_text": deadline_text,
@@ -973,7 +985,23 @@ def review_action_item(
         item.reviewed_by = reviewer_id
         item.reviewed_at = now
 
+    task_to_notify = None
+    if item.review_status == ACTION_ITEM_REVIEW_STATUS_CONFIRMED:
+        try:
+            task, notify_assignee = prepare_task_from_confirmed_action_item(
+                db,
+                item,
+                reviewer_id,
+            )
+        except ValueError:
+            db.rollback()
+            raise
+        if notify_assignee:
+            task_to_notify = task
+
     db.commit()
+    if task_to_notify is not None:
+        attempt_assignment_email(db, task_to_notify.id)
     db.refresh(item)
     return item
 

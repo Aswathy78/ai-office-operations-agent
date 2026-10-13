@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  createMeeting,
   extractMeetingActionItems,
   getMeetingActionItems,
+  getActiveEmployees,
+  getMeetingReport,
   getMeetingTranscript,
   getMeetingTranscriptCorrections,
   reviewActionItem,
@@ -97,6 +100,80 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+describe('employee directory API', () => {
+  it('decodes the direct JSON array returned by the employee endpoint', async () => {
+    const employees = [
+      { id: 'employee-1', name: 'Rahul', email: 'rahul@example.test' },
+    ]
+    const fetchMock = stubFetch(employees)
+
+    const result = await getActiveEmployees()
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/employees',
+    )
+    expect(Array.isArray(result)).toBe(true)
+    expect(result).toEqual(employees)
+  })
+})
+
+describe('meeting creation API', () => {
+  it('POSTs an instant meeting without scheduled date fields to the configured backend', async () => {
+    const fetchMock = stubFetch({
+      id: 'meeting-1',
+      title: 'Standup',
+      join_url: 'http://localhost:5173/meetings/meeting-1',
+      status: 'instant',
+      start_at: '2026-10-13T10:00:00Z',
+      end_at: '2026-10-13T14:00:00Z',
+      organizer_id: 'manager 1',
+    })
+
+    await createMeeting(
+      {
+        title: 'Standup',
+        agenda: null,
+        meeting_type: 'instant',
+        participants: [{ email: 'teammate@example.test' }],
+      },
+      'manager 1',
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/?organizer_id=manager+1',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: 'Standup',
+          agenda: null,
+          meeting_type: 'instant',
+          participants: [{ email: 'teammate@example.test' }],
+        }),
+      }),
+    )
+  })
+
+  it('preserves scheduled meeting dates in the request body', async () => {
+    const fetchMock = stubFetch()
+    const data = {
+      title: 'Planning',
+      agenda: 'Roadmap',
+      meeting_type: 'scheduled',
+      start_at: '2026-10-14T09:00',
+      end_at: '2026-10-14T10:00',
+      participants: [],
+    }
+
+    await createMeeting(data, 'manager-1')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/?organizer_id=manager-1',
+      expect.objectContaining({ body: JSON.stringify(data) }),
+    )
+  })
+})
+
 describe('transcript API', () => {
   it('requests the transcript with the organizer query parameter and types its response', async () => {
     const fetchMock = stubFetch()
@@ -104,7 +181,7 @@ describe('transcript API', () => {
     const transcript = await getMeetingTranscript('meeting/one', 'organizer 1')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
     )
     const segment: TranscriptSegment = transcript.segments[0]
     expect(segment.flagged_for_correction).toBe(true)
@@ -117,7 +194,22 @@ describe('transcript API', () => {
     await getMeetingTranscript('meeting-1', 'organizer-1', 'transcript-2')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+    )
+  })
+
+  it('includes the employee identity when loading an assigned task source', async () => {
+    const fetchMock = stubFetch()
+
+    await getMeetingTranscript(
+      'meeting-1',
+      'employee-user',
+      'transcript-2',
+      'rahul@example.test',
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=employee-user&transcript_id=transcript-2&employee_email=rahul%40example.test',
     )
   })
 
@@ -128,11 +220,23 @@ describe('transcript API', () => {
       const result = await getMeetingActionItems('meeting/one', 'organizer 1')
 
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:9000/api/v1/meetings/meeting%2Fone/action-items?organizer_id=organizer+1',
+        'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/action-items?organizer_id=organizer+1',
       )
       expect(result.status).toBe('completed')
       expect(result.action_items[0].source_segment_index).toBe(2)
       expect(result.action_items[0].owner_name).toBeNull()
+    })
+
+    describe('meeting report API', () => {
+      it('includes employee identity for a task-assignee source report request', async () => {
+        const fetchMock = stubFetch({})
+
+        await getMeetingReport('meeting-1', 'employee-user', 'rahul@example.test')
+
+        expect(fetchMock).toHaveBeenCalledWith(
+          'http://127.0.0.1:8000/api/v1/meetings/meeting-1/report?organizer_id=employee-user&employee_email=rahul%40example.test',
+        )
+      })
     })
 
     it('POSTs an extraction request without a request body', async () => {
@@ -141,7 +245,7 @@ describe('transcript API', () => {
       const result = await extractMeetingActionItems('meeting-1', 'organizer-1')
 
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:9000/api/v1/meetings/meeting-1/action-items/extract?organizer_id=organizer-1',
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/action-items/extract?organizer_id=organizer-1',
         { method: 'POST' },
       )
       expect(result.action_items[0].source_start_seconds).toBe(12.5)
@@ -182,7 +286,7 @@ describe('transcript API', () => {
       )
 
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:9000/api/v1/meetings/meeting-1/action-items/item-1/review?organizer_id=organizer-1',
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/action-items/item-1/review?organizer_id=organizer-1',
         expect.objectContaining({
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -211,7 +315,7 @@ describe('transcript API', () => {
 
     const [url, options] = fetchMock.mock.calls[0]
     expect(url).toBe(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
     )
     expect(options?.method).toBe('PATCH')
     expect(options?.headers).toEqual({ 'Content-Type': 'application/json' })
@@ -234,7 +338,7 @@ describe('transcript API', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
       expect.objectContaining({ method: 'PATCH' }),
     )
   })
@@ -248,7 +352,7 @@ describe('transcript API', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
     )
     const correction: TranscriptCorrection = corrections[0]
     expect(correction.segment_index).toBe(0)
@@ -263,7 +367,7 @@ describe('transcript API', () => {
     await getMeetingTranscriptCorrections('meeting-1', 'organizer-1', 'transcript-2')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
     )
   })
 })

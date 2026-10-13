@@ -12,6 +12,7 @@ from app.meeting.models import (
     MeetingActionItemExtraction,
     MeetingAttendanceLog,
     MeetingSummary,
+    Task,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
@@ -84,6 +85,7 @@ from app.meeting.action_item_service import (
     review_action_item,
 )
 from app.meeting.signaling import signaling_manager
+from app.task_service import synchronize_confirmed_action_item_tasks
 
 
 
@@ -92,6 +94,28 @@ router = APIRouter(
     tags=["Meetings"],
 )
 DEMO_ORGANIZER_ID = "demo-organizer"
+
+
+def _is_assigned_task_viewer(
+    db: Session,
+    meeting_id: str,
+    employee_email: str | None,
+    transcript_id: str | None = None,
+) -> bool:
+    if not employee_email:
+        return False
+    query = (
+        db.query(Task.id)
+        .join(Employee, Task.assignee_id == Employee.id)
+        .filter(
+            Task.meeting_id == meeting_id,
+            Employee.email == employee_email,
+            Employee.is_active.is_(True),
+        )
+    )
+    if transcript_id is not None:
+        query = query.filter(Task.transcript_id == transcript_id)
+    return query.first() is not None
 
 
 @router.post("/", response_model=MeetingResponse)
@@ -480,24 +504,25 @@ def upload_participant_track_file(
     return MeetingRecordingUploadResponse(**result)
 
 
-# -- Meeting Report (organizer only) ------------------------------------------
+# -- Meeting report -----------------------------------------------------------
 
 
 @router.get(
     "/{meeting_id}/report",
     response_model=MeetingReportResponse,
-    summary="Organizer retrieves the attendance report for a meeting",
+    summary="Organizer or assigned employee retrieves meeting source context",
 )
 def get_meeting_report(
     meeting_id: str,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    employee_email: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """Return attendance records for the meeting.
+    """Return a meeting report to its organizer or an assigned task employee.
 
-    The caller must supply their ``organizer_id``; if it does not match the
-    stored organizer, a 403 is returned.  This is a lightweight server-side
-    guard; a real deployment would use an authenticated session token.
+    Assigned employees receive meeting details without the organizer-only
+    attendance list. Identity is supplied by the current demo authentication
+    seam; production deployments must replace it with a verified session.
     """
     meeting = get_meeting_by_id(db, meeting_id)
     if not meeting:
@@ -506,18 +531,26 @@ def get_meeting_report(
             detail="Meeting not found",
         )
 
-    if meeting.organizer_id != organizer_id:
+    is_organizer = meeting.organizer_id == organizer_id
+    is_assigned_task_viewer = _is_assigned_task_viewer(
+        db,
+        meeting_id,
+        employee_email,
+    )
+    if not is_organizer and not is_assigned_task_viewer:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only the meeting organizer can access the report",
+            detail="Only the meeting organizer or an assigned task employee can access the report",
         )
 
-    logs = (
-        db.query(MeetingAttendanceLog)
-        .filter(MeetingAttendanceLog.meeting_id == meeting_id)
-        .order_by(MeetingAttendanceLog.joined_at)
-        .all()
-    )
+    logs = []
+    if is_organizer:
+        logs = (
+            db.query(MeetingAttendanceLog)
+            .filter(MeetingAttendanceLog.meeting_id == meeting_id)
+            .order_by(MeetingAttendanceLog.joined_at)
+            .all()
+        )
 
     return MeetingReportResponse(
         meeting_id=meeting.id,
@@ -1236,6 +1269,7 @@ def extract_meeting_action_items(
             detail="Action item extraction failed",
         ) from None
 
+    synchronize_confirmed_action_item_tasks(db, extraction, organizer_id)
     return _meeting_action_items_response(extraction)
 
 
@@ -1437,6 +1471,7 @@ def get_transcript(
     meeting_id: str,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
     transcript_id: str | None = Query(default=None),
+    employee_email: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
@@ -1444,8 +1479,16 @@ def get_transcript(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    if meeting.organizer_id != organizer_id:
-        raise HTTPException(status_code=403, detail="Organizer access required")
+    if meeting.organizer_id != organizer_id and not _is_assigned_task_viewer(
+        db,
+        meeting_id,
+        employee_email,
+        transcript_id,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Organizer or assigned task employee access required",
+        )
 
     transcript = get_meeting_transcript(db, meeting_id, transcript_id)
 

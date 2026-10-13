@@ -16,6 +16,7 @@ interface TranscriptPanelProps {
   meetingId: string
   organizerId: string
   transcriptId?: string | null
+  employeeEmail?: string
   isOrganizer: boolean
   isOpen: boolean
   inline?: boolean
@@ -187,6 +188,7 @@ export function TranscriptPanel({
   meetingId,
   organizerId,
   transcriptId,
+  employeeEmail,
   isOrganizer,
   isOpen,
   inline = false,
@@ -211,13 +213,25 @@ export function TranscriptPanel({
     requestId: number
   } | null>(null)
 
+  const requestTranscript = useCallback(() => {
+    if (employeeEmail) {
+      return getMeetingTranscript(
+        meetingId,
+        organizerId,
+        transcriptId ?? undefined,
+        employeeEmail,
+      )
+    }
+    return transcriptId
+      ? getMeetingTranscript(meetingId, organizerId, transcriptId)
+      : getMeetingTranscript(meetingId, organizerId)
+  }, [employeeEmail, meetingId, organizerId, transcriptId])
+
   const loadTranscript = useCallback(async () => {
     setLoading(true)
     setLoadError('')
     try {
-      const result = transcriptId
-        ? await getMeetingTranscript(meetingId, organizerId, transcriptId)
-        : await getMeetingTranscript(meetingId, organizerId)
+      const result = await requestTranscript()
       setTranscript(result)
     } catch (error) {
       setTranscript(null)
@@ -225,7 +239,7 @@ export function TranscriptPanel({
     } finally {
       setLoading(false)
     }
-  }, [meetingId, organizerId, transcriptId])
+  }, [requestTranscript])
 
   useEffect(() => {
     if (!isOpen || !meetingId || !organizerId) return
@@ -233,9 +247,7 @@ export function TranscriptPanel({
     setTranscript(null)
     setLoading(true)
     setLoadError('')
-    const transcriptRequest = transcriptId
-      ? getMeetingTranscript(meetingId, organizerId, transcriptId)
-      : getMeetingTranscript(meetingId, organizerId)
+    const transcriptRequest = requestTranscript()
     void transcriptRequest
       .then((result) => {
         if (active) setTranscript(result)
@@ -252,7 +264,7 @@ export function TranscriptPanel({
     return () => {
       active = false
     }
-  }, [isOpen, meetingId, organizerId, transcriptId])
+  }, [isOpen, meetingId, organizerId, requestTranscript])
 
   useEffect(() => {
     if (!isOpen || !isOrganizer || !showHistory) return
@@ -328,9 +340,7 @@ export function TranscriptPanel({
     if (!isOpen || loading || (!isPending && !isProcessing)) return
     let active = true
     const timer = setTimeout(() => {
-      const transcriptRequest = transcriptId
-        ? getMeetingTranscript(meetingId, organizerId, transcriptId)
-        : getMeetingTranscript(meetingId, organizerId)
+      const transcriptRequest = requestTranscript()
       void transcriptRequest
         .then((result) => {
           if (active) {
@@ -350,7 +360,7 @@ export function TranscriptPanel({
       active = false
       clearTimeout(timer)
     }
-  }, [isOpen, isPending, isProcessing, loading, meetingId, organizerId, transcript])
+  }, [isOpen, isPending, isProcessing, loading, requestTranscript, transcript])
 
   async function saveSegment(index: number, text: string, speaker: string): Promise<boolean> {
     if (!transcript) return false

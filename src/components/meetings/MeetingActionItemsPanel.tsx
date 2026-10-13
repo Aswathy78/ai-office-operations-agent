@@ -46,6 +46,7 @@ interface MeetingActionItemsPanelProps {
     payload: ActionItemReviewPayload,
   ) => Promise<MeetingActionItem | void>
   onRefresh?: () => void
+  onRefreshEmployees?: () => void
 }
 
 const matchStatusLabels: Record<EmployeeMatchStatus, string> = {
@@ -134,6 +135,7 @@ export function MeetingActionItemsPanel({
   onOpenSource,
   onReviewActionItem,
   onRefresh,
+  onRefreshEmployees,
 }: MeetingActionItemsPanelProps) {
   const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<Record<string, string>>({})
   const [activeFilter, setActiveFilter] = useState<FilterOption>('all')
@@ -143,12 +145,14 @@ export function MeetingActionItemsPanel({
     owner_name: string
     confirmed_employee_id: string
     deadline_text: string
+    deadline_at: string
     priority: MeetingActionItemPriority
   }>({
     task_description: '',
     owner_name: '',
     confirmed_employee_id: '',
     deadline_text: '',
+    deadline_at: '',
     priority: 'medium',
   })
   const [reviewingItemId, setReviewingItemId] = useState<string | null>(null)
@@ -188,11 +192,17 @@ export function MeetingActionItemsPanel({
 
   function startEdit(item: MeetingActionItem) {
     setEditingItemId(item.id)
+    const deadline = item.deadline_at ? new Date(item.deadline_at) : null
     setEditFormData({
       task_description: item.task_description,
       owner_name: item.owner_name ?? '',
       confirmed_employee_id: item.confirmed_employee_id ?? item.proposed_employee_id ?? '',
       deadline_text: item.deadline_text ?? '',
+      deadline_at: deadline
+        ? new Date(deadline.getTime() - deadline.getTimezoneOffset() * 60_000)
+            .toISOString()
+            .slice(0, 16)
+        : '',
       priority: item.priority,
     })
   }
@@ -219,6 +229,9 @@ export function MeetingActionItemsPanel({
         owner_name: editFormData.owner_name.trim() || null,
         confirmed_employee_id: editFormData.confirmed_employee_id || null,
         deadline_text: editFormData.deadline_text.trim() || null,
+        deadline_at: editFormData.deadline_at
+          ? new Date(editFormData.deadline_at).toISOString()
+          : null,
         priority: editFormData.priority,
       })
       setItemFeedback((prev) => ({
@@ -776,6 +789,31 @@ export function MeetingActionItemsPanel({
                               }}
                             />
                           </div>
+                          <div>
+                            <label
+                              htmlFor={`edit-deadline-at-${item.id}`}
+                              style={{ display: 'block', fontWeight: 600, marginBottom: '0.25rem' }}
+                            >
+                              Due date and time
+                            </label>
+                            <input
+                              id={`edit-deadline-at-${item.id}`}
+                              type="datetime-local"
+                              value={editFormData.deadline_at}
+                              onChange={(e) =>
+                                setEditFormData((prev) => ({
+                                  ...prev,
+                                  deadline_at: e.target.value,
+                                }))
+                              }
+                              style={{
+                                width: '100%',
+                                padding: '0.45rem',
+                                borderRadius: '4px',
+                                border: '1px solid var(--border)',
+                              }}
+                            />
+                          </div>
                         </div>
 
                         {/* Edit Action Buttons */}
@@ -823,7 +861,7 @@ export function MeetingActionItemsPanel({
                         </dd>
                       </div>
                       <div>
-                        <dt style={{ color: 'var(--text-muted)' }}>Matching status</dt>
+                        <dt style={{ color: 'var(--text-muted)' }}>Automatic match status</dt>
                         <dd style={{ margin: 0, fontWeight: 500 }}>
                           {matchStatusLabel(item.employee_match_status)}
                         </dd>
@@ -965,7 +1003,19 @@ export function MeetingActionItemsPanel({
                         ) : employeesError ? (
                           <p role="alert">Unable to load active employees: {employeesError}</p>
                         ) : employees.length === 0 ? (
-                          <p role="status">No active employees are available to assign.</p>
+                          <div>
+                            <p role="status">No active employees are available to assign.</p>
+                            {onRefreshEmployees && (
+                              <button
+                                className="button secondary"
+                                type="button"
+                                onClick={onRefreshEmployees}
+                                disabled={employeesLoading}
+                              >
+                                Refresh employee list
+                              </button>
+                            )}
+                          </div>
                         ) : (
                           <>
                             <label htmlFor={`owner-select-${item.id}`} style={{ fontWeight: 600 }}>

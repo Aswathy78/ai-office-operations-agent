@@ -17,6 +17,20 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    existing_tables = set(inspector.get_table_names())
+    action_item_tables = {
+        "meeting_action_item_extractions",
+        "meeting_action_items",
+    }
+    if action_item_tables.issubset(existing_tables):
+        return
+    if action_item_tables.intersection(existing_tables):
+        raise RuntimeError(
+            "Only part of the meeting action-item schema exists; "
+            "refusing to mark the migration complete."
+        )
+
     op.create_table(
         "meeting_action_item_extractions",
         sa.Column("id", sa.String(length=36), nullable=False),

@@ -114,6 +114,24 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .empty-card h3 { margin: 0; }
 .empty-card p { margin: 6px 0 0; color: var(--muted); }
 .meeting-form-hint { display: block; margin: 5px 0 8px; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.task-workspace-card { display: flex; justify-content: space-between; align-items: center; gap: 18px; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+.task-workspace-heading { display: flex; align-items: center; gap: 13px; }
+.task-workspace-heading h2 { margin: 0; font-size: 22px; }
+.task-workspace-heading p:last-child { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
+.task-workspace-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.task-table-wrap { overflow-x: auto; background: #fff; border: 1px solid var(--border); border-radius: 12px; }
+.task-table { width: 100%; border-collapse: collapse; min-width: 760px; }
+.task-table th, .task-table td { padding: 13px 15px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; font-size: 13px; }
+.task-table th { background: #f7f9fc; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.task-table tbody tr:last-child td { border-bottom: 0; }
+.task-table td:first-child strong, .task-table td:first-child small { display: block; }
+.task-table td:first-child small, .task-email-state small { margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.task-table td a { color: #1d5eb1; text-decoration: none; }
+.task-table td a:hover { text-decoration: underline; }
+.task-capitalize { text-transform: capitalize; }
+.task-email-state { display: grid; justify-items: start; gap: 5px; }
+.text-button { border: 0; padding: 0; background: transparent; color: #1d5eb1; cursor: pointer; font-size: 12px; font-weight: 700; }
+.text-button:disabled { color: var(--muted); cursor: wait; }
 
 @media (max-width: 900px) {
   .sidebar { width: 224px; }
@@ -122,6 +140,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .topbar { padding: 12px 20px; }
   .main-content { padding: 22px 20px; }
   .profile-text { display: none; }
+  .task-workspace-card { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 720px) {
