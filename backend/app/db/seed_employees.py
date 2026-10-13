@@ -18,7 +18,7 @@ DEVELOPMENT_EMPLOYEES = [
     {"name": "Noah Martin", "email": "noah.martin@northstar.example"},
     {"name": "Chloe Nguyen", "email": "chloe.nguyen@northstar.example"},
     {"name": "Ethan Walker", "email": "ethan.walker@northstar.example"},
-    {"name": "Rahul", "email": "ananashraf0506@gmail.com"},
+    {"name": "Rahul", "email": "rahulexample.test@gmail.com"},
 ]
 
 
