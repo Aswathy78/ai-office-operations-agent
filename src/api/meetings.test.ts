@@ -4,6 +4,7 @@ import {
   getMeetingActionItems,
   getMeetingTranscript,
   getMeetingTranscriptCorrections,
+  reviewActionItem,
   updateMeetingTranscript,
 } from './meetings'
 import type {
@@ -103,7 +104,7 @@ describe('transcript API', () => {
     const transcript = await getMeetingTranscript('meeting/one', 'organizer 1')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting%2Fone/transcript?organizer_id=organizer+1',
     )
     const segment: TranscriptSegment = transcript.segments[0]
     expect(segment.flagged_for_correction).toBe(true)
@@ -116,7 +117,7 @@ describe('transcript API', () => {
     await getMeetingTranscript('meeting-1', 'organizer-1', 'transcript-2')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
     )
   })
 
@@ -127,7 +128,7 @@ describe('transcript API', () => {
       const result = await getMeetingActionItems('meeting/one', 'organizer 1')
 
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/action-items?organizer_id=organizer+1',
+        'http://127.0.0.1:9000/api/v1/meetings/meeting%2Fone/action-items?organizer_id=organizer+1',
       )
       expect(result.status).toBe('completed')
       expect(result.action_items[0].source_segment_index).toBe(2)
@@ -140,7 +141,7 @@ describe('transcript API', () => {
       const result = await extractMeetingActionItems('meeting-1', 'organizer-1')
 
       expect(fetchMock).toHaveBeenCalledWith(
-        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/action-items/extract?organizer_id=organizer-1',
+        'http://127.0.0.1:9000/api/v1/meetings/meeting-1/action-items/extract?organizer_id=organizer-1',
         { method: 'POST' },
       )
       expect(result.action_items[0].source_start_seconds).toBe(12.5)
@@ -163,6 +164,34 @@ describe('transcript API', () => {
         message: 'Completed transcript not found',
       })
     })
+
+    it('PATCHes a review decision for an action item', async () => {
+      const reviewedItem = {
+        ...actionItemsFixture.action_items[0],
+        review_status: 'confirmed',
+        reviewed_by: 'organizer-1',
+        is_task_eligible: true,
+      }
+      const fetchMock = stubFetch(reviewedItem)
+
+      const result = await reviewActionItem(
+        'meeting-1',
+        'item-1',
+        { action: 'confirm' },
+        'organizer-1',
+      )
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:9000/api/v1/meetings/meeting-1/action-items/item-1/review?organizer_id=organizer-1',
+        expect.objectContaining({
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'confirm' }),
+        }),
+      )
+      expect(result.review_status).toBe('confirmed')
+      expect(result.is_task_eligible).toBe(true)
+    })
   })
 
   it('PATCHes only editable text and speaker values', async () => {
@@ -182,7 +211,7 @@ describe('transcript API', () => {
 
     const [url, options] = fetchMock.mock.calls[0]
     expect(url).toBe(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1',
     )
     expect(options?.method).toBe('PATCH')
     expect(options?.headers).toEqual({ 'Content-Type': 'application/json' })
@@ -205,7 +234,7 @@ describe('transcript API', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript?organizer_id=organizer-1&transcript_id=transcript-2',
       expect.objectContaining({ method: 'PATCH' }),
     )
   })
@@ -219,7 +248,7 @@ describe('transcript API', () => {
     )
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1',
     )
     const correction: TranscriptCorrection = corrections[0]
     expect(correction.segment_index).toBe(0)
@@ -234,7 +263,7 @@ describe('transcript API', () => {
     await getMeetingTranscriptCorrections('meeting-1', 'organizer-1', 'transcript-2')
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
+      'http://127.0.0.1:9000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
     )
   })
 })

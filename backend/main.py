@@ -36,6 +36,7 @@ app.include_router(meeting_router)
 
 @app.on_event("startup")
 def startup():
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
     create_tables()
 
 

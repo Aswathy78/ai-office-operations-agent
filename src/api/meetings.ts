@@ -4,6 +4,8 @@ import type {
   GuestRequest,
   Employee,
   MeetingActionItem,
+  MeetingActionItemPriority,
+  MeetingActionItemReviewStatus,
   MeetingActionItems,
   MeetingDetails,
   MeetingListRecord,
@@ -125,6 +127,35 @@ export function confirmActionItemOwner(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ employee_id: employeeId }),
+    },
+  ).then((response) => readResponse<MeetingActionItem>(response))
+}
+
+export interface ActionItemReviewPayload {
+  action?: 'confirm' | 'reject' | 'edit' | 'save'
+  decision?: 'confirm' | 'reject' | 'edit' | 'confirmed' | 'rejected'
+  review_status?: MeetingActionItemReviewStatus
+  task_description?: string
+  owner_name?: string | null
+  confirmed_employee_id?: string | null
+  deadline_at?: string | null
+  deadline_text?: string | null
+  priority?: MeetingActionItemPriority
+}
+
+export function reviewActionItem(
+  meetingId: string,
+  actionItemId: string,
+  payload: ActionItemReviewPayload,
+  organizerId: string,
+): Promise<MeetingActionItem> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return fetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/${encodeURIComponent(actionItemId)}/review?${query}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
     },
   ).then((response) => readResponse<MeetingActionItem>(response))
 }
