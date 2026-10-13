@@ -90,20 +90,23 @@ def generate_meeting_summary(
         )
 
         api_key = os.environ.get("GROQ_API_KEY")
+        if api_key:
+            from groq import Groq
 
-        if not api_key:
+            client = Groq(api_key=api_key)
+            model = os.environ.get(
+                "GROQ_SUMMARY_MODEL",
+                "llama-3.3-70b-versatile",
+            )
+        elif os.environ.get("OPENAI_API_KEY"):
+            from openai import OpenAI
+
+            client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+            model = os.environ.get("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+        else:
             raise RuntimeError(
                 "GROQ_API_KEY is not set in the environment or backend/.env."
             )
-
-        from groq import Groq
-
-        client = Groq(api_key=api_key)
-
-        model = os.environ.get(
-            "GROQ_SUMMARY_MODEL",
-            "openai/gpt-oss-20b",
-        )
 
         response = client.chat.completions.create(
             model=model,

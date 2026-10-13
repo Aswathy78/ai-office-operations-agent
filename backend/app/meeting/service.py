@@ -1343,7 +1343,6 @@ def get_meeting_transcript(
             MeetingTranscript.recording_id == MeetingRecording.id,
         )
         .filter(MeetingRecording.meeting_id == meeting_id)
-        .filter(MeetingTranscript.status == "completed")
     )
     if transcript_id is not None:
         query = query.filter(MeetingTranscript.id == transcript_id)

@@ -9,6 +9,8 @@ import {
   getMeetingReport,
   getMeetingSummary,
   MeetingApiError,
+  reviewActionItem,
+  type ActionItemReviewPayload,
 } from '../api/meetings'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
@@ -255,6 +257,35 @@ export function MeetingReportPage() {
     }
   }
 
+  async function handleReviewActionItem(
+    item: MeetingActionItem,
+    payload: ActionItemReviewPayload,
+  ): Promise<MeetingActionItem | void> {
+    if (!meetingId || !user) return
+    const updated = await reviewActionItem(meetingId, item.id, payload, user.id)
+    setActionItems((current) => {
+      if (!current) return current
+      return {
+        ...current,
+        action_items: current.action_items.map((existing) =>
+          existing.id === updated.id ? updated : existing,
+        ),
+      }
+    })
+    return updated
+  }
+
+  function handleRefreshActionItems() {
+    if (!meetingId || !user) return
+    setActionItemsLoading(true)
+    getMeetingActionItems(meetingId, user.id)
+      .then((data) => setActionItems(data))
+      .catch((err: unknown) =>
+        setActionItemsError(err instanceof Error ? err.message : 'Failed to reload action items'),
+      )
+      .finally(() => setActionItemsLoading(false))
+  }
+
   function openTranscriptSegment(item: MeetingActionItem) {
     setTranscriptOpen(true)
     setSourceFocusRequestId((requestId) => requestId + 1)
@@ -389,6 +420,8 @@ export function MeetingReportPage() {
             onExtract={() => void triggerActionItemExtraction()}
             onConfirmOwner={(item, employeeId) => void confirmOwner(item, employeeId)}
             onOpenSource={openTranscriptSegment}
+            onReviewActionItem={handleReviewActionItem}
+            onRefresh={handleRefreshActionItems}
           />
 
           {transcriptOpen && (

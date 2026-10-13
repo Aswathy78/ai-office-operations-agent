@@ -278,6 +278,12 @@ export type MeetingActionItemOwnershipStatus =
   | 'approval_required'
   | 'confirmed'
 
+export type MeetingActionItemReviewStatus =
+  | 'pending_review'
+  | 'approval_required'
+  | 'confirmed'
+  | 'rejected'
+
 export interface MeetingActionItem {
   id: string
   owner_name: string | null
@@ -285,6 +291,11 @@ export interface MeetingActionItem {
   confirmed_employee_id?: string | null
   employee_match_status?: EmployeeMatchStatus | null
   ownership_status?: MeetingActionItemOwnershipStatus | null
+  review_status?: MeetingActionItemReviewStatus | null
+  reviewed_by?: string | null
+  reviewed_at?: string | null
+  is_task_eligible?: boolean
+  requires_approval?: boolean
   task_description: string
   deadline_at: string | null
   deadline_text: string | null

@@ -191,6 +191,11 @@ def test_post_extracts_action_items_and_returns_source_fields(
         "confirmed_employee_id": None,
         "employee_match_status": None,
         "ownership_status": "unresolved",
+        "review_status": "pending_review",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "is_task_eligible": False,
+        "requires_approval": False,
         "task_description": "Send the agenda.",
         "deadline_at": None,
         "deadline_text": "by Friday",
@@ -881,3 +886,178 @@ def test_pending_extraction_status_is_returned(
     assert response.json()["id"] == extraction.id
     assert response.json()["status"] == ACTION_ITEM_EXTRACTION_STATUS_PENDING
     assert response.json()["action_items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3 — Action Item Review (FR-14) Tests
+# ---------------------------------------------------------------------------
+
+
+def test_review_action_item_confirm(client: TestClient, db_session: Session):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"action": "confirm"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["id"] == item.id
+    assert data["review_status"] == "confirmed"
+    assert data["reviewed_by"] == ORGANIZER_ID
+    assert data["reviewed_at"] is not None
+    assert data["is_task_eligible"] is True
+
+    # Check persistence in database
+    db_session.expire_all()
+    persisted = db_session.get(MeetingActionItem, item.id)
+    assert persisted is not None
+    assert persisted.review_status == "confirmed"
+    assert persisted.reviewed_by == ORGANIZER_ID
+    assert persisted.reviewed_at is not None
+
+
+def test_review_action_item_reject(client: TestClient, db_session: Session):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"action": "reject"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["review_status"] == "rejected"
+    assert data["reviewed_by"] == ORGANIZER_ID
+    assert data["reviewed_at"] is not None
+    assert data["is_task_eligible"] is False
+
+    # Story 3.4 boundary safeguard: rejected item cannot become a task
+    from app.meeting.action_item_service import (
+        assert_action_item_eligible_for_task,
+        get_task_eligible_action_items,
+    )
+
+    db_session.expire_all()
+    persisted = db_session.get(MeetingActionItem, item.id)
+    assert persisted.review_status == "rejected"
+    with pytest.raises(ValueError, match="rejected and cannot be converted"):
+        assert_action_item_eligible_for_task(persisted)
+
+    eligible_items = get_task_eligible_action_items(db_session, meeting.id)
+    assert persisted not in eligible_items
+
+
+def test_review_action_item_edit_fields_preserves_source_metadata(
+    client: TestClient, db_session: Session
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    original_segment_index = item.source_segment_index
+    original_start_seconds = item.source_start_seconds
+    original_quote = item.source_quote
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={
+            "action": "edit",
+            "task_description": "Updated task description by organizer.",
+            "owner_name": "New Assignee",
+            "priority": "urgent",
+            "deadline_text": "by Monday",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["task_description"] == "Updated task description by organizer."
+    assert data["owner_name"] == "New Assignee"
+    assert data["priority"] == "urgent"
+    assert data["deadline_text"] == "by Monday"
+    assert data["reviewed_by"] == ORGANIZER_ID
+    assert data["reviewed_at"] is not None
+
+    # Preserves source information
+    assert data["source_segment_index"] == original_segment_index
+    assert data["source_start_seconds"] == original_start_seconds
+    assert data["source_quote"] == original_quote
+
+
+def test_review_action_item_unauthorized_organizer(
+    client: TestClient, db_session: Session
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id=unauthorized-user",
+        json={"action": "confirm"},
+    )
+
+    assert response.status_code == 403
+    assert "Only the meeting organizer" in response.json()["detail"]
+
+
+def test_review_action_item_not_found(client: TestClient, db_session: Session):
+    meeting, _ = _create_meeting_and_transcript(db_session)
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/nonexistent-item/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"action": "confirm"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_review_action_item_empty_task_description_rejected(
+    client: TestClient, db_session: Session
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+
+    response = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={"task_description": "   "},
+    )
+
+    assert response.status_code == 400
+    assert "cannot be empty" in response.json()["detail"]
+
+
+def test_confidence_threshold_requires_approval(
+    client: TestClient, db_session: Session, monkeypatch
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+    # Set item confidence below 0.85 default threshold
+    item.confidence = 0.72
+    item.review_status = "approval_required"
+    db_session.commit()
+
+    response = client.get(
+        f"/api/v1/meetings/{meeting.id}/action-items"
+        f"?organizer_id={ORGANIZER_ID}"
+    )
+
+    assert response.status_code == 200
+    items = response.json()["action_items"]
+    assert len(items) == 1
+    assert items[0]["review_status"] == "approval_required"
+    assert items[0]["requires_approval"] is True
+    assert items[0]["is_task_eligible"] is False
