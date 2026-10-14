@@ -190,6 +190,19 @@ def test_manager_reassigns_within_team_and_both_assignees_are_notified(
     assert {email[0] for email in sent_emails} == {rahul.email, ava.email}
     assert {n["kind"] for n in body["notifications"]} == {"reassigned_away", "reassigned_to"}
     assert all(n["status"] == "sent" for n in body["notifications"])
+    assignment_notification = (
+        db_session.query(TaskNotification)
+        .filter_by(task_id=task.id, recipient_employee_id=ava.id)
+        .one()
+    )
+    assert assignment_notification.kind == "reassigned_to"
+    assert assignment_notification.idempotency_key == (
+        f"assignment:{task.id}:2:{ava.id}"
+    )
+    assert assignment_notification.status == "sent"
+    assert f"/tasks?task_id={task.id}" in assignment_notification.body
+    assert f"/meetings/{task.meeting_id}/report?" in assignment_notification.body
+    assert body["task"]["assignment_email_status"] == "sent"
 
     entries = _audit(db_session, task)
     assert [(e.action, e.outcome) for e in entries] == [("reassign", "applied")]
@@ -505,3 +518,4 @@ def test_failed_notification_is_recorded_without_undoing_reassignment(
     db_session.expire_all()
     stored = db_session.query(TaskNotification).filter_by(task_id=task.id).all()
     assert {n.error for n in stored} == {"SMTP unavailable"}
+    assert db_session.get(Task, task.id).assignment_email_status == "failed"

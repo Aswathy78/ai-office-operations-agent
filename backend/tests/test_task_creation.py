@@ -5,6 +5,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -24,6 +25,7 @@ from app.meeting.models import (
     RECORDING_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_COMPLETED,
     Task,
+    TaskNotification,
 )
 
 ORGANIZER_ID = "task-creation-organizer"
@@ -141,12 +143,23 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     meeting, transcript, employee, item = _create_confirmable_action_item(db_session)
     sent_to: list[str] = []
 
-    def send_email(task: Task, assigned_employee: Employee, meeting_title: str) -> None:
-        assert task.title == "Send the agenda."
-        assert meeting_title == meeting.title
-        sent_to.append(assigned_employee.email)
+    def send_email(recipient: str, subject: str, body: str) -> None:
+        notification = db_session.query(TaskNotification).one()
+        assert notification.status == "pending"
+        assert db_session.query(Task).one().assignment_email_status == "pending"
+        assert recipient == employee.email
+        assert subject == "Task assigned: Send the agenda."
+        assert "Send the agenda." in body
+        assert item.deadline_at.isoformat() in body
+        assert "Priority: high" in body
+        assert f"http://localhost:5173/tasks?task_id={db_session.query(Task).one().id}" in body
+        assert (
+            f"http://localhost:5173/meetings/{meeting.id}/report?"
+            f"transcript_id={transcript.id}&segment=0"
+        ) in body
+        sent_to.append(recipient)
 
-    monkeypatch.setattr("app.task_service.send_assignment_email", send_email)
+    monkeypatch.setattr("app.task_service.send_email", send_email)
     review_url = (
         f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
         f"?organizer_id={ORGANIZER_ID}"
@@ -172,11 +185,19 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     assert task.status == "pending"
     assert task.assignment_email_status == "sent"
     assert sent_to == [employee.email]
+    notifications = db_session.query(TaskNotification).filter_by(task_id=task.id).all()
+    assert len(notifications) == 1
+    assert notifications[0].kind == "assignment"
+    assert notifications[0].idempotency_key == (
+        f"assignment:{task.id}:1:{employee.id}"
+    )
+    assert notifications[0].status == "sent"
 
     repeated_confirmation = client.patch(review_url, json={"action": "confirm"})
     assert repeated_confirmation.status_code == 200
     assert db_session.query(Task).count() == 1
     assert sent_to == [employee.email]
+    assert db_session.query(TaskNotification).filter_by(task_id=task.id).count() == 1
 
     extraction = db_session.query(MeetingActionItemExtraction).one()
     monkeypatch.setattr(
@@ -190,6 +211,7 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     assert rerun.status_code == 200
     assert db_session.query(Task).count() == 1
     assert sent_to == [employee.email]
+    assert db_session.query(TaskNotification).filter_by(task_id=task.id).count() == 1
 
     dashboard = client.get("/api/v1/tasks/dashboard")
     assert dashboard.status_code == 200
@@ -239,10 +261,7 @@ def test_assigned_employee_can_open_only_their_task_source_context(
         )
     )
     db_session.commit()
-    monkeypatch.setattr(
-        "app.task_service.send_assignment_email",
-        lambda *_args: None,
-    )
+    monkeypatch.setattr("app.task_service.send_email", lambda *_args: None)
 
     confirmation = client.patch(
         f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
@@ -303,17 +322,13 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
     meeting, _, employee, item = _create_confirmable_action_item(db_session)
     attempts = 0
 
-    def flaky_send_email(
-        _task: Task,
-        _assigned_employee: Employee,
-        _meeting_title: str,
-    ) -> None:
+    def flaky_send_email(_recipient: str, _subject: str, _body: str) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("SMTP unavailable")
 
-    monkeypatch.setattr("app.task_service.send_assignment_email", flaky_send_email)
+    monkeypatch.setattr("app.task_service.send_email", flaky_send_email)
     review_url = (
         f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
         f"?organizer_id={ORGANIZER_ID}"
@@ -324,6 +339,10 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
     task = db_session.query(Task).one()
     assert task.assignment_email_status == "failed"
     assert task.assignment_email_error == "SMTP unavailable"
+    notification = db_session.query(TaskNotification).filter_by(task_id=task.id).one()
+    notification_id = notification.id
+    assert notification.status == "failed"
+    assert notification.error == "SMTP unavailable"
 
     retried = client.post(
         f"/api/v1/tasks/{task.id}/assignment-email/retry"
@@ -332,6 +351,11 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
     assert retried.json()["assignment_email_status"] == "sent"
     assert retried.json()["assignee_id"] == employee.id
     assert attempts == 2
+    db_session.expire_all()
+    notification = db_session.query(TaskNotification).filter_by(task_id=task.id).one()
+    assert notification.id == notification_id
+    assert notification.status == "sent"
+    assert notification.error is None
 
 
 def test_extraction_rerun_creates_missing_confirmed_task_once(
@@ -346,9 +370,9 @@ def test_extraction_rerun_creates_missing_confirmed_task_once(
     extraction = db_session.query(MeetingActionItemExtraction).one()
     sent_to: list[str] = []
     monkeypatch.setattr(
-        "app.task_service.send_assignment_email",
-        lambda _task, assigned_employee, _meeting_title: sent_to.append(
-            assigned_employee.email
+        "app.task_service.send_email",
+        lambda recipient, _subject, _body: sent_to.append(
+            recipient
         ),
     )
     monkeypatch.setattr(
@@ -373,6 +397,7 @@ def test_extraction_rerun_creates_missing_confirmed_task_once(
     assert second_rerun.status_code == 200
     assert db_session.query(Task).count() == 1
     assert sent_to == [employee.email]
+    assert db_session.query(TaskNotification).filter_by(task_id=task.id).count() == 1
 
 
 def test_confirmation_requires_assignee_and_due_date_without_partial_task(
@@ -438,11 +463,15 @@ def test_assignment_email_uses_configured_smtp(
     monkeypatch.setenv("SMTP_USERNAME", "mailer")
     monkeypatch.setenv("SMTP_PASSWORD", "secret")
     monkeypatch.setenv("SMTP_USE_STARTTLS", "true")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "https://office.example.test")
     monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
 
     task = Task(
         id=str(uuid.uuid4()),
         title="Send the agenda",
+        meeting_id="meeting-id",
+        transcript_id="transcript-id",
+        source_segment_index=3,
         due_at=datetime.now(timezone.utc) + timedelta(days=1),
         priority="high",
     )
@@ -459,4 +488,56 @@ def test_assignment_email_uses_configured_smtp(
     assert len(sent_messages) == 1
     assert sent_messages[0]["To"] == employee.email
     assert sent_messages[0]["Subject"] == "Task assigned: Send the agenda"
-    assert "Quarterly Planning" in sent_messages[0].get_content()
+    content = sent_messages[0].get_content()
+    assert "Quarterly Planning" in content
+    assert "Send the agenda" in content
+    assert task.due_at.isoformat() in content
+    assert "Priority: high" in content
+    assert f"https://office.example.test/tasks?task_id={task.id}" in content
+    assert (
+        "https://office.example.test/meetings/meeting-id/report?"
+        "transcript_id=transcript-id&segment=3"
+    ) in content
+
+
+def test_assignment_notification_key_is_unique(
+    db_session: Session,
+):
+    _, _, employee, item = _create_confirmable_action_item(db_session)
+    item.review_status = "confirmed"
+    db_session.commit()
+    task = Task(
+        id=str(uuid.uuid4()),
+        title=item.task_description,
+        assignee_id=employee.id,
+        creator_id=ORGANIZER_ID,
+        source="meeting_action_item",
+        source_action_item_id=item.id,
+        idempotency_key=f"meeting-action-item:{item.id}",
+        meeting_id=item.extraction.meeting_id,
+        transcript_id=item.extraction.transcript_id,
+        source_segment_index=item.source_segment_index,
+        source_timestamp_seconds=item.source_start_seconds,
+        due_at=item.deadline_at,
+        priority=item.priority,
+        status="pending",
+    )
+    db_session.add(task)
+    db_session.flush()
+    idempotency_key = f"assignment:{task.id}:1:{employee.id}"
+    notification_values = dict(
+        task_id=task.id,
+        recipient_employee_id=employee.id,
+        kind="assignment",
+        subject="Assigned",
+        body="Assigned",
+        idempotency_key=idempotency_key,
+        status="pending",
+    )
+    db_session.add(TaskNotification(id=str(uuid.uuid4()), **notification_values))
+    db_session.commit()
+
+    db_session.add(TaskNotification(id=str(uuid.uuid4()), **notification_values))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

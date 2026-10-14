@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { CalendarDays, CheckSquare, RefreshCw } from 'lucide-react'
 import { getActiveEmployees } from '../api/meetings'
 import {
@@ -29,6 +29,7 @@ function formatSourceTimestamp(seconds: number): string {
 }
 
 export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
+  const [searchParams] = useSearchParams()
   const { user } = useAuth()
   const [tasks, setTasks] = useState<TaskRecord[]>([])
   const [loading, setLoading] = useState(true)
@@ -36,8 +37,10 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
   const [refreshKey, setRefreshKey] = useState(0)
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null)
   const [managingTaskId, setManagingTaskId] = useState<string | null>(null)
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [employees, setEmployees] = useState<Employee[]>([])
   const taskRequestRef = useRef<Promise<TaskRecord[]> | null>(null)
+  const selectedTaskRowRef = useRef<HTMLTableRowElement | null>(null)
 
   const canManageTasks = view === 'dashboard' && user?.role !== 'employee'
   const actor: TaskActor | null = user
@@ -116,6 +119,26 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
       if (pollTimeout !== undefined) window.clearTimeout(pollTimeout)
     }
   }, [refreshKey, user, view])
+
+  useEffect(() => {
+    const requestedTaskId = searchParams.get('task_id')
+    if (!requestedTaskId) {
+      setSelectedTaskId(null)
+      return
+    }
+    if (loading) return
+    setSelectedTaskId(
+      tasks.some((task) => task.id === requestedTaskId) ? requestedTaskId : null,
+    )
+  }, [loading, searchParams, tasks])
+
+  useEffect(() => {
+    if (!selectedTaskId) return
+    const row = selectedTaskRowRef.current
+    if (!row) return
+    row.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+    row.focus()
+  }, [selectedTaskId])
 
   async function handleRetryEmail(taskId: string) {
     setRetryingTaskId(taskId)
@@ -210,7 +233,12 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
             <tbody>
               {tasks.map((task) => (
                 <Fragment key={task.id}>
-                <tr>
+                <tr
+                  ref={task.id === selectedTaskId ? selectedTaskRowRef : null}
+                  className={task.id === selectedTaskId ? 'task-row-selected' : undefined}
+                  aria-selected={task.id === selectedTaskId}
+                  tabIndex={task.id === selectedTaskId ? -1 : undefined}
+                >
                   <td>
                     <strong>{task.title}</strong>
                   </td>

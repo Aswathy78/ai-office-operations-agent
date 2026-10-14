@@ -4,6 +4,7 @@ from email.message import EmailMessage
 import logging
 import os
 import smtplib
+from urllib.parse import quote, urlencode
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +17,7 @@ from app.meeting.models import (
     MeetingActionItemExtraction,
     Meeting,
     Task,
+    TaskNotification,
     TASK_STATUS_PENDING,
 )
 
@@ -55,6 +57,7 @@ def prepare_task_from_confirmed_action_item(
         task.source_segment_index = item.source_segment_index
         task.source_timestamp_seconds = item.source_start_seconds
         if assignee_changed:
+            task.assignment_version = (task.assignment_version or 1) + 1
             task.assignment_email_status = "pending"
             task.assignment_email_error = None
         return task, assignee_changed
@@ -103,7 +106,7 @@ def synchronize_confirmed_action_item_tasks(
         if item.review_status != ACTION_ITEM_REVIEW_STATUS_CONFIRMED:
             continue
         try:
-            task, notify_assignee = prepare_task_from_confirmed_action_item(
+            task, _ = prepare_task_from_confirmed_action_item(
                 db,
                 item,
                 item.reviewed_by or fallback_creator_id,
@@ -117,8 +120,7 @@ def synchronize_confirmed_action_item_tasks(
             )
             continue
         has_changes = True
-        if notify_assignee:
-            tasks_to_notify.append(task.id)
+        tasks_to_notify.append(task.id)
 
     if has_changes:
         db.commit()
@@ -161,37 +163,147 @@ def send_email(recipient: str, subject: str, body: str) -> None:
         smtp.send_message(message)
 
 
+def assignment_notification_key(task: Task) -> str:
+    return (
+        f"assignment:{task.id}:{task.assignment_version or 1}:"
+        f"{task.assignee_id}"
+    )
+
+
+def render_assignment_email(
+    task: Task,
+    employee: Employee,
+    meeting_title: str,
+    assignment_context: str | None = None,
+) -> tuple[str, str]:
+    frontend_base_url = os.getenv(
+        "FRONTEND_BASE_URL",
+        "http://localhost:5173",
+    ).strip().rstrip("/")
+    if not frontend_base_url:
+        raise ValueError("FRONTEND_BASE_URL must not be empty.")
+    task_url = (
+        f"{frontend_base_url}/tasks?"
+        f"{urlencode({'task_id': task.id})}"
+    )
+    meeting_query = urlencode(
+        {
+            "transcript_id": task.transcript_id,
+            "segment": task.source_segment_index,
+        }
+    )
+    meeting_url = (
+        f"{frontend_base_url}/meetings/{quote(task.meeting_id, safe='')}/report"
+        f"?{meeting_query}"
+    )
+    subject = f"Task assigned: {task.title}"
+    context = f"{assignment_context.strip()}\n" if assignment_context else ""
+    body = (
+        f"Hello {employee.name},\n\n"
+        f"{context}"
+        f"You have been assigned: {task.title}\n"
+        f"Due: {task.due_at.isoformat()}\n"
+        f"Priority: {task.priority}\n"
+        f"Task: {task_url}\n"
+        f"Source meeting: {meeting_title}\n"
+        f"Meeting link: {meeting_url}\n"
+    )
+    return subject, body
+
+
 def send_assignment_email(
     task: Task,
     employee: Employee,
     meeting_title: str,
 ) -> None:
-    send_email(
-        employee.email,
-        f"Task assigned: {task.title}",
-        f"Hello {employee.name},\n\n"
-        f"You have been assigned: {task.title}\n"
-        f"Due: {task.due_at.isoformat()}\n"
-        f"Priority: {task.priority}\n"
-        f"Source meeting: {meeting_title}\n",
-    )
+    """Send an assignment message rendered from the reusable email template."""
+    subject, body = render_assignment_email(task, employee, meeting_title)
+    send_email(employee.email, subject, body)
 
 
-def attempt_assignment_email(db: Session, task_id: str) -> Task:
+def attempt_assignment_email(
+    db: Session,
+    task_id: str,
+    *,
+    retry_failed: bool = False,
+) -> Task:
     task = db.get(Task, task_id)
     if task is None:
         raise ValueError("Task not found.")
-    if task.assignment_email_status == "sent":
-        return task
-
     employee = db.get(Employee, task.assignee_id)
     meeting = db.get(Meeting, task.meeting_id)
     if employee is None or meeting is None:
         raise ValueError("Task assignee or source meeting no longer exists.")
 
+    idempotency_key = assignment_notification_key(task)
+    notification = (
+        db.query(TaskNotification)
+        .filter(TaskNotification.idempotency_key == idempotency_key)
+        .one_or_none()
+    )
+    notification_created = notification is None
+    if notification_created:
+        subject, body = render_assignment_email(task, employee, meeting.title)
+        notification = TaskNotification(
+            id=str(uuid.uuid4()),
+            task_id=task.id,
+            recipient_employee_id=employee.id,
+            kind="assignment",
+            subject=subject,
+            body=body,
+            idempotency_key=idempotency_key,
+            status=task.assignment_email_status,
+            error=task.assignment_email_error,
+        )
+        db.add(notification)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            task = db.get(Task, task_id)
+            if task is None:
+                raise ValueError("Task not found.") from None
+            idempotency_key = assignment_notification_key(task)
+            notification = (
+                db.query(TaskNotification)
+                .filter(TaskNotification.idempotency_key == idempotency_key)
+                .one_or_none()
+            )
+            if notification is None:
+                raise
+            notification_created = False
+    if notification is None:
+        raise RuntimeError("Assignment notification could not be persisted.")
+    if notification.status == "sent":
+        task.assignment_email_status = "sent"
+        task.assignment_email_error = None
+        db.commit()
+        db.refresh(task)
+        return task
+
+    if not notification_created and not retry_failed:
+        task.assignment_email_status = notification.status
+        task.assignment_email_error = notification.error
+        db.commit()
+        db.refresh(task)
+        return task
+    if notification.status == "failed" and not retry_failed:
+        task.assignment_email_status = "failed"
+        task.assignment_email_error = notification.error
+        db.commit()
+        db.refresh(task)
+        return task
+
+    task.assignment_email_status = "pending"
+    task.assignment_email_error = None
+    db.commit()
+    db.refresh(notification)
+
     try:
-        send_assignment_email(task, employee, meeting.title)
+        send_email(employee.email, notification.subject, notification.body)
     except (OSError, smtplib.SMTPException, ValueError) as exc:
+        notification.status = "failed"
+        notification.error = str(exc)
         task.assignment_email_status = "failed"
         task.assignment_email_error = str(exc)
         logger.exception(
@@ -200,6 +312,8 @@ def attempt_assignment_email(db: Session, task_id: str) -> Task:
             task.assignee_id,
         )
     else:
+        notification.status = "sent"
+        notification.error = None
         task.assignment_email_status = "sent"
         task.assignment_email_error = None
     db.commit()

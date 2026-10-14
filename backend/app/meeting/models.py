@@ -739,6 +739,12 @@ class Task(Base):
         default="pending",
     )
     assignment_email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    assignment_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
     # Incremented on every due-date change so calendar clients replace the event.
     calendar_sequence: Mapped[int] = mapped_column(
         Integer,
@@ -850,6 +856,11 @@ class TaskNotification(Base):
             name="ck_task_notifications_status",
         ),
         Index("ix_task_notifications_task_created_at", "task_id", "created_at"),
+        Index(
+            "uq_task_notifications_idempotency_key",
+            "idempotency_key",
+            unique=True,
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -866,6 +877,7 @@ class TaskNotification(Base):
     kind: Mapped[str] = mapped_column(String(40), nullable=False)
     subject: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

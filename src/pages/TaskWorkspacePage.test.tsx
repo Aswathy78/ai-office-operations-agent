@@ -29,6 +29,45 @@ afterEach(() => {
 })
 
 describe('TaskWorkspacePage employee identity', () => {
+  it('selects and focuses the task requested by the task deep link', async () => {
+    authValue.user = demoUsers.employee
+    vi.mocked(getMyTasks).mockResolvedValue([
+      {
+        id: 'task-1',
+        title: 'Prepare the project status report',
+        assignee_id: 'rahul-employee-id',
+        assignee_name: 'Rahul',
+        creator_id: 'manager-id',
+        source: 'meeting_action_item',
+        source_action_item_id: 'action-item-1',
+        meeting_id: 'meeting-1',
+        meeting_title: 'Project status',
+        transcript_id: 'transcript-1',
+        source_segment_index: 0,
+        source_timestamp_seconds: 11,
+        due_at: '2026-10-15T00:00:00Z',
+        priority: 'medium',
+        status: 'pending',
+        assignment_email_status: 'pending',
+        assignment_email_error: null,
+        created_at: '2026-10-13T00:00:00Z',
+      },
+    ])
+
+    render(
+      <MemoryRouter initialEntries={['/tasks?task_id=task-1']}>
+        <TaskWorkspacePage view="mine" />
+      </MemoryRouter>,
+    )
+
+    const selectedRow = await screen.findByRole('row', {
+      name: /Prepare the project status report/,
+    })
+    await waitFor(() => expect(selectedRow).toHaveAttribute('aria-selected', 'true'))
+    expect(selectedRow).toHaveClass('task-row-selected')
+    expect(selectedRow).toHaveFocus()
+  })
+
   it('loads tasks for the employee directory email of the signed-in demo employee', async () => {
     authValue.user = demoUsers.employee
     vi.mocked(getMyTasks).mockResolvedValue([

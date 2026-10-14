@@ -35,7 +35,11 @@ from app.meeting.models import (
     TASK_REASSIGNMENT_STATUS_PENDING,
     TASK_REASSIGNMENT_STATUS_REJECTED,
 )
-from app.task_service import send_email
+from app.task_service import (
+    assignment_notification_key,
+    render_assignment_email,
+    send_email,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,6 +209,7 @@ def _queue_notification(
     kind: str,
     subject: str,
     body: str,
+    idempotency_key: str | None = None,
 ) -> TaskNotification:
     notification = TaskNotification(
         id=str(uuid.uuid4()),
@@ -213,6 +218,7 @@ def _queue_notification(
         kind=kind,
         subject=subject,
         body=body,
+        idempotency_key=idempotency_key,
         status="pending",
         created_at=_now(),
     )
@@ -242,6 +248,15 @@ def _deliver_notifications(
         else:
             notification.status = "sent"
             notification.error = None
+        if notification.idempotency_key is not None:
+            task = db.get(Task, notification.task_id)
+            if (
+                task is not None
+                and task.assignee_id == notification.recipient_employee_id
+                and assignment_notification_key(task) == notification.idempotency_key
+            ):
+                task.assignment_email_status = notification.status
+                task.assignment_email_error = notification.error
         db.commit()
     return notifications
 
@@ -255,13 +270,24 @@ def _apply_reassignment(
     detail: str,
 ) -> list[TaskNotification]:
     task.assignee_id = new_assignee.id
+    task.assignment_version = (task.assignment_version or 1) + 1
+    task.assignment_email_status = "pending"
+    task.assignment_email_error = None
     task.updated_at = _now()
     task.calendar_sequence = (task.calendar_sequence or 0) + 1
     _audit(db, task, actor, ACTION_REASSIGN, TASK_AUDIT_OUTCOME_APPLIED, detail)
 
     meeting = db.get(Meeting, task.meeting_id)
     source = f"Source meeting: {meeting.title}\n" if meeting else ""
-    due = _format_due(task.due_at)
+    assigned_subject, assigned_body = render_assignment_email(
+        task,
+        new_assignee,
+        meeting.title if meeting else "",
+        assignment_context=(
+            f'The task "{task.title}" was reassigned to you '
+            f"from {old_assignee.name}."
+        ),
+    )
     return [
         _queue_notification(
             db,
@@ -279,13 +305,9 @@ def _apply_reassignment(
             task,
             new_assignee,
             NOTIFICATION_REASSIGNED_TO,
-            f"Task assigned to you: {task.title}",
-            f"Hello {new_assignee.name},\n\n"
-            f"The task \"{task.title}\" has been reassigned to you "
-            f"from {old_assignee.name}.\n"
-            f"Due: {due}\n"
-            f"Priority: {task.priority}\n"
-            f"{source}",
+            assigned_subject,
+            assigned_body,
+            assignment_notification_key(task),
         ),
     ]
 

@@ -232,7 +232,7 @@ def retry_assignment_email(task_id: str, db: Session = Depends(get_db)):
             detail="Task not found",
         )
     try:
-        attempt_assignment_email(db, task_id)
+        attempt_assignment_email(db, task_id, retry_failed=True)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

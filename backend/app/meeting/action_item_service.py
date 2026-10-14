@@ -1021,7 +1021,7 @@ def review_action_item(
     task_to_notify = None
     if item.review_status == ACTION_ITEM_REVIEW_STATUS_CONFIRMED:
         try:
-            task, notify_assignee = prepare_task_from_confirmed_action_item(
+            task, _ = prepare_task_from_confirmed_action_item(
                 db,
                 item,
                 reviewer_id,
@@ -1029,8 +1029,7 @@ def review_action_item(
         except ValueError:
             db.rollback()
             raise
-        if notify_assignee:
-            task_to_notify = task
+        task_to_notify = task
 
     db.commit()
     if task_to_notify is not None:

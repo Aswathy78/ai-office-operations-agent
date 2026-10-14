@@ -935,10 +935,7 @@ def test_review_action_item_confirm(
     item.deadline_at = datetime.now(timezone.utc) + timedelta(days=3)
     db_session.add(employee)
     db_session.commit()
-    monkeypatch.setattr(
-        "app.task_service.send_assignment_email",
-        lambda task, assigned_employee, meeting_title: None,
-    )
+    monkeypatch.setattr("app.task_service.send_email", lambda *_args: None)
 
     response = client.patch(
         f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"

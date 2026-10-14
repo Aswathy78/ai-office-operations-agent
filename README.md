@@ -1244,9 +1244,17 @@ prevents duplicate tasks when the same item is confirmed again.
 Assignment email is sent using SMTP configuration in `backend/.env`:
 `SMTP_HOST`, `SMTP_PORT`, and `SMTP_FROM_EMAIL` are required;
 `SMTP_USERNAME` and `SMTP_PASSWORD` are optional and must be configured
-together. `SMTP_USE_STARTTLS` defaults to `true`. Delivery failures are
-shown on the task dashboard and can be retried through
-`POST /api/v1/tasks/{task_id}/assignment-email/retry`.
+together. `SMTP_USE_STARTTLS` defaults to `true`. Set `FRONTEND_BASE_URL`
+to the deployed UI origin; it defaults to `http://localhost:5173`. Assignment
+messages include links to the specific task (`/tasks?task_id=...`) and its
+meeting report. Their `TaskNotification` record stores the rendered message,
+delivery status and error under a unique assignment idempotency key. Task
+email status fields remain available for compatibility and mirror the current
+assignment notification. Delivery failures are shown on the task dashboard;
+retrying through `POST /api/v1/tasks/{task_id}/assignment-email/retry` reuses
+that notification record. The database constraint prevents duplicate
+application-level notification records for an assignment; SMTP delivery
+itself does not promise mathematically exactly-once delivery.
 
 Task deadlines are available as an employee-specific iCalendar feed at
 `GET /api/v1/tasks/calendar.ics?assignee_email={employee_email}`. The My Tasks,

@@ -19,3 +19,4 @@ backend/storage/
 # SQLite runtime files
 *.db-shm
 *.db-wal
+*.db.backup*

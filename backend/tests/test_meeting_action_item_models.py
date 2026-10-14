@@ -404,6 +404,7 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
             "priority",
             "status",
             "assignment_email_status",
+            "assignment_version",
         }.issubset(
             {
                 column["name"]
@@ -417,6 +418,15 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
         assert any(
             unique["name"] == "uq_tasks_source_action_item_id"
             for unique in inspector.get_unique_constraints("tasks")
+        )
+        assert "idempotency_key" in {
+            column["name"]
+            for column in inspector.get_columns("task_notifications")
+        }
+        assert any(
+            index["name"] == "uq_task_notifications_idempotency_key"
+            and index["unique"]
+            for index in inspector.get_indexes("task_notifications")
         )
     finally:
         engine.dispose()
