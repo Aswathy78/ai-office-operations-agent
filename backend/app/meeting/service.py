@@ -1432,5 +1432,6 @@ def get_meeting_transcript_corrections(
         query = query.filter(MeetingTranscriptCorrection.transcript_id == transcript_id)
     return query.order_by(
         MeetingTranscriptCorrection.created_at,
+        MeetingTranscriptCorrection.segment_index,
         MeetingTranscriptCorrection.id,
     ).all()

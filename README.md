@@ -607,9 +607,10 @@ $env:APP_ENV = "development"
 python -m app.db.seed_employees
 ```
 
-The seed is idempotent and includes the fictional test employee Rahul at
-`rahul@example.test`. The `.test` address is reserved for testing and is not a
-deliverable email address.
+The seed is idempotent and includes the test employee Rahul at
+`rahulexample.test@gmail.com`. This is a deliverable address, so confirming an
+action item assigned to Rahul sends a real assignment email when SMTP is
+configured.
 
 Run the transcription worker in a second terminal from the same `backend`
 directory:
@@ -623,6 +624,16 @@ The worker must be running to transcribe recordings; action-item retrieval
 requires a completed transcript. The worker uses the configured faster-whisper
 CUDA runtime, so initialization or transcription errors are logged and recorded
 as a failed transcript rather than treated as completed.
+
+On a machine without an NVIDIA GPU, run the worker on CPU instead:
+
+``` powershell
+$env:WHISPER_DEVICE = "cpu"
+python -m app.meeting.transcription_worker
+```
+
+`WHISPER_COMPUTE_TYPE` optionally overrides the compute type (default
+`float16` on CUDA, `int8` on CPU).
 
 ------------------------------------------------------------------------
 
@@ -2504,6 +2515,67 @@ name and matching result remain available after confirmation.
 Story 3.1 does not itself create tasks. Story 3.4 creates a task only
 after the action item has a confirmed owner, a resolved due date, and
 organizer review confirmation.
+
+
+# 🔁 Story 3.6 — Task Reassignment & Due-Date Changes (FR-17)
+
+Managers can rebalance work when plans change: reassign a task or move its
+due date from **Dashboard → Manage**.
+
+### Rules
+
+| Who | Reassign within own team | Reassign to another team | Change due date | Approve / reject requests |
+|---|---|---|---|---|
+| Employee | Denied | Denied | Denied | Denied |
+| Manager | Applied immediately | Sent for approval | Own team's tasks only | Denied |
+| HR / Operations, Admin | Applied immediately | Applied immediately | Any task | Allowed (**Approvals** page) |
+
+- A manager can only act on tasks whose current assignee is in the
+  manager's team.
+- Every attempt is written to the task audit log, including denied
+  attempts, which return HTTP 403 with an explanation.
+- On reassignment, both the previous and new assignee are e-mailed.
+- On a due-date change, the assignee is e-mailed and the task's calendar
+  entry is updated (`SEQUENCE` / `LAST-MODIFIED` in `calendar.ics`, so
+  calendar clients replace the event).
+- E-mail failures are recorded per notification and never undo the change.
+
+Employee teams come from `employees.team`; the development seed assigns
+Engineering, Finance and Operations teams. The acting user's ID, role and
+team are sent with each request, following the app's existing demo
+authentication.
+
+### API
+
+| Method | Route | Purpose |
+|---|---|---|
+| `PATCH` | `/api/v1/tasks/{task_id}/assignee` | Reassign (200 applied, 202 pending approval) |
+| `PATCH` | `/api/v1/tasks/{task_id}/due-date` | Change due date |
+| `GET` | `/api/v1/tasks/reassignment-requests?status=pending` | List approval requests |
+| `POST` | `/api/v1/tasks/reassignment-requests/{id}/decision` | Approve or reject |
+| `GET` | `/api/v1/tasks/{task_id}/audit` | Task audit log |
+| `GET` | `/api/v1/tasks/{task_id}/notifications` | Notification delivery history |
+
+Change requests take `actor_id`, `actor_role` and `actor_team` query
+parameters.
+
+### Database
+
+Migration `20261014_01` adds `employees.team`, `tasks.calendar_sequence`,
+`tasks.updated_at`, and the `task_reassignment_requests`,
+`task_audit_logs` and `task_notifications` tables. After upgrading, re-run
+the development seed to assign teams to existing employees:
+
+``` powershell
+cd backend
+alembic upgrade head
+$env:APP_ENV = "development"
+python -m app.db.seed_employees
+```
+
+Tests: `backend/tests/test_task_reassignment.py`,
+`src/components/tasks/TaskManagePanel.test.tsx`,
+`src/pages/ApprovalsPage.test.tsx`.
 
 
 # 📌 Current Project Status

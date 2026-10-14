@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+import re
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -25,16 +26,34 @@ class EmployeeMatchResult:
     candidate_names: list[str] = field(default_factory=list)
 
 
+_HONORIFICS = {"mr", "mrs", "ms", "miss", "mx", "dr", "sir", "madam", "prof"}
+
+
 def _normalize_name(value: str | None) -> str:
     if value is None:
         return ""
-    return " ".join(value.strip().split()).casefold()
+    tokens = re.sub(r"[^\w\s'-]", " ", value).casefold().split()
+    while len(tokens) > 1 and tokens[0] in _HONORIFICS:
+        tokens = tokens[1:]
+    return " ".join(tokens)
 
 
 def _similarity(left: str, right: str) -> float:
     if not left or not right:
         return 0.0
     return SequenceMatcher(None, left, right).ratio()
+
+
+def _name_score(owner: str, employee_name: str) -> float:
+    """Score a spoken owner name against an employee's full name.
+
+    A single spoken word (e.g. "Priya") is also compared with the employee's
+    first name, since people are usually addressed by first name in meetings.
+    """
+    score = _similarity(owner, employee_name)
+    if owner and " " not in owner and employee_name:
+        score = max(score, _similarity(owner, employee_name.split()[0]))
+    return score
 
 
 def match_employee_name(
@@ -68,7 +87,7 @@ def match_employee_name(
 
     ranked = []
     for employee in employees:
-        score = _similarity(normalized_owner, _normalize_name(employee.name))
+        score = _name_score(normalized_owner, _normalize_name(employee.name))
         ranked.append({"employee": employee, "score": score})
 
     ranked.sort(key=lambda item: item["score"], reverse=True)

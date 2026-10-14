@@ -264,6 +264,7 @@ export interface Employee {
   id: string
   name: string
   email: string
+  team?: string | null
 }
 
 export type EmployeeMatchStatus =

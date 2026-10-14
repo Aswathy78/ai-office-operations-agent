@@ -61,7 +61,7 @@ describe('TaskWorkspacePage employee identity', () => {
     )
 
     await waitFor(() => {
-      expect(getMyTasks).toHaveBeenCalledWith('rahul@example.test')
+      expect(getMyTasks).toHaveBeenCalledWith('rahulexample.test@gmail.com')
     })
     expect(
       await screen.findByText('prepare the project status report'),

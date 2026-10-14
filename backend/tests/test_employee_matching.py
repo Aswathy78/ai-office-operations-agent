@@ -162,6 +162,44 @@ def test_inactive_employees_are_ignored(db_session: Session):
     assert employee.id not in result.candidate_employee_ids
 
 
+def test_honorific_and_punctuation_are_ignored(db_session: Session):
+    employee = _create_employee(db_session, name="Priya Sharma", email="priya.sharma@northstar.example")
+
+    result = match_employee_name(db_session, "Ms. Priya Sharma.")
+
+    assert result.status == "unique_match"
+    assert result.employee_id == employee.id
+
+
+def test_first_name_alone_matches_unique_employee(db_session: Session):
+    employee = _create_employee(db_session, name="Marcus Chen", email="marcus.chen@northstar.example")
+    _create_employee(db_session, name="Daniel Brooks", email="daniel.brooks@northstar.example")
+
+    result = match_employee_name(db_session, "Mr. Marcus")
+
+    assert result.status == "unique_match"
+    assert result.employee_id == employee.id
+
+
+def test_shared_first_name_is_ambiguous(db_session: Session):
+    _create_employee(db_session, name="Ava Patel", email="ava.patel@northstar.example")
+    _create_employee(db_session, name="Ava Patil", email="ava.patil@northstar.example")
+
+    result = match_employee_name(db_session, "Ava")
+
+    assert result.status == "ambiguous_match"
+    assert result.employee_id is None
+
+
+def test_misheard_first_name_is_not_guessed(db_session: Session):
+    _create_employee(db_session, name="Rahul", email="rahul@northstar.example")
+
+    result = match_employee_name(db_session, "Mr. Dahul")
+
+    assert result.status == "no_match"
+    assert result.employee_id is None
+
+
 def test_missing_owner_names_are_distinct_from_no_match(db_session: Session):
     result_none = match_employee_name(db_session, None)
     result_blank = match_employee_name(db_session, "   ")

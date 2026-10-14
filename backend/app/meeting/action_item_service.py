@@ -255,13 +255,25 @@ def refresh_missing_employee_matches(
     db: Session,
     extraction: MeetingActionItemExtraction,
 ) -> MeetingActionItemExtraction:
-    """Backfill match metadata on completed extractions created before matching."""
+    """Backfill match metadata on completed extractions created before matching.
+
+    Unconfirmed "no_match" items are re-matched too, so employees added to the
+    directory after extraction become available as proposed owners.
+    """
     updated = False
     for item in extraction.items:
         if item.employee_match_status is not None:
-            continue
-
-        match_result = match_employee_name(db, item.owner_name)
+            if (
+                item.employee_match_status != "no_match"
+                or item.confirmed_employee_id is not None
+                or item.ownership_status == MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED
+            ):
+                continue
+            match_result = match_employee_name(db, item.owner_name)
+            if match_result.status == "no_match":
+                continue
+        else:
+            match_result = match_employee_name(db, item.owner_name)
         item.employee_match_status = match_result.status
         item.proposed_employee_id = match_result.employee_id
         if item.ownership_status != MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED:
@@ -423,6 +435,23 @@ def _candidate_source_text(
     return None
 
 
+def _quote_sentence_context(quote: str, evidence_text: str) -> str:
+    """Return the sentence(s) of the evidence that contain the quote.
+
+    The model is asked for the shortest quote, which can omit the words that
+    make it an assignment (e.g. "...is assigned to Rahul"), so intent is
+    checked against the whole spoken sentence rather than the quote alone.
+    """
+    normalized_quote = _normalize_quote(quote)
+    sentences = re.split(r"(?<=[.!?])\s+", evidence_text.strip())
+    for start in range(len(sentences)):
+        for end in range(start + 1, len(sentences) + 1):
+            context = " ".join(sentences[start:end])
+            if f" {normalized_quote} " in f" {_normalize_quote(context)} ":
+                return context
+    return quote
+
+
 def _validate_candidates(
     candidates: ActionItemCandidates,
     segments: list[TranscriptSegment],
@@ -467,7 +496,9 @@ def _validate_candidates(
                 "An action item must include a task description."
             )
 
-        if not _has_actionable_intent(quote):
+        if not _has_actionable_intent(quote) and not _has_actionable_intent(
+            _quote_sentence_context(quote, evidence_text)
+        ):
             continue
         quote_timestamps = _find_quote_timestamps(quote, segment)
 
@@ -915,6 +946,8 @@ def review_action_item(
     )
     if item is None:
         raise ValueError("Action item not found for this meeting.")
+    if item.review_status == ACTION_ITEM_REVIEW_STATUS_REJECTED:
+        raise ValueError("Rejected action items cannot be changed.")
 
     now = datetime.now(timezone.utc)
 

@@ -12,7 +12,7 @@
  * the existing MeetingRoomPage full-screen meeting experience.
  */
 import { useEffect, useState } from 'react'
-import { Navigate, useNavigate, useParams } from 'react-router-dom'
+import { Navigate, useParams } from 'react-router-dom'
 import { getMeeting, MeetingApiError } from '../api/meetings'
 import { useAuth } from '../contexts/AuthContext'
 import { GuestJoinPage } from './GuestJoinPage'
@@ -28,12 +28,7 @@ type LoadState =
 export function MeetingEntryPage() {
   const { meetingId = '' } = useParams()
   const { user, isAuthenticated } = useAuth()
-  const navigate = useNavigate()
   const [loadState, setLoadState] = useState<LoadState>({ kind: 'loading' })
-
-  if (meetingId === 'create') {
-    return <Navigate to="/meetings/create" replace />
-  }
 
   useEffect(() => {
     if (!meetingId || meetingId === 'create') return
@@ -55,6 +50,10 @@ export function MeetingEntryPage() {
       })
     return () => { active = false }
   }, [meetingId])
+
+  if (meetingId === 'create') {
+    return <Navigate to="/meetings/create" replace />
+  }
 
   if (loadState.kind === 'loading') {
     return (
@@ -85,14 +84,9 @@ export function MeetingEntryPage() {
     )
   }
 
-  const meeting = loadState.meeting
-
-  // Authenticated users enter the meeting room directly
+  // Authenticated users enter the meeting room directly once the meeting is confirmed valid
   if (isAuthenticated && user) {
-    // Navigate immediately to the authenticated meeting room
-    // (This effect is triggered once the meeting is confirmed valid)
-    navigate(`/app/meetings/${encodeURIComponent(meetingId)}`, { replace: true })
-    return null
+    return <Navigate to={`/app/meetings/${encodeURIComponent(meetingId)}`} replace />
   }
 
   // Unauthenticated / external → show guest join flow (existing GuestJoinPage component)

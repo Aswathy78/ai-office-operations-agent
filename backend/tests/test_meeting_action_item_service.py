@@ -672,6 +672,56 @@ def test_candidate_from_general_discussion_is_discarded(
     assert extraction.items == []
 
 
+def test_short_quote_keeps_assignment_stated_elsewhere_in_its_sentence(
+    db_session: Session,
+    monkeypatch,
+):
+    transcript = _create_completed_transcript(
+        db_session,
+        [
+            {
+                "start": 0.0,
+                "end": 4.0,
+                "text": "Good morning. Today's meeting is about testing.",
+                "speaker": "Maya",
+                "flagged_for_correction": False,
+            },
+            {
+                "start": 4.0,
+                "end": 9.0,
+                "text": (
+                    "The task is to prepare the report of this meeting "
+                    "and is assigned to Rahul."
+                ),
+                "speaker": "Maya",
+                "flagged_for_correction": False,
+            },
+        ],
+    )
+    _install_groq(
+        monkeypatch,
+        _response(
+            [
+                _candidate(
+                    source_segment_index=1,
+                    source_quote="prepare the report of this meeting",
+                    task_description="Prepare the report of this meeting.",
+                    owner_name="Rahul",
+                    deadline_text=None,
+                )
+            ]
+        ),
+    )
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    assert extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED
+    assert [item.task_description for item in extraction.items] == [
+        "Prepare the report of this meeting."
+    ]
+    assert extraction.items[0].owner_name == "Rahul"
+
+
 def test_candidate_from_hypothetical_commitment_is_discarded(
     db_session: Session,
     monkeypatch,

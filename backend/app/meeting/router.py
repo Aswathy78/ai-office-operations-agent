@@ -175,7 +175,12 @@ def get_active_employees(db: Session = Depends(get_db)):
         .all()
     )
     return [
-        EmployeeResponse(id=employee.id, name=employee.name, email=employee.email)
+        EmployeeResponse(
+            id=employee.id,
+            name=employee.name,
+            email=employee.email,
+            team=employee.team,
+        )
         for employee in employees
     ]
 
@@ -1327,6 +1332,12 @@ def confirm_action_item_owner(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Employee is inactive",
+        )
+
+    if action_item.review_status == ACTION_ITEM_REVIEW_STATUS_REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Rejected action items cannot be changed",
         )
 
     action_item.ownership_status = MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED

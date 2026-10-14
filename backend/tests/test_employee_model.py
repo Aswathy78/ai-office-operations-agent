@@ -75,9 +75,9 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
         "noah.martin@northstar.example",
         "chloe.nguyen@northstar.example",
         "ethan.walker@northstar.example",
-        "rahul@example.test",
+        "rahulexample.test@gmail.com",
     }
-    rahul = db_session.query(Employee).filter_by(email="rahul@example.test").one()
+    rahul = db_session.query(Employee).filter_by(email="rahulexample.test@gmail.com").one()
     assert rahul.name == "Rahul"
     assert rahul.is_active is True
 

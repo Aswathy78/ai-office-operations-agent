@@ -1,14 +1,43 @@
-"""Task list, manager dashboard, assignment email, and calendar feed APIs."""
+"""Task list, manager dashboard, assignment email, calendar feed, and
+reassignment / due-date change APIs."""
 
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.meeting.models import Employee, Meeting, Task
-from app.meeting.schemas import TaskResponse
+from app.meeting.models import (
+    Employee,
+    Meeting,
+    Task,
+    TaskAuditLog,
+    TaskNotification,
+    TaskReassignmentRequest,
+    TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
+    TASK_REASSIGNMENT_STATUS_PENDING,
+)
+from app.meeting.schemas import (
+    TaskActorRole,
+    TaskAuditLogResponse,
+    TaskChangeResponse,
+    TaskDueDateUpdateRequest,
+    TaskNotificationResponse,
+    TaskReassignRequest,
+    TaskReassignmentDecisionRequest,
+    TaskReassignmentRequestResponse,
+    TaskResponse,
+)
+from app.task_reassignment_service import (
+    TaskActor,
+    TaskChangeConflict,
+    TaskChangeDenied,
+    TaskChangeResult,
+    change_task_due_date,
+    decide_reassignment_request,
+    reassign_task,
+)
 from app.task_service import attempt_assignment_email
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
@@ -23,7 +52,40 @@ def _task_query(db: Session):
     )
 
 
-def _task_response(task: Task, employee: Employee, meeting: Meeting) -> TaskResponse:
+def _reassignment_response(
+    db: Session,
+    request: TaskReassignmentRequest,
+) -> TaskReassignmentRequestResponse:
+    task = db.get(Task, request.task_id)
+    from_assignee = db.get(Employee, request.from_assignee_id)
+    to_assignee = db.get(Employee, request.to_assignee_id)
+    return TaskReassignmentRequestResponse(
+        id=request.id,
+        task_id=request.task_id,
+        task_title=task.title if task else "",
+        from_assignee_id=request.from_assignee_id,
+        from_assignee_name=from_assignee.name if from_assignee else "",
+        to_assignee_id=request.to_assignee_id,
+        to_assignee_name=to_assignee.name if to_assignee else "",
+        to_assignee_team=to_assignee.team if to_assignee else None,
+        requested_by=request.requested_by,
+        requester_role=request.requester_role,
+        requester_team=request.requester_team,
+        reason=request.reason,
+        status=request.status,
+        decided_by=request.decided_by,
+        decided_at=request.decided_at,
+        decision_note=request.decision_note,
+        created_at=request.created_at,
+    )
+
+
+def _task_response(
+    task: Task,
+    employee: Employee,
+    meeting: Meeting,
+    pending_reassignment: TaskReassignmentRequestResponse | None = None,
+) -> TaskResponse:
     return TaskResponse(
         id=task.id,
         title=task.title,
@@ -43,7 +105,39 @@ def _task_response(task: Task, employee: Employee, meeting: Meeting) -> TaskResp
         assignment_email_status=task.assignment_email_status,
         assignment_email_error=task.assignment_email_error,
         created_at=task.created_at,
+        assignee_email=employee.email,
+        assignee_team=employee.team,
+        updated_at=task.updated_at,
+        calendar_sequence=task.calendar_sequence or 0,
+        pending_reassignment=pending_reassignment,
     )
+
+
+def _task_responses(
+    db: Session,
+    rows: list[tuple[Task, Employee, Meeting]],
+) -> list[TaskResponse]:
+    task_ids = [task.id for task, _, _ in rows]
+    pending: dict[str, TaskReassignmentRequest] = {}
+    if task_ids:
+        pending = {
+            request.task_id: request
+            for request in db.query(TaskReassignmentRequest)
+            .filter(
+                TaskReassignmentRequest.task_id.in_(task_ids),
+                TaskReassignmentRequest.status == TASK_REASSIGNMENT_STATUS_PENDING,
+            )
+            .all()
+        }
+    return [
+        _task_response(
+            task,
+            employee,
+            meeting,
+            _reassignment_response(db, pending[task.id]) if task.id in pending else None,
+        )
+        for task, employee, meeting in rows
+    ]
 
 
 def _task_row(db: Session, task_id: str) -> tuple[Task, Employee, Meeting] | None:
@@ -56,13 +150,19 @@ def get_assigned_tasks(
     db: Session = Depends(get_db),
 ):
     rows = _task_query(db).filter(Employee.email == assignee_email).all()
-    return [_task_response(*row) for row in rows]
+    return _task_responses(db, rows)
 
 
 @router.get("/dashboard", response_model=list[TaskResponse])
 def get_task_dashboard(db: Session = Depends(get_db)):
     rows = _task_query(db).all()
-    return [_task_response(*row) for row in rows]
+    return _task_responses(db, rows)
+
+
+def _ical_stamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 @router.get("/calendar.ics")
@@ -74,10 +174,6 @@ def get_task_calendar(
     events = []
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for task, _, meeting in rows:
-        due_at = task.due_at
-        if due_at.tzinfo is None:
-            due_at = due_at.replace(tzinfo=timezone.utc)
-        due_stamp = due_at.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         description = _escape_ical_text(
             f"Priority: {task.priority}; Source meeting: {meeting.title}; "
             f"Transcript timestamp: {task.source_timestamp_seconds:.2f}s"
@@ -87,7 +183,11 @@ def get_task_calendar(
                 "BEGIN:VEVENT",
                 f"UID:{task.id}@ai-office-operations",
                 f"DTSTAMP:{now}",
-                f"DTSTART:{due_stamp}",
+                # SEQUENCE/LAST-MODIFIED let calendar clients replace the event
+                # in place when the due date changes.
+                f"SEQUENCE:{task.calendar_sequence or 0}",
+                f"LAST-MODIFIED:{_ical_stamp(task.updated_at or task.created_at)}",
+                f"DTSTART:{_ical_stamp(task.due_at)}",
                 f"SUMMARY:{_escape_ical_text(task.title)}",
                 f"DESCRIPTION:{description}",
                 "END:VEVENT",
@@ -144,4 +244,180 @@ def retry_assignment_email(task_id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
         )
-    return _task_response(*row)
+    return _task_responses(db, [row])[0]
+
+
+def _actor(
+    actor_id: str = Query(min_length=1),
+    actor_role: TaskActorRole = Query(),
+    actor_team: str | None = Query(default=None),
+) -> TaskActor:
+    return TaskActor(id=actor_id, role=actor_role, team=actor_team or None)
+
+
+def _notification_responses(
+    db: Session,
+    notifications: list[TaskNotification],
+) -> list[TaskNotificationResponse]:
+    responses = []
+    for notification in notifications:
+        recipient = db.get(Employee, notification.recipient_employee_id)
+        responses.append(
+            TaskNotificationResponse(
+                id=notification.id,
+                recipient_employee_id=notification.recipient_employee_id,
+                recipient_name=recipient.name if recipient else "",
+                kind=notification.kind,
+                subject=notification.subject,
+                status=notification.status,
+                error=notification.error,
+                created_at=notification.created_at,
+            )
+        )
+    return responses
+
+
+def _run_change(db: Session, change) -> JSONResponse:
+    try:
+        result: TaskChangeResult = change()
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except TaskChangeDenied as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except TaskChangeConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    row = _task_row(db, result.task.id)
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    body = TaskChangeResponse(
+        outcome=result.outcome,
+        message=result.message,
+        task=_task_responses(db, [row])[0],
+        reassignment_request=(
+            _reassignment_response(db, result.reassignment_request)
+            if result.reassignment_request is not None
+            else None
+        ),
+        notifications=_notification_responses(db, result.notifications or []),
+    )
+    return JSONResponse(
+        status_code=(
+            status.HTTP_202_ACCEPTED
+            if result.outcome == TASK_AUDIT_OUTCOME_PENDING_APPROVAL
+            else status.HTTP_200_OK
+        ),
+        content=body.model_dump(mode="json"),
+    )
+
+
+@router.patch(
+    "/{task_id}/assignee",
+    response_model=TaskChangeResponse,
+    responses={202: {"model": TaskChangeResponse}},
+    summary="Reassign a task (cross-team moves by managers need approval)",
+)
+def reassign_task_endpoint(
+    task_id: str,
+    payload: TaskReassignRequest,
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    return _run_change(
+        db,
+        lambda: reassign_task(db, task_id, actor, payload.assignee_id, payload.reason),
+    )
+
+
+@router.patch(
+    "/{task_id}/due-date",
+    response_model=TaskChangeResponse,
+    summary="Change a task's due date, updating its calendar entry",
+)
+def change_task_due_date_endpoint(
+    task_id: str,
+    payload: TaskDueDateUpdateRequest,
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    return _run_change(
+        db,
+        lambda: change_task_due_date(db, task_id, actor, payload.due_at, payload.reason),
+    )
+
+
+@router.get(
+    "/reassignment-requests",
+    response_model=list[TaskReassignmentRequestResponse],
+)
+def list_reassignment_requests(
+    request_status: str | None = Query(
+        default=TASK_REASSIGNMENT_STATUS_PENDING,
+        alias="status",
+    ),
+    db: Session = Depends(get_db),
+):
+    query = db.query(TaskReassignmentRequest)
+    if request_status:
+        query = query.filter(TaskReassignmentRequest.status == request_status)
+    requests = query.order_by(TaskReassignmentRequest.created_at.desc()).all()
+    return [_reassignment_response(db, request) for request in requests]
+
+
+@router.post(
+    "/reassignment-requests/{request_id}/decision",
+    response_model=TaskChangeResponse,
+    summary="HR / Operations or Admin approves or rejects a cross-team reassignment",
+)
+def decide_reassignment_request_endpoint(
+    request_id: str,
+    payload: TaskReassignmentDecisionRequest,
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    return _run_change(
+        db,
+        lambda: decide_reassignment_request(
+            db, request_id, actor, payload.decision, payload.note
+        ),
+    )
+
+
+@router.get("/{task_id}/audit", response_model=list[TaskAuditLogResponse])
+def get_task_audit_log(task_id: str, db: Session = Depends(get_db)):
+    if db.get(Task, task_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    entries = (
+        db.query(TaskAuditLog)
+        .filter(TaskAuditLog.task_id == task_id)
+        .order_by(TaskAuditLog.created_at.desc(), TaskAuditLog.id)
+        .all()
+    )
+    return [
+        TaskAuditLogResponse(
+            id=entry.id,
+            task_id=entry.task_id,
+            actor_id=entry.actor_id,
+            actor_role=entry.actor_role,
+            action=entry.action,
+            outcome=entry.outcome,
+            detail=entry.detail,
+            created_at=entry.created_at,
+        )
+        for entry in entries
+    ]
+
+
+@router.get("/{task_id}/notifications", response_model=list[TaskNotificationResponse])
+def get_task_notifications(task_id: str, db: Session = Depends(get_db)):
+    if db.get(Task, task_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    notifications = (
+        db.query(TaskNotification)
+        .filter(TaskNotification.task_id == task_id)
+        .order_by(TaskNotification.created_at.desc())
+        .all()
+    )
+    return _notification_responses(db, notifications)

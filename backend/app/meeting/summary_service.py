@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from sqlalchemy.orm import Session
 
 from app.meeting.models import (
@@ -29,6 +29,14 @@ class SummarySections(BaseModel):
     decisions: list[str]
     discussion_topics: list[str]
     open_questions: list[str]
+
+    @field_validator("overview", mode="before")
+    @classmethod
+    def _join_list_overview(cls, value):
+        # Models sometimes return the overview as a (possibly empty) list.
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return " ".join(item.strip() for item in value if item.strip())
+        return value
 
 
 class MeetingSummaryGenerationError(RuntimeError):
@@ -116,9 +124,11 @@ def generate_meeting_summary(
                     "content": (
                         "Summarize only the supplied persisted meeting transcript. "
                         "Do not invent, infer, or add information not stated in it. "
-                        "Return an empty array for any category with no supported "
-                        "items. Return exactly these four fields: overview, "
-                        "decisions, discussion_topics, and open_questions. "
+                        "Return exactly these four fields: overview (a string of "
+                        "one or two sentences describing what was said), "
+                        "and decisions, discussion_topics, and open_questions "
+                        "(each an array of strings). Return an empty array for "
+                        "any array field with no supported items. "
                         "The response must be valid JSON."
                     ),
                 },

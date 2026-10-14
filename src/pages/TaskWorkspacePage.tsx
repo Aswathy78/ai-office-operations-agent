@@ -1,14 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { CalendarDays, CheckSquare, RefreshCw } from 'lucide-react'
+import { getActiveEmployees } from '../api/meetings'
 import {
   getDashboardTasks,
   getMyTasks,
   retryAssignmentEmail,
   taskCalendarUrl,
+  type TaskActor,
   type TaskRecord,
 } from '../api/tasks'
+import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
 import { useAuth } from '../contexts/AuthContext'
+import type { Employee } from '../types/meeting'
 
 type TaskWorkspaceView = 'mine' | 'dashboard' | 'calendar'
 
@@ -31,7 +35,27 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null)
+  const [managingTaskId, setManagingTaskId] = useState<string | null>(null)
+  const [employees, setEmployees] = useState<Employee[]>([])
   const taskRequestRef = useRef<Promise<TaskRecord[]> | null>(null)
+
+  const canManageTasks = view === 'dashboard' && user?.role !== 'employee'
+  const actor: TaskActor | null = user
+    ? { id: user.id, role: user.role, team: user.department || null }
+    : null
+
+  useEffect(() => {
+    if (!canManageTasks) return
+    let active = true
+    getActiveEmployees()
+      .then((result) => { if (active) setEmployees(result) })
+      .catch(() => { if (active) setEmployees([]) })
+    return () => { active = false }
+  }, [canManageTasks])
+
+  function replaceTask(updated: TaskRecord) {
+    setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)))
+  }
 
   useEffect(() => {
     let active = true
@@ -180,15 +204,27 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                 <th scope="col">Status</th>
                 <th scope="col">Source</th>
                 <th scope="col">Assignment email</th>
+                {canManageTasks && <th scope="col"><span className="visually-hidden">Actions</span></th>}
               </tr>
             </thead>
             <tbody>
               {tasks.map((task) => (
-                <tr key={task.id}>
+                <Fragment key={task.id}>
+                <tr>
                   <td>
                     <strong>{task.title}</strong>
                   </td>
-                  {isDashboard && <td>{task.assignee_name}</td>}
+                  {isDashboard && (
+                    <td>
+                      {task.assignee_name}
+                      {task.assignee_team && <small className="task-cell-note">{task.assignee_team}</small>}
+                      {task.pending_reassignment && (
+                        <span className="status-pill warning task-cell-note">
+                          Awaiting approval → {task.pending_reassignment.to_assignee_name}
+                        </span>
+                      )}
+                    </td>
+                  )}
                   <td>
                     <time dateTime={task.due_at}>
                       {new Intl.DateTimeFormat(undefined, {
@@ -228,7 +264,34 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                       </div>
                     )}
                   </td>
+                  {canManageTasks && (
+                    <td>
+                      <button
+                        className="button secondary task-manage-toggle"
+                        type="button"
+                        aria-expanded={managingTaskId === task.id}
+                        onClick={() =>
+                          setManagingTaskId((current) => (current === task.id ? null : task.id))
+                        }
+                      >
+                        {managingTaskId === task.id ? 'Close' : 'Manage'}
+                      </button>
+                    </td>
+                  )}
                 </tr>
+                {canManageTasks && actor && managingTaskId === task.id && (
+                  <tr className="task-manage-row">
+                    <td colSpan={8}>
+                      <TaskManagePanel
+                        task={task}
+                        actor={actor}
+                        employees={employees}
+                        onTaskChanged={replaceTask}
+                      />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

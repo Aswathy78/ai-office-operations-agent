@@ -360,7 +360,7 @@ describe('MeetingReportPage transcript', () => {
       expect(getMeetingActionItems).toHaveBeenCalledWith('meeting-current', 'organizer-1')
       const panel = screen.getByRole('heading', { name: 'Meeting Action Items' }).closest('section')
       expect(panel).not.toBeNull()
-      expect(within(panel as HTMLElement).getByText('Send the agenda.')).toBeInTheDocument()
+      expect(await within(panel as HTMLElement).findByText('Send the agenda.')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('Maya')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('Unique match')).toBeInTheDocument()
       expect(within(panel as HTMLElement).getByText('Proposed')).toBeInTheDocument()

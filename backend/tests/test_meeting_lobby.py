@@ -90,7 +90,7 @@ class TestGuestJoinLobby:
     def test_guest_joins_lobby_returns_202(self, client):
         meeting = _future_meeting(client)
         payload = {"guest_name": "Alice Guest", "guest_email": "alice@external.com"}
-        resp = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
+        resp = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
         assert resp.status_code == 202
         body = resp.json()
         assert body["guest_name"] == "Alice Guest"
@@ -103,7 +103,7 @@ class TestGuestJoinLobby:
     def test_guest_joins_lobby_without_email(self, client):
         meeting = _future_meeting(client)
         payload = {"guest_name": "Bob NoEmail"}
-        resp = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
+        resp = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
         assert resp.status_code == 202
         body = resp.json()
         assert body["guest_email"] is None
@@ -112,8 +112,8 @@ class TestGuestJoinLobby:
     def test_guest_join_lobby_idempotent_by_email(self, client):
         meeting = _future_meeting(client)
         payload = {"guest_name": "Carol", "guest_email": "carol@ext.com"}
-        r1 = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
-        r2 = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
+        r1 = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
+        r2 = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
         assert r1.status_code == 202
         assert r2.status_code == 202
         assert r1.json()["id"] == r2.json()["id"]
@@ -121,8 +121,8 @@ class TestGuestJoinLobby:
     def test_guest_join_lobby_idempotent_by_name_only(self, client):
         meeting = _future_meeting(client)
         payload = {"guest_name": "Dan NoEmail"}
-        r1 = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
-        r2 = client.post(f"/api/v1/meetings/{meeting["id"]}/lobby", json=payload)
+        r1 = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
+        r2 = client.post(f"/api/v1/meetings/{meeting['id']}/lobby", json=payload)
         assert r1.status_code == 202
         assert r2.status_code == 202
         assert r1.json()["id"] == r2.json()["id"]
@@ -137,7 +137,7 @@ class TestGuestJoinLobby:
     def test_guest_join_expired_meeting_returns_410(self, client):
         meeting = _expired_meeting(client)
         resp = client.post(
-            f"/api/v1/meetings/{meeting["id"]}/lobby",
+            f"/api/v1/meetings/{meeting['id']}/lobby",
             json={"guest_name": "Late Guest"},
         )
         assert resp.status_code == 410
@@ -145,7 +145,7 @@ class TestGuestJoinLobby:
     def test_guest_name_cannot_be_empty(self, client):
         meeting = _future_meeting(client)
         resp = client.post(
-            f"/api/v1/meetings/{meeting["id"]}/lobby",
+            f"/api/v1/meetings/{meeting['id']}/lobby",
             json={"guest_name": ""},
         )
         assert resp.status_code == 422
@@ -156,7 +156,7 @@ class TestGuestJoinLobby:
 class TestListPendingGuests:
     def test_list_returns_empty_when_no_requests(self, client):
         meeting = _future_meeting(client)
-        resp = client.get(f"/api/v1/meetings/{meeting["id"]}/lobby")
+        resp = client.get(f"/api/v1/meetings/{meeting['id']}/lobby")
         assert resp.status_code == 200
         assert resp.json() == []
 
@@ -235,12 +235,12 @@ class TestOrganizerDecision:
         meeting_a = _future_meeting(client)
         meeting_b = _future_meeting(client)
         r = client.post(
-            f"/api/v1/meetings/{meeting_a["id"]}/lobby",
+            f"/api/v1/meetings/{meeting_a['id']}/lobby",
             json={"guest_name": "Kate"},
         )
         rid = r.json()["id"]
         resp = client.post(
-            f"/api/v1/meetings/{meeting_b["id"]}/lobby/{rid}/decision",
+            f"/api/v1/meetings/{meeting_b['id']}/lobby/{rid}/decision",
             json={"action": "admit"},
         )
         assert resp.status_code == 404
@@ -248,7 +248,7 @@ class TestOrganizerDecision:
     def test_decision_for_nonexistent_request_returns_404(self, client):
         meeting = _future_meeting(client)
         resp = client.post(
-            f"/api/v1/meetings/{meeting["id"]}/lobby/00000000-dead-0000-0000-000000000000/decision",
+            f"/api/v1/meetings/{meeting['id']}/lobby/00000000-dead-0000-0000-000000000000/decision",
             json={"action": "admit"},
         )
         assert resp.status_code == 404

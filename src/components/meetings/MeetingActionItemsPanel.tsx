@@ -857,7 +857,23 @@ export function MeetingActionItemsPanel({
                       <div>
                         <dt style={{ color: 'var(--text-muted)' }}>Owner</dt>
                         <dd style={{ margin: 0, fontWeight: 500 }}>
-                          {item.owner_name || 'Unassigned'}
+                          {(() => {
+                            const confirmedName = employees.find(
+                              (emp) => emp.id === item.confirmed_employee_id,
+                            )?.name
+                            if (!confirmedName) return item.owner_name || 'Unassigned'
+                            if (!item.owner_name || item.owner_name === confirmedName) {
+                              return confirmedName
+                            }
+                            return (
+                              <>
+                                {confirmedName}
+                                <small style={{ display: 'block', fontWeight: 400, color: 'var(--text-muted)' }}>
+                                  mentioned as <span>{item.owner_name}</span>
+                                </small>
+                              </>
+                            )
+                          })()}
                         </dd>
                       </div>
                       <div>
@@ -987,7 +1003,7 @@ export function MeetingActionItemsPanel({
                     )}
 
                     {/* Organizer Ownership Assignment Form (Story 3.1) */}
-                    {isOrganizer && item.ownership_status !== 'confirmed' && (
+                    {isOrganizer && !isRejected && item.ownership_status !== 'confirmed' && (
                       <div
                         style={{
                           display: 'grid',
@@ -1087,7 +1103,7 @@ export function MeetingActionItemsPanel({
                     )}
 
                     {/* Organizer Review Actions (Story 3.3) */}
-                    {isOrganizer && onReviewActionItem && !isEditing && (
+                    {isOrganizer && onReviewActionItem && !isEditing && !isRejected && (
                       <div
                         style={{
                           display: 'flex',

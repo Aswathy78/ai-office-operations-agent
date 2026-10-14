@@ -126,11 +126,8 @@ def synchronize_confirmed_action_item_tasks(
         attempt_assignment_email(db, task_id)
 
 
-def send_assignment_email(
-    task: Task,
-    employee: Employee,
-    meeting_title: str,
-) -> None:
+def send_email(recipient: str, subject: str, body: str) -> None:
+    """Deliver one plain-text e-mail through the configured SMTP server."""
     host = os.getenv("SMTP_HOST", "").strip()
     sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
     if not host or not sender:
@@ -147,16 +144,10 @@ def send_assignment_email(
         raise ValueError("Configure both SMTP_USERNAME and SMTP_PASSWORD.")
 
     message = EmailMessage()
-    message["Subject"] = f"Task assigned: {task.title}"
+    message["Subject"] = subject
     message["From"] = sender
-    message["To"] = employee.email
-    message.set_content(
-        f"Hello {employee.name},\n\n"
-        f"You have been assigned: {task.title}\n"
-        f"Due: {task.due_at.isoformat()}\n"
-        f"Priority: {task.priority}\n"
-        f"Source meeting: {meeting_title}\n"
-    )
+    message["To"] = recipient
+    message.set_content(body)
 
     with smtplib.SMTP(host, port, timeout=10) as smtp:
         if os.getenv("SMTP_USE_STARTTLS", "true").strip().lower() not in {
@@ -168,6 +159,22 @@ def send_assignment_email(
         if username:
             smtp.login(username, password)
         smtp.send_message(message)
+
+
+def send_assignment_email(
+    task: Task,
+    employee: Employee,
+    meeting_title: str,
+) -> None:
+    send_email(
+        employee.email,
+        f"Task assigned: {task.title}",
+        f"Hello {employee.name},\n\n"
+        f"You have been assigned: {task.title}\n"
+        f"Due: {task.due_at.isoformat()}\n"
+        f"Priority: {task.priority}\n"
+        f"Source meeting: {meeting_title}\n",
+    )
 
 
 def attempt_assignment_email(db: Session, task_id: str) -> Task:

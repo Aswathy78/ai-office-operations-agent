@@ -369,6 +369,7 @@ def test_get_active_employees_returns_only_active_employee_fields(
             "id": active_employee.id,
             "name": active_employee.name,
             "email": active_employee.email,
+            "team": active_employee.team,
         }
     ]
 
@@ -385,7 +386,7 @@ def test_development_seed_makes_rahul_available_from_employee_api(
     rahul = next(
         employee
         for employee in response.json()
-        if employee["email"] == "rahul@example.test"
+        if employee["email"] == "rahulexample.test@gmail.com"
     )
     assert rahul["name"] == "Rahul"
 
@@ -994,6 +995,44 @@ def test_review_action_item_reject(client: TestClient, db_session: Session):
 
     eligible_items = get_task_eligible_action_items(db_session, meeting.id)
     assert persisted not in eligible_items
+
+
+def test_rejected_action_item_cannot_be_confirmed_or_reassigned(
+    client: TestClient, db_session: Session
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript)
+    item = extraction.items[0]
+    employee = Employee(
+        id=str(uuid.uuid4()),
+        name="Ava Patel",
+        email="ava.patel@northstar.example",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+    base = f"/api/v1/meetings/{meeting.id}/action-items/{item.id}"
+
+    assert client.patch(
+        f"{base}/review?organizer_id={ORGANIZER_ID}", json={"action": "reject"}
+    ).status_code == 200
+
+    confirm = client.patch(
+        f"{base}/review?organizer_id={ORGANIZER_ID}", json={"action": "confirm"}
+    )
+    assert confirm.status_code == 400
+    assert confirm.json()["detail"] == "Rejected action items cannot be changed."
+
+    reassign = client.post(
+        f"{base}/confirm-owner?organizer_id={ORGANIZER_ID}",
+        json={"employee_id": employee.id},
+    )
+    assert reassign.status_code == 400
+
+    db_session.expire_all()
+    persisted = db_session.get(MeetingActionItem, item.id)
+    assert persisted.review_status == "rejected"
+    assert persisted.confirmed_employee_id is None
 
 
 def test_review_action_item_edit_fields_preserves_source_metadata(

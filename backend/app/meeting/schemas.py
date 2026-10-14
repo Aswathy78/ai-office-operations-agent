@@ -53,6 +53,7 @@ class EmployeeResponse(BaseModel):
     id: str
     name: str
     email: str
+    team: str | None = None
 
 
 class MeetingValidationResponse(BaseModel):
@@ -295,6 +296,85 @@ class TaskResponse(BaseModel):
     assignment_email_status: Literal["pending", "sent", "failed"]
     assignment_email_error: str | None = None
     created_at: datetime
+    assignee_email: str | None = None
+    assignee_team: str | None = None
+    updated_at: datetime | None = None
+    calendar_sequence: int = 0
+    pending_reassignment: "TaskReassignmentRequestResponse | None" = None
+
+
+TaskActorRole = Literal["employee", "manager", "hr_operations", "admin"]
+
+
+class TaskReassignRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assignee_id: str = Field(..., min_length=1)
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class TaskDueDateUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    due_at: datetime
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class TaskReassignmentDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class TaskReassignmentRequestResponse(BaseModel):
+    id: str
+    task_id: str
+    task_title: str
+    from_assignee_id: str
+    from_assignee_name: str
+    to_assignee_id: str
+    to_assignee_name: str
+    to_assignee_team: str | None = None
+    requested_by: str
+    requester_role: str
+    requester_team: str | None = None
+    reason: str | None = None
+    status: Literal["pending", "approved", "rejected"]
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_note: str | None = None
+    created_at: datetime
+
+
+class TaskAuditLogResponse(BaseModel):
+    id: str
+    task_id: str
+    actor_id: str
+    actor_role: str
+    action: str
+    outcome: Literal["applied", "pending_approval", "denied", "rejected"]
+    detail: str
+    created_at: datetime
+
+
+class TaskNotificationResponse(BaseModel):
+    id: str
+    recipient_employee_id: str
+    recipient_name: str
+    kind: str
+    subject: str
+    status: Literal["pending", "sent", "failed"]
+    error: str | None = None
+    created_at: datetime
+
+
+class TaskChangeResponse(BaseModel):
+    outcome: Literal["applied", "pending_approval"]
+    message: str
+    task: TaskResponse
+    reassignment_request: TaskReassignmentRequestResponse | None = None
+    notifications: list[TaskNotificationResponse] = Field(default_factory=list)
 
 
 class TranscriptSegmentUpdate(BaseModel):
@@ -373,3 +453,5 @@ class ParticipantTrackRegisterResponse(BaseModel):
     participant_name: str
     status: str
     meeting_id: str
+
+TaskResponse.model_rebuild()

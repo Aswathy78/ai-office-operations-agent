@@ -133,6 +133,35 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .text-button { border: 0; padding: 0; background: transparent; color: #1d5eb1; cursor: pointer; font-size: 12px; font-weight: 700; }
 .text-button:disabled { color: var(--muted); cursor: wait; }
 
+.status-pill.danger { background: #fdecec; color: var(--danger); }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.task-cell-note { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; }
+.status-pill.task-cell-note { display: inline-flex; color: var(--warning); }
+.task-manage-toggle { min-height: 32px; padding: 0 10px; font-size: 12px; }
+.task-manage-row td { background: #f7f9fc; }
+.task-manage-panel { display: grid; gap: 14px; }
+.task-manage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.task-manage-section { display: grid; align-content: start; gap: 7px; padding: 14px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+.task-manage-section h4 { display: flex; align-items: center; gap: 7px; margin: 0; font-size: 14px; }
+.task-manage-section label { font-size: 12px; font-weight: 700; color: #33415a; }
+.task-manage-section select, .task-manage-section input, .approval-actions input { min-height: 36px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: 13px; background: #fff; }
+.task-manage-section .button { justify-self: start; margin-top: 4px; }
+.task-manage-hint { margin: 0; color: var(--muted); font-size: 12px; }
+.task-manage-pending { margin: 0; padding: 8px 10px; border-radius: 8px; background: #fff3dc; color: var(--warning); font-size: 12px; }
+.task-manage-feedback { margin: 0; padding: 9px 12px; border-radius: 8px; font-size: 13px; }
+.task-manage-feedback.success { background: #e8f7f0; color: var(--success); }
+.task-manage-feedback.pending { background: #fff3dc; color: var(--warning); }
+.task-manage-feedback.error { background: #fdecec; color: var(--danger); }
+.task-manage-history ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.task-manage-history li { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; }
+.task-manage-history li small { display: block; margin-top: 2px; color: var(--muted); }
+.approval-list { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.approval-card { display: grid; gap: 6px; padding: 16px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+.approval-card p { margin: 0; font-size: 13px; }
+.approval-card-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.approval-actions input { flex: 1; min-width: 200px; }
+
 @media (max-width: 900px) {
   .sidebar { width: 224px; }
   .app-main { margin-left: 224px; }

@@ -467,7 +467,14 @@ export function MeetingRoomPage() {
     }
   }, [meeting, meetingId, recording, room.organizerId, user])
 
-  const handleLeave = useCallback(() => {
+  // Stopping local media disposes the recorder, so an active recording must be
+  // stopped and uploaded first or it is lost and never transcribed.
+  const finishActiveRecording = useCallback(async () => {
+    if (recording.state === 'recording') await handleStopRecording()
+  }, [recording.state, handleStopRecording])
+
+  const handleLeave = useCallback(async () => {
+    await finishActiveRecording()
     room.stopLocalMedia()
     room.disconnect()
     if (attendanceRef.current && meetingId) {
@@ -475,12 +482,13 @@ export function MeetingRoomPage() {
       attendanceRef.current = null
     }
     navigate('/meetings', { replace: true })
-  }, [room, meetingId, navigate])
+  }, [finishActiveRecording, room, meetingId, navigate])
 
   const handleConfirmEndMeeting = useCallback(async () => {
     if (!meetingId || !user) return
     setEndingMeeting(true)
     try {
+      await finishActiveRecording()
       await endMeetingForEveryone(meetingId, user.id)
       room.stopLocalMedia()
       room.disconnect()
@@ -495,7 +503,7 @@ export function MeetingRoomPage() {
       setShowEndConfirm(false)
       alert(err instanceof Error ? err.message : 'Could not end the meeting.')
     }
-  }, [meetingId, user, room, navigate])
+  }, [finishActiveRecording, meetingId, user, room, navigate])
 
   async function copyLink() {
     const link = meeting ? meeting.id
@@ -979,9 +987,10 @@ export function MeetingRoomPage() {
           {/* Leave */}
           <button
             className="meet-ctrl-btn meet-ctrl-btn--leave"
-            onClick={handleLeave}
+            onClick={() => void handleLeave()}
             aria-label="Leave meeting"
             title="Leave meeting"
+            disabled={recordingBusy}
           >
             <LogOut size={20} />
             <span>Leave</span>

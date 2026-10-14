@@ -94,6 +94,26 @@ ACTION_ITEM_PRIORITIES = (
 TASK_STATUS_PENDING = "pending"
 TASK_STATUSES = (TASK_STATUS_PENDING,)
 
+TASK_REASSIGNMENT_STATUS_PENDING = "pending"
+TASK_REASSIGNMENT_STATUS_APPROVED = "approved"
+TASK_REASSIGNMENT_STATUS_REJECTED = "rejected"
+TASK_REASSIGNMENT_STATUSES = (
+    TASK_REASSIGNMENT_STATUS_PENDING,
+    TASK_REASSIGNMENT_STATUS_APPROVED,
+    TASK_REASSIGNMENT_STATUS_REJECTED,
+)
+
+TASK_AUDIT_OUTCOME_APPLIED = "applied"
+TASK_AUDIT_OUTCOME_PENDING_APPROVAL = "pending_approval"
+TASK_AUDIT_OUTCOME_DENIED = "denied"
+TASK_AUDIT_OUTCOME_REJECTED = "rejected"
+TASK_AUDIT_OUTCOMES = (
+    TASK_AUDIT_OUTCOME_APPLIED,
+    TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
+    TASK_AUDIT_OUTCOME_DENIED,
+    TASK_AUDIT_OUTCOME_REJECTED,
+)
+
 EMPLOYEE_MATCH_STATUS_UNIQUE = "unique_match"
 EMPLOYEE_MATCH_STATUS_AMBIGUOUS = "ambiguous_match"
 EMPLOYEE_MATCH_STATUS_NO_MATCH = "no_match"
@@ -189,6 +209,7 @@ class Employee(Base):
         nullable=False,
         unique=True,
     )
+    team: Mapped[str | None] = mapped_column(String(100), nullable=True)
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -718,6 +739,135 @@ class Task(Base):
         default="pending",
     )
     assignment_email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Incremented on every due-date change so calendar clients replace the event.
+    calendar_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+
+class TaskReassignmentRequest(Base):
+    """A cross-team reassignment awaiting HR / Operations or Admin approval."""
+
+    __tablename__ = "task_reassignment_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ("
+            + ", ".join(repr(value) for value in TASK_REASSIGNMENT_STATUSES)
+            + ")",
+            name="ck_task_reassignment_requests_status",
+        ),
+        Index("ix_task_reassignment_requests_task_status", "task_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_assignee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    to_assignee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    requested_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    requester_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    requester_team: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=TASK_REASSIGNMENT_STATUS_PENDING,
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TaskAuditLog(Base):
+    """Every reassignment / due-date attempt on a task, including denials."""
+
+    __tablename__ = "task_audit_logs"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ("
+            + ", ".join(repr(value) for value in TASK_AUDIT_OUTCOMES)
+            + ")",
+            name="ck_task_audit_logs_outcome",
+        ),
+        Index("ix_task_audit_logs_task_created_at", "task_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TaskNotification(Base):
+    """An e-mail notification about a task change and its delivery outcome."""
+
+    __tablename__ = "task_notifications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sent', 'failed')",
+            name="ck_task_notifications_status",
+        ),
+        Index("ix_task_notifications_task_created_at", "task_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_employee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

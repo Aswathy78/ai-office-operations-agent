@@ -3,6 +3,8 @@ fastapi==0.141.1
 SQLAlchemy==2.0.52
 alembic==1.16.5
 uvicorn==0.52.3
+# WebSocket support for uvicorn (meeting room signaling).
+websockets>=13.0
 python-multipart==0.0.32
 
 # Recording encryption dependency. Install with the backend requirements before

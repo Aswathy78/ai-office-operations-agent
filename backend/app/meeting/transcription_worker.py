@@ -107,23 +107,42 @@ def _configure_cuda_dll_directories(
     return tuple(added_directories)
 
 
-def create_whisper_model():
-    _configure_cuda_dll_directories()
-
+def _load_whisper_model(device: str, compute_type: str):
     from faster_whisper import WhisperModel
 
     logger.info(
-        "Whisper model loading model=small device=cuda compute_type=float16"
+        "Whisper model loading model=small device=%s compute_type=%s",
+        device,
+        compute_type,
     )
     model = WhisperModel(
         "small",
-        device="cuda",
-        compute_type="float16",
+        device=device,
+        compute_type=compute_type,
     )
     logger.info(
-        "Whisper model loaded device=cuda compute_type=float16"
+        "Whisper model loaded device=%s compute_type=%s",
+        device,
+        compute_type,
     )
     return model
+
+
+def create_whisper_model():
+    """Load Whisper on CUDA, or on CPU when WHISPER_DEVICE=cpu.
+
+    WHISPER_COMPUTE_TYPE overrides the device's default compute type.
+    """
+    device = os.environ.get("WHISPER_DEVICE", "cuda").strip().lower() or "cuda"
+    compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "").strip()
+
+    if device == "cpu":
+        return _load_whisper_model("cpu", compute_type or "int8")
+    if device != "cuda":
+        raise ValueError("WHISPER_DEVICE must be 'cuda' or 'cpu'.")
+
+    _configure_cuda_dll_directories()
+    return _load_whisper_model("cuda", compute_type or "float16")
 
 
 def claim_pending_transcript(db: Session) -> str | None:

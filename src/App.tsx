@@ -14,6 +14,7 @@ import { MeetingReportPage } from './pages/MeetingReportPage'
 import { MeetingRoomPage } from './pages/MeetingRoomPage'
 import { MeetingsPage } from './pages/MeetingsPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
+import { ApprovalsPage } from './pages/ApprovalsPage'
 import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
@@ -64,7 +65,7 @@ function AppRoutes() {
       <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
       <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
       <Route path="/documents" element={<ProtectedAppPage path="/documents"><PlaceholderPage /></ProtectedAppPage>} />
-      <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><ApprovalsPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><PlaceholderPage /></ProtectedAppPage>} />
