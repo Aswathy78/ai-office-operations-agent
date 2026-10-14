@@ -14,6 +14,11 @@ import {
   getMeetingTranscript,
   MeetingApiError,
   updateMeetingTranscript,
+  getMeetingMinutes,
+  generateMeetingMinutes,
+  approveMeetingMinutes,
+  sendMeetingMinutes,
+  getMeetingMinutesRecipients,
 } from '../api/meetings'
 import { MeetingReportPage } from './MeetingReportPage'
 import type {
@@ -21,6 +26,8 @@ import type {
   MeetingReport,
   MeetingSummary,
   MeetingTranscript,
+  MeetingMinutes,
+  MeetingMinutesDeliveryResponse,
 } from '../types/meeting'
 
 const { authValue } = vi.hoisted(() => ({
@@ -45,6 +52,11 @@ vi.mock('../api/meetings', () => ({
   getMeetingTranscript: vi.fn(),
   getMeetingTranscriptCorrections: vi.fn(),
   updateMeetingTranscript: vi.fn(),
+  getMeetingMinutes: vi.fn(),
+  generateMeetingMinutes: vi.fn(),
+  approveMeetingMinutes: vi.fn(),
+  sendMeetingMinutes: vi.fn(),
+  getMeetingMinutesRecipients: vi.fn(),
 }))
 
 const report: MeetingReport = {
@@ -134,6 +146,46 @@ const actionItems: MeetingActionItems = {
   ],
 }
 
+const minutes: MeetingMinutes = {
+  id: 'minutes-1',
+  meeting_id: 'meeting-current',
+  summary_id: 'summary-1',
+  status: 'pending_approval',
+  policy: 'manual_approval',
+  approved_by: null,
+  approved_at: null,
+  content_summary: 'The team planned the next quarter.',
+  content_decisions: ['Start the pilot in May.'],
+  content_action_items: [
+    {
+      id: 'item-1',
+      task_description: 'Send the agenda.',
+      owner_name: 'Maya',
+      owner_email: 'maya@example.com',
+      deadline_at: '2026-10-16T17:00:00Z',
+      deadline_text: 'by Friday',
+      priority: 'high',
+    },
+  ],
+  error_message: null,
+  created_at: '2026-10-05T11:05:00Z',
+  updated_at: '2026-10-05T11:05:00Z',
+  recipients: [
+    {
+      id: 'recipient-1',
+      minutes_id: 'minutes-1',
+      recipient_name: 'Maya',
+      recipient_email: 'maya@example.com',
+      attendance_log_id: 'log-1',
+      delivery_status: 'pending',
+      error_message: null,
+      idempotency_key: 'minutes:minutes-1:maya@example.com',
+      sent_at: null,
+      created_at: '2026-10-05T11:05:00Z',
+    },
+  ],
+}
+
 function renderReport(
   initialEntry = '/meetings/meeting-current/report',
 ) {
@@ -172,6 +224,29 @@ beforeEach(() => {
   vi.mocked(getMeetingSummary).mockResolvedValue(summary)
   vi.mocked(getMeetingTranscript).mockResolvedValue(transcript)
   vi.mocked(updateMeetingTranscript).mockResolvedValue(transcript)
+  vi.mocked(getMeetingMinutes).mockResolvedValue(minutes)
+  vi.mocked(generateMeetingMinutes).mockResolvedValue(minutes)
+  vi.mocked(approveMeetingMinutes).mockResolvedValue({
+    ...minutes,
+    status: 'approved',
+    approved_by: 'organizer-1',
+    approved_at: '2026-10-05T11:10:00Z',
+  })
+  vi.mocked(sendMeetingMinutes).mockResolvedValue({
+    minutes_id: 'minutes-1',
+    meeting_id: 'meeting-current',
+    total: 1,
+    sent: 1,
+    failed: 0,
+    pending: 0,
+    recipients: [
+      {
+        ...minutes.recipients[0],
+        delivery_status: 'sent',
+        sent_at: '2026-10-05T11:15:00Z',
+      },
+    ],
+  })
 })
 
 afterEach(() => {
@@ -208,6 +283,7 @@ describe('MeetingReportPage transcript', () => {
     )
     expect(getMeetingActionItems).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: 'View Summary' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'View Minutes' })).not.toBeInTheDocument()
   })
 
   it('keeps meeting report access organizer-only for an unrelated employee', async () => {
@@ -235,8 +311,11 @@ describe('MeetingReportPage transcript', () => {
     expect(within(screen.getByRole('table')).getByText('Maya')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Transcript' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'View Summary' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'View Minutes' })).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Meeting Summary' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Meeting Minutes' })).not.toBeInTheDocument()
     expect(getMeetingSummary).not.toHaveBeenCalled()
+    expect(getMeetingMinutes).not.toHaveBeenCalled()
     expect(getMeetingReport).toHaveBeenCalledWith('meeting-current', 'organizer-1')
   })
 
@@ -796,6 +875,107 @@ describe('MeetingReportPage transcript', () => {
     await user.click(screen.getByRole('button', { name: 'Hide Transcript' }))
     await waitFor(() => {
       expect(screen.queryByRole('heading', { name: 'Meeting Transcript' })).not.toBeInTheDocument()
+    })
+  })
+
+  describe('MeetingReportPage minutes (Story 4.2)', () => {
+    it('fetches and displays the persisted meeting minutes when requested by organizer', async () => {
+      const user = userEvent.setup()
+      renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Minutes' }))
+
+      expect(await screen.findByRole('heading', { name: 'Meeting Minutes' })).toBeInTheDocument()
+      expect(getMeetingMinutes).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+      expect(screen.getByText('The team planned the next quarter.')).toBeInTheDocument()
+      expect(screen.getByText('Start the pilot in May.')).toBeInTheDocument()
+      expect(screen.getAllByText('Send the agenda.').length).toBeGreaterThanOrEqual(1)
+      expect(screen.getByText('Pending Approval')).toBeInTheDocument()
+      expect(screen.getAllByText('maya@example.com').length).toBeGreaterThanOrEqual(1)
+    })
+
+    it('shows Generate Meeting Minutes button when 404 and generates on click', async () => {
+      vi.mocked(getMeetingMinutes).mockRejectedValueOnce(
+        new MeetingApiError('Meeting minutes not found', 404),
+      )
+      const user = userEvent.setup()
+      renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Minutes' }))
+
+      const generateBtn = await screen.findByRole('button', { name: /generate meeting minutes/i })
+      expect(generateBtn).toBeInTheDocument()
+
+      await user.click(generateBtn)
+      expect(generateMeetingMinutes).toHaveBeenCalledWith('meeting-current', 'organizer-1')
+      expect(await screen.findByText('The team planned the next quarter.')).toBeInTheDocument()
+    })
+
+    it('allows organizer to approve minutes', async () => {
+      const user = userEvent.setup()
+      renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Minutes' }))
+      expect(await screen.findByRole('heading', { name: 'Meeting Minutes' })).toBeInTheDocument()
+
+      const approveBtn = screen.getByRole('button', { name: /approve minutes/i })
+      await user.click(approveBtn)
+
+      const confirmBtn = screen.getByRole('button', { name: /confirm approval/i })
+      await user.click(confirmBtn)
+
+      expect(approveMeetingMinutes).toHaveBeenCalledWith('meeting-current', 'organizer-1', undefined)
+      expect(await screen.findByText(/meeting minutes approved successfully/i)).toBeInTheDocument()
+    })
+
+    it('allows organizer to send minutes only after approval', async () => {
+      // Start with approved minutes
+      vi.mocked(getMeetingMinutes).mockResolvedValue({
+        ...minutes,
+        status: 'approved',
+        approved_by: 'organizer-1',
+        approved_at: '2026-10-05T11:10:00Z',
+      })
+
+      const user = userEvent.setup()
+      renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Minutes' }))
+      expect(await screen.findByRole('heading', { name: 'Meeting Minutes' })).toBeInTheDocument()
+
+      const sendBtn = screen.getByRole('button', { name: /send minutes/i })
+      expect(sendBtn).not.toBeDisabled()
+
+      await user.click(sendBtn)
+      expect(sendMeetingMinutes).toHaveBeenCalledWith('meeting-current', 'organizer-1', false)
+      expect(await screen.findByText(/sent successfully/i)).toBeInTheDocument()
+    })
+
+    it('allows organizer to retry failed recipients', async () => {
+      // Minutes with failed recipient
+      vi.mocked(getMeetingMinutes).mockResolvedValue({
+        ...minutes,
+        status: 'approved',
+        recipients: [
+          {
+            ...minutes.recipients[0],
+            delivery_status: 'failed',
+            error_message: 'Temporary delivery error',
+          },
+        ],
+      })
+
+      const user = userEvent.setup()
+      renderReport()
+
+      await user.click(await screen.findByRole('button', { name: 'View Minutes' }))
+      expect(await screen.findByRole('heading', { name: 'Meeting Minutes' })).toBeInTheDocument()
+
+      const retryBtn = screen.getByRole('button', { name: /retry failed deliveries/i })
+      expect(retryBtn).toBeInTheDocument()
+
+      await user.click(retryBtn)
+      expect(sendMeetingMinutes).toHaveBeenCalledWith('meeting-current', 'organizer-1', true)
     })
   })
 })

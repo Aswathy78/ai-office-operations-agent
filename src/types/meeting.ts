@@ -375,3 +375,69 @@ export interface TranscriptCorrection {
   editor_id: string
   created_at: string
 }
+
+// Meeting Minutes (Story 4.2 / FR-19)
+export type MeetingMinutesDeliveryStatus = 'pending' | 'sent' | 'failed'
+export type MeetingMinutesStatus = 'draft' | 'pending_approval' | 'approved' | 'sent' | 'failed'
+export type MeetingMinutesPolicy = 'manual_approval' | 'auto_send'
+
+export interface MeetingMinutesRecipient {
+  id: string
+  minutes_id: string
+  recipient_name: string
+  recipient_email: string
+  attendance_log_id: string | null
+  delivery_status: MeetingMinutesDeliveryStatus
+  error_message: string | null
+  idempotency_key: string | null
+  sent_at: string | null
+  created_at: string
+}
+
+export interface MeetingMinutesContentActionItem {
+  id?: string
+  task_description: string
+  owner_name: string | null
+  owner_email?: string | null
+  deadline_at: string | null
+  deadline_text: string | null
+  priority: string
+}
+
+export interface MeetingMinutes {
+  id: string
+  meeting_id: string
+  summary_id: string | null
+  status: MeetingMinutesStatus
+  policy: MeetingMinutesPolicy
+  approved_by: string | null
+  approved_at: string | null
+  content_summary: string | null
+  content_decisions: string[] | null
+  content_action_items: MeetingMinutesContentActionItem[] | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  recipients: MeetingMinutesRecipient[]
+}
+
+export interface MeetingMinutesApproveRequest {
+  notes?: string | null
+}
+
+export interface MeetingMinutesDeliveryResponse {
+  minutes_id: string
+  meeting_id: string
+  total: number
+  sent: number
+  failed: number
+  pending: number
+  recipients: MeetingMinutesRecipient[]
+}
+
+export interface MeetingMinutesUpdateRequest {
+  content_summary?: string | null
+  content_decisions?: string[] | null
+  content_action_items?: MeetingMinutesContentActionItem[] | null
+}
+

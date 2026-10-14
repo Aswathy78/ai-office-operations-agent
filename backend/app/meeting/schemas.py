@@ -454,4 +454,79 @@ class ParticipantTrackRegisterResponse(BaseModel):
     status: str
     meeting_id: str
 
+
+# -- Meeting Minutes (FR-19) ---------------------------------------------------
+
+
+class MeetingMinutesRecipientResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    minutes_id: str
+    recipient_name: str
+    recipient_email: str
+    attendance_log_id: str | None = None
+    delivery_status: Literal["pending", "sent", "failed"] = "pending"
+    error_message: str | None = None
+    idempotency_key: str | None = None
+    sent_at: datetime | None = None
+    created_at: datetime
+
+
+class MeetingMinutesResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    meeting_id: str
+    summary_id: str | None = None
+    status: Literal["draft", "pending_approval", "approved", "sent", "failed"]
+    policy: Literal["manual_approval", "auto_send"]
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    content_summary: str | None = None
+    content_decisions: list[str] | None = None
+    content_action_items: list[dict[str, object]] | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    recipients: list[MeetingMinutesRecipientResponse] = Field(default_factory=list)
+
+
+class MeetingMinutesApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    notes: str | None = None
+
+
+class MeetingMinutesActionItemPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str | None = None
+    task_description: str
+    owner_name: str | None = None
+    owner_email: str | None = None
+    deadline_text: str | None = None
+    deadline_at: str | None = None
+    priority: Literal["low", "medium", "high", "urgent"] = "medium"
+
+
+class MeetingMinutesUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    content_summary: str | None = None
+    content_decisions: list[str] | None = None
+    content_action_items: list[MeetingMinutesActionItemPayload] | None = None
+
+
+class MeetingMinutesDeliveryResponse(BaseModel):
+    """Summary of a minutes delivery (send) attempt."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    minutes_id: str
+    meeting_id: str
+    total: int
+    sent: int
+    failed: int
+    pending: int
+    recipients: list[MeetingMinutesRecipientResponse] = Field(default_factory=list)
+
+
 TaskResponse.model_rebuild()

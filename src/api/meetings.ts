@@ -15,9 +15,47 @@ import type {
   MeetingTranscriptUpdateRequest,
   TranscriptCorrection,
   TranscriptSegmentUpdate,
+  MeetingMinutes,
+  MeetingMinutesApproveRequest,
+  MeetingMinutesDeliveryResponse,
+  MeetingMinutesRecipient,
+  MeetingMinutesUpdateRequest,
 } from '../types/meeting'
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
+export let API_BASE_URL =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) ||
+  'http://127.0.0.1:8000'
+
+function getFallbackBaseUrl(current: string): string | null {
+  if (current.includes(':8000')) {
+    return current.replace(':8000', ':9000')
+  }
+  if (current.includes(':9000')) {
+    return current.replace(':9000', ':8000')
+  }
+  return null
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const urlStr = typeof input === 'string' ? input : input.toString()
+  try {
+    return init !== undefined ? await fetch(urlStr, init) : await fetch(urlStr)
+  } catch (err) {
+    const fallback = getFallbackBaseUrl(API_BASE_URL)
+    if (fallback && urlStr.startsWith(API_BASE_URL)) {
+      const fallbackUrl = urlStr.replace(API_BASE_URL, fallback)
+      try {
+        const response =
+          init !== undefined ? await fetch(fallbackUrl, init) : await fetch(fallbackUrl)
+        API_BASE_URL = fallback
+        return response
+      } catch {
+        // preserve original error
+      }
+    }
+    throw err
+  }
+}
 
 export class MeetingApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -40,13 +78,13 @@ async function readResponse<T>(response: Response): Promise<T> {
 }
 
 export function getMeeting(meetingId: string): Promise<MeetingDetails> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}`)
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}`)
     .then((response) => readResponse<MeetingDetails>(response))
 }
 
 export async function getMeetings(userId: string, userEmail: string): Promise<MeetingListRecord[]> {
   const query = new URLSearchParams({ user_id: userId, email: userEmail })
-  return fetch(`${API_BASE_URL}/api/v1/meetings/?${query}`)
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`)
     .then((response) => readResponse<MeetingListRecord[]>(response))
 }
 
@@ -54,7 +92,7 @@ export function requestGuestJoin(
   meetingId: string,
   request: GuestJoinRequest,
 ): Promise<GuestRequest> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/lobby`, {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/lobby`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(request),
@@ -62,7 +100,7 @@ export function requestGuestJoin(
 }
 
 export function getPendingGuestRequests(meetingId: string): Promise<GuestRequest[]> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/lobby`)
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/lobby`)
     .then((response) => readResponse<GuestRequest[]>(response))
 }
 
@@ -90,7 +128,7 @@ export function getMeetingReport(
 ): Promise<MeetingReport> {
   const query = new URLSearchParams({ organizer_id: organizerId })
   if (employeeEmail) query.set('employee_email', employeeEmail)
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/report?${query}`)
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/report?${query}`)
     .then((response) => readResponse<MeetingReport>(response))
 }
 
@@ -115,7 +153,7 @@ export function getMeetingActionItems(
 }
 
 export function getActiveEmployees(): Promise<Employee[]> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/employees`)
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/employees`)
     .then((response) => readResponse<Employee[]>(response))
 }
 
@@ -155,7 +193,7 @@ export function reviewActionItem(
   organizerId: string,
 ): Promise<MeetingActionItem> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/${encodeURIComponent(actionItemId)}/review?${query}`,
     {
       method: 'PATCH',
@@ -170,7 +208,7 @@ export function extractMeetingActionItems(
   organizerId: string,
 ): Promise<MeetingActionItems> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/extract?${query}`,
     { method: 'POST' },
   ).then((response) => readResponse<MeetingActionItems>(response))
@@ -185,7 +223,7 @@ export function getMeetingTranscript(
   const query = new URLSearchParams({ organizer_id: organizerId })
   if (transcriptId) query.set('transcript_id', transcriptId)
   if (employeeEmail) query.set('employee_email', employeeEmail)
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
   ).then((response) => readResponse<MeetingTranscript>(response))
 }
@@ -204,7 +242,7 @@ export function updateMeetingTranscript(
       ...(speaker === undefined ? {} : { speaker }),
     })),
   }
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript?${query}`,
     {
       method: 'PATCH',
@@ -221,7 +259,7 @@ export function getMeetingTranscriptCorrections(
 ): Promise<TranscriptCorrection[]> {
   const query = new URLSearchParams({ organizer_id: organizerId })
   if (transcriptId) query.set('transcript_id', transcriptId)
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/transcript/corrections?${query}`,
   ).then((response) => readResponse<TranscriptCorrection[]>(response))
 }
@@ -304,7 +342,7 @@ export function recordMeetingRecordingConsent(
   attendanceId: string,
   consentStatus: RecordingConsentStatus,
 ): Promise<RecordingConsentRecord> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/consent`, {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/consent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ attendance_id: attendanceId, consent_status: consentStatus }),
@@ -428,7 +466,7 @@ export function joinMeetingAttendance(
   meetingId: string,
   participant: AttendanceJoinRequest,
 ): Promise<AttendanceRecord> {
-  return fetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/attendance/join`, {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/attendance/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(participant),
@@ -454,7 +492,7 @@ export async function createMeeting(
   organizerId: string,
 ): Promise<{ id: string; title: string; join_url: string; status: string; start_at: string; end_at: string; organizer_id?: string | null }> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  const response = await fetch(`${API_BASE_URL}/api/v1/meetings/?${query}`, {
+  const response = await apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
@@ -484,3 +522,124 @@ export async function endMeetingForEveryone(
   )
   return readResponse(response)
 }
+
+export function getMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingMinutes> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes?${query}`,
+    {
+      headers: {
+        'X-User-Id': organizerId,
+      },
+    },
+  ).then((response) => readResponse<MeetingMinutes>(response))
+}
+
+export function generateMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingMinutes> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes/generate?${query}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-User-Id': organizerId,
+      },
+    },
+  ).then((response) => readResponse<MeetingMinutes>(response))
+}
+
+export function approveMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+  payload?: MeetingMinutesApproveRequest,
+): Promise<MeetingMinutes> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes/approve?${query}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': organizerId,
+      },
+      body: JSON.stringify(payload ?? {}),
+    },
+  ).then((response) => readResponse<MeetingMinutes>(response))
+}
+
+export function sendMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+  retryFailed: boolean = false,
+): Promise<MeetingMinutesDeliveryResponse> {
+  const query = new URLSearchParams({
+    organizer_id: organizerId,
+    retry_failed: String(retryFailed),
+  })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes/send?${query}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-User-Id': organizerId,
+      },
+    },
+  ).then((response) => readResponse<MeetingMinutesDeliveryResponse>(response))
+}
+
+export function getMeetingMinutesRecipients(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingMinutesRecipient[]> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes/recipients?${query}`,
+    {
+      headers: {
+        'X-User-Id': organizerId,
+      },
+    },
+  ).then((response) => readResponse<MeetingMinutesRecipient[]>(response))
+}
+
+export function updateMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+  payload: MeetingMinutesUpdateRequest,
+): Promise<MeetingMinutes> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes?${query}`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': organizerId,
+      },
+      body: JSON.stringify(payload),
+    },
+  ).then((response) => readResponse<MeetingMinutes>(response))
+}
+
+export function refreshMeetingMinutes(
+  meetingId: string,
+  organizerId: string,
+): Promise<MeetingMinutes> {
+  const query = new URLSearchParams({ organizer_id: organizerId })
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/minutes/refresh?${query}`,
+    {
+      method: 'POST',
+      headers: {
+        'X-User-Id': organizerId,
+      },
+    },
+  ).then((response) => readResponse<MeetingMinutes>(response))
+}
+

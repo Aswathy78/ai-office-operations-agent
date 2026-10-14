@@ -147,6 +147,35 @@ ACTION_ITEM_REVIEW_STATUSES = (
     ACTION_ITEM_REVIEW_STATUS_REJECTED,
 )
 
+MINUTES_STATUS_DRAFT = "draft"
+MINUTES_STATUS_PENDING_APPROVAL = "pending_approval"
+MINUTES_STATUS_APPROVED = "approved"
+MINUTES_STATUS_SENT = "sent"
+MINUTES_STATUS_FAILED = "failed"
+MINUTES_STATUSES = (
+    MINUTES_STATUS_DRAFT,
+    MINUTES_STATUS_PENDING_APPROVAL,
+    MINUTES_STATUS_APPROVED,
+    MINUTES_STATUS_SENT,
+    MINUTES_STATUS_FAILED,
+)
+
+MINUTES_POLICY_MANUAL_APPROVAL = "manual_approval"
+MINUTES_POLICY_AUTO_SEND = "auto_send"
+MINUTES_POLICIES = (
+    MINUTES_POLICY_MANUAL_APPROVAL,
+    MINUTES_POLICY_AUTO_SEND,
+)
+
+MINUTES_DELIVERY_STATUS_PENDING = "pending"
+MINUTES_DELIVERY_STATUS_SENT = "sent"
+MINUTES_DELIVERY_STATUS_FAILED = "failed"
+MINUTES_DELIVERY_STATUSES = (
+    MINUTES_DELIVERY_STATUS_PENDING,
+    MINUTES_DELIVERY_STATUS_SENT,
+    MINUTES_DELIVERY_STATUS_FAILED,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -180,6 +209,11 @@ class Meeting(Base):
     )
 
     action_item_extractions: Mapped[list["MeetingActionItemExtraction"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+    )
+
+    minutes: Mapped[list["MeetingMinutes"]] = relationship(
         back_populates="meeting",
         cascade="all, delete-orphan",
     )
@@ -920,3 +954,134 @@ class MeetingTranscriptCorrection(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+class MeetingMinutes(Base):
+    __tablename__ = "meeting_minutes"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in MINUTES_STATUSES)})",
+            name="ck_meeting_minutes_status",
+        ),
+        CheckConstraint(
+            f"policy IN ({', '.join(repr(policy) for policy in MINUTES_POLICIES)})",
+            name="ck_meeting_minutes_policy",
+        ),
+        Index("ix_meeting_minutes_meeting_id", "meeting_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    summary_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("meeting_summaries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=MINUTES_STATUS_PENDING_APPROVAL,
+    )
+    policy: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=MINUTES_POLICY_MANUAL_APPROVAL,
+    )
+    approved_by: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        default=None,
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    content_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_decisions: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    content_action_items: Mapped[list[dict[str, object]] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    meeting: Mapped["Meeting"] = relationship(back_populates="minutes")
+    summary: Mapped["MeetingSummary | None"] = relationship()
+    recipients: Mapped[list["MeetingMinutesRecipient"]] = relationship(
+        back_populates="minutes",
+        cascade="all, delete-orphan",
+    )
+
+
+class MeetingMinutesRecipient(Base):
+    __tablename__ = "meeting_minutes_recipients"
+    __table_args__ = (
+        CheckConstraint(
+            f"delivery_status IN ({', '.join(repr(status) for status in MINUTES_DELIVERY_STATUSES)})",
+            name="ck_meeting_minutes_recipients_delivery_status",
+        ),
+        UniqueConstraint(
+            "minutes_id",
+            "recipient_email",
+            name="uq_meeting_minutes_recipients_minutes_email",
+        ),
+        Index(
+            "uq_meeting_minutes_recipients_idempotency_key",
+            "idempotency_key",
+            unique=True,
+        ),
+        Index("ix_meeting_minutes_recipients_minutes_id", "minutes_id"),
+        Index("ix_meeting_minutes_recipients_delivery_status", "delivery_status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    minutes_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meeting_minutes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    attendance_log_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("meeting_attendance_logs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    delivery_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=MINUTES_DELIVERY_STATUS_PENDING,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True,
+    )
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    minutes: Mapped["MeetingMinutes"] = relationship(back_populates="recipients")
+    attendance_log: Mapped["MeetingAttendanceLog | None"] = relationship()
