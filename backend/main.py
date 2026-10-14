@@ -38,8 +38,15 @@ app.include_router(task_router)
 
 @app.on_event("startup")
 def startup():
-    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
     create_tables()
+    try:
+        from app.db.database import SessionLocal
+        from app.db.seed_employees import seed_development_employees
+        with SessionLocal() as db:
+            seed_development_employees(db)
+    except Exception:
+        pass
 
 
 @app.get("/")

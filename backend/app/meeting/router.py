@@ -1,5 +1,5 @@
 import json
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
 from sqlalchemy.orm import Session
@@ -50,6 +50,11 @@ from app.meeting.schemas import (
     MeetingTranscriptUpdateRequest,
     TranscriptSegment,
     TranscriptCorrectionResponse,
+    MeetingMinutesApproveRequest,
+    MeetingMinutesDeliveryResponse,
+    MeetingMinutesRecipientResponse,
+    MeetingMinutesResponse,
+    MeetingMinutesUpdateRequest,
 )
 from app.meeting.service import (
     TERMINAL_STATUSES,
@@ -83,6 +88,15 @@ from app.meeting.action_item_service import (
     get_action_item_confidence_threshold,
     refresh_missing_employee_matches,
     review_action_item,
+)
+from app.meeting.minutes_service import (
+    approve_meeting_minutes,
+    generate_or_get_meeting_minutes,
+    get_meeting_minutes,
+    get_minutes_recipients,
+    refresh_minutes_content,
+    send_meeting_minutes_to_recipients,
+    update_meeting_minutes_content,
 )
 from app.meeting.signaling import signaling_manager
 from app.task_service import synchronize_confirmed_action_item_tasks
@@ -1605,3 +1619,329 @@ def get_transcript_corrections(
     )
 
     return corrections
+
+
+# -- Meeting Minutes (FR-19) ---------------------------------------------------
+
+
+def _resolve_organizer_id(
+    meeting: Meeting,
+    organizer_id: str | None = None,
+    x_user_id: str | None = None,
+) -> str:
+    """Resolve caller identity and validate against meeting organizer.
+
+    If an authenticated X-User-Id header is present, it is prioritized and validated
+    against any explicit organizer_id query parameter. If neither is passed, falls back
+    to DEMO_ORGANIZER_ID.
+    """
+    if x_user_id and x_user_id.strip():
+        auth_id = x_user_id.strip()
+        if (
+            organizer_id
+            and organizer_id != DEMO_ORGANIZER_ID
+            and organizer_id != auth_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Authenticated identity does not match requested organizer identity",
+            )
+        return auth_id
+    if organizer_id:
+        return organizer_id
+    return DEMO_ORGANIZER_ID
+
+
+@router.post(
+    "/{meeting_id}/minutes/generate",
+    response_model=MeetingMinutesResponse,
+    summary="Generate or retrieve meeting minutes snapshot and populate attendee recipients",
+)
+@router.post(
+    "/{meeting_id}/minutes",
+    response_model=MeetingMinutesResponse,
+    summary="Generate or retrieve meeting minutes snapshot",
+)
+def generate_meeting_minutes_endpoint(
+    meeting_id: str,
+    force_refresh: bool = Query(
+        default=False,
+        description="Re-aggregate content from current action items and summary (only applies when minutes are not yet approved)",
+    ),
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can generate meeting minutes",
+        )
+
+    try:
+        minutes = generate_or_get_meeting_minutes(db, meeting_id, force_refresh=force_refresh)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return MeetingMinutesResponse.model_validate(minutes)
+
+
+@router.get(
+    "/{meeting_id}/minutes",
+    response_model=MeetingMinutesResponse,
+    summary="Retrieve meeting minutes and per-recipient delivery status",
+)
+def get_meeting_minutes_endpoint(
+    meeting_id: str,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can access meeting minutes",
+        )
+
+    minutes = get_meeting_minutes(db, meeting_id)
+    if minutes is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting minutes not found",
+        )
+
+    return MeetingMinutesResponse.model_validate(minutes)
+
+
+@router.patch(
+    "/{meeting_id}/minutes",
+    response_model=MeetingMinutesResponse,
+    summary="Update or edit draft or pending meeting minutes content",
+)
+@router.put(
+    "/{meeting_id}/minutes",
+    response_model=MeetingMinutesResponse,
+    summary="Update or edit draft or pending meeting minutes content",
+)
+def update_meeting_minutes_endpoint(
+    meeting_id: str,
+    payload: MeetingMinutesUpdateRequest,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can edit meeting minutes",
+        )
+
+    content_action_items = None
+    if payload.content_action_items is not None:
+        content_action_items = [
+            item.model_dump() for item in payload.content_action_items
+        ]
+
+    try:
+        minutes = update_meeting_minutes_content(
+            db,
+            meeting_id,
+            content_summary=payload.content_summary,
+            content_decisions=payload.content_decisions,
+            content_action_items=content_action_items,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return MeetingMinutesResponse.model_validate(minutes)
+
+
+@router.post(
+    "/{meeting_id}/minutes/refresh",
+    response_model=MeetingMinutesResponse,
+    summary="Re-aggregate meeting minutes content from current summary and confirmed action items",
+)
+def refresh_meeting_minutes_endpoint(
+    meeting_id: str,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can refresh meeting minutes",
+        )
+
+    minutes = get_meeting_minutes(db, meeting_id)
+    if minutes is None:
+        try:
+            minutes = generate_or_get_meeting_minutes(db, meeting_id, force_refresh=True)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+    else:
+        minutes = refresh_minutes_content(db, minutes)
+
+    return MeetingMinutesResponse.model_validate(minutes)
+
+
+@router.post(
+    "/{meeting_id}/minutes/approve",
+    response_model=MeetingMinutesResponse,
+    summary="Organizer approves meeting minutes for attendee delivery",
+)
+def approve_meeting_minutes_endpoint(
+    meeting_id: str,
+    payload: MeetingMinutesApproveRequest | None = None,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can approve meeting minutes",
+        )
+
+    try:
+        minutes = approve_meeting_minutes(db, meeting_id, approver_id=caller_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return MeetingMinutesResponse.model_validate(minutes)
+
+
+@router.post(
+    "/{meeting_id}/minutes/send",
+    response_model=MeetingMinutesDeliveryResponse,
+    summary="Send approved meeting minutes to all eligible attendee recipients",
+)
+def send_meeting_minutes_endpoint(
+    meeting_id: str,
+    retry_failed: bool = Query(default=False, description="Re-attempt previously failed recipients"),
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can send meeting minutes",
+        )
+
+    try:
+        recipients = send_meeting_minutes_to_recipients(
+            db, meeting_id, retry_failed=retry_failed
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+    minutes = get_meeting_minutes(db, meeting_id)
+    recipient_responses = [
+        MeetingMinutesRecipientResponse.model_validate(r) for r in recipients
+    ]
+    sent_count = sum(1 for r in recipients if r.delivery_status == "sent")
+    failed_count = sum(1 for r in recipients if r.delivery_status == "failed")
+    pending_count = sum(1 for r in recipients if r.delivery_status == "pending")
+
+    return MeetingMinutesDeliveryResponse(
+        minutes_id=minutes.id,
+        meeting_id=meeting_id,
+        total=len(recipients),
+        sent=sent_count,
+        failed=failed_count,
+        pending=pending_count,
+        recipients=recipient_responses,
+    )
+
+
+@router.get(
+    "/{meeting_id}/minutes/recipients",
+    response_model=list[MeetingMinutesRecipientResponse],
+    summary="Retrieve per-recipient delivery status for meeting minutes",
+)
+def get_minutes_recipients_endpoint(
+    meeting_id: str,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Meeting not found",
+        )
+
+    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
+    if meeting.organizer_id != caller_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the meeting organizer can view delivery status",
+        )
+
+    recipients = get_minutes_recipients(db, meeting_id)
+    return [MeetingMinutesRecipientResponse.model_validate(r) for r in recipients]

@@ -1,25 +1,34 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, Clock, Users, FileText } from 'lucide-react'
+import { ArrowLeft, Clock, Users, FileText, FileCheck } from 'lucide-react'
 import {
+  approveMeetingMinutes,
   confirmActionItemOwner,
   extractMeetingActionItems,
+  generateMeetingMinutes,
   getActiveEmployees,
   getMeetingActionItems,
+  getMeetingMinutes,
   getMeetingReport,
   getMeetingSummary,
   MeetingApiError,
+  refreshMeetingMinutes,
   reviewActionItem,
+  sendMeetingMinutes,
+  updateMeetingMinutes,
   type ActionItemReviewPayload,
 } from '../api/meetings'
 import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { MeetingActionItemsPanel } from '../components/meetings/MeetingActionItemsPanel'
+import { MeetingMinutesPanel } from '../components/meetings/MeetingMinutesPanel'
 import { useAuth } from '../contexts/AuthContext'
 import type {
   MeetingActionItem,
   MeetingActionItems,
   Employee,
+  MeetingMinutes,
+  MeetingMinutesUpdateRequest,
   MeetingReport,
   MeetingSummary,
 } from '../types/meeting'
@@ -59,6 +68,20 @@ export function MeetingReportPage() {
   const [meetingSummary, setMeetingSummary] = useState<MeetingSummary | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(true)
   const [summaryError, setSummaryError] = useState('')
+  const [minutesOpen, setMinutesOpen] = useState(false)
+  const [meetingMinutes, setMeetingMinutes] = useState<MeetingMinutes | null>(null)
+  const [minutesLoading, setMinutesLoading] = useState(false)
+  const [minutesGenerating, setMinutesGenerating] = useState(false)
+  const [minutesApproving, setMinutesApproving] = useState(false)
+  const [minutesSending, setMinutesSending] = useState(false)
+  const [minutesRetrying, setMinutesRetrying] = useState(false)
+  const [minutesUpdating, setMinutesUpdating] = useState(false)
+  const [minutesRefreshingContent, setMinutesRefreshingContent] = useState(false)
+  const [minutesError, setMinutesError] = useState('')
+  const [minutesFeedback, setMinutesFeedback] = useState<{
+    kind: 'success' | 'error'
+    message: string
+  } | null>(null)
 
   useEffect(() => {
     if (sourceSegmentIndex !== null) setTranscriptOpen(true)
@@ -186,6 +209,34 @@ export function MeetingReportPage() {
     return () => { active = false }
   }, [meetingId, summaryOpen, user])
 
+  useEffect(() => {
+    let active = true
+    if (!minutesOpen || !meetingId || !user || !isOrganizer) return
+
+    setMinutesLoading(true)
+    setMeetingMinutes(null)
+    setMinutesError('')
+    getMeetingMinutes(meetingId, user.id)
+      .then((minutes) => {
+        if (active) setMeetingMinutes(minutes)
+      })
+      .catch((reason: unknown) => {
+        if (!active) return
+        if (reason instanceof MeetingApiError && reason.status === 404) {
+          setMeetingMinutes(null)
+          return
+        }
+        setMinutesError(
+          reason instanceof Error ? reason.message : 'Meeting minutes could not be loaded.',
+        )
+      })
+      .finally(() => {
+        if (active) setMinutesLoading(false)
+      })
+
+    return () => { active = false }
+  }, [isOrganizer, meetingId, minutesOpen, user])
+
   function formatTime(isoStr: string) {
     return new Intl.DateTimeFormat(undefined, { timeStyle: 'short' }).format(new Date(isoStr))
   }
@@ -303,6 +354,186 @@ export function MeetingReportPage() {
       .finally(() => setActionItemsLoading(false))
   }
 
+  async function handleGenerateMinutes() {
+    if (!meetingId || !user || !isOrganizer || minutesGenerating) return
+    setMinutesGenerating(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const generated = await generateMeetingMinutes(meetingId, user.id)
+      setMeetingMinutes(generated)
+      setMinutesFeedback({
+        kind: 'success',
+        message: 'Meeting minutes generated successfully.',
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to generate meeting minutes.',
+      )
+    } finally {
+      setMinutesGenerating(false)
+    }
+  }
+
+  async function handleApproveMinutes(notes?: string) {
+    if (!meetingId || !user || !isOrganizer || minutesApproving) return
+    setMinutesApproving(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const approved = await approveMeetingMinutes(meetingId, user.id, notes ? { notes } : undefined)
+      setMeetingMinutes(approved)
+      setMinutesFeedback({
+        kind: 'success',
+        message: 'Meeting minutes approved successfully.',
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to approve meeting minutes.',
+      )
+    } finally {
+      setMinutesApproving(false)
+    }
+  }
+
+  async function handleSendMinutes() {
+    if (!meetingId || !user || !isOrganizer || minutesSending) return
+    setMinutesSending(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const hasFailedRecipients = Boolean(
+        meetingMinutes?.recipients &&
+          meetingMinutes.recipients.some((r) => r.delivery_status === 'failed'),
+      )
+      const result = await sendMeetingMinutes(meetingId, user.id, hasFailedRecipients)
+      try {
+        const refreshed = await getMeetingMinutes(meetingId, user.id)
+        setMeetingMinutes(refreshed)
+      } catch {
+        setMeetingMinutes((cur) =>
+          cur
+            ? {
+                ...cur,
+                status: result.failed > 0 && result.sent === 0 ? 'failed' : 'sent',
+                recipients: result.recipients,
+              }
+            : cur,
+        )
+      }
+      setMinutesFeedback({
+        kind: result.failed > 0 && result.sent === 0 ? 'error' : 'success',
+        message:
+          result.failed > 0
+            ? `Minutes sent to ${result.sent} recipient(s), with ${result.failed} failure(s).`
+            : `Meeting minutes sent successfully to all ${result.sent} recipient(s).`,
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to send meeting minutes.',
+      )
+    } finally {
+      setMinutesSending(false)
+    }
+  }
+
+  async function handleUpdateMinutes(payload: MeetingMinutesUpdateRequest) {
+    if (!meetingId || !user || !isOrganizer) return
+    setMinutesUpdating(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const updated = await updateMeetingMinutes(meetingId, user.id, payload)
+      setMeetingMinutes(updated)
+      setMinutesFeedback({
+        kind: 'success',
+        message: 'Meeting minutes updated successfully. You can now approve them before sending.',
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to update meeting minutes.',
+      )
+      throw reason
+    } finally {
+      setMinutesUpdating(false)
+    }
+  }
+
+  async function handleRefreshContent() {
+    if (!meetingId || !user || !isOrganizer) return
+    setMinutesRefreshingContent(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const refreshed = await refreshMeetingMinutes(meetingId, user.id)
+      setMeetingMinutes(refreshed)
+      setMinutesFeedback({
+        kind: 'success',
+        message: 'Meeting minutes re-synced from latest summary and action items.',
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to sync meeting minutes.',
+      )
+    } finally {
+      setMinutesRefreshingContent(false)
+    }
+  }
+
+  async function handleRetryFailedMinutes() {
+    if (!meetingId || !user || !isOrganizer || minutesRetrying) return
+    setMinutesRetrying(true)
+    setMinutesError('')
+    setMinutesFeedback(null)
+    try {
+      const result = await sendMeetingMinutes(meetingId, user.id, true)
+      try {
+        const refreshed = await getMeetingMinutes(meetingId, user.id)
+        setMeetingMinutes(refreshed)
+      } catch {
+        setMeetingMinutes((cur) =>
+          cur
+            ? {
+                ...cur,
+                status: result.failed > 0 && result.sent === 0 ? 'failed' : 'sent',
+                recipients: result.recipients,
+              }
+            : cur,
+        )
+      }
+      setMinutesFeedback({
+        kind: result.failed > 0 && result.sent === 0 ? 'error' : 'success',
+        message:
+          result.failed > 0
+            ? `Retry finished: ${result.sent} sent, ${result.failed} still failed.`
+            : `Successfully retried and sent minutes to ${result.sent} recipient(s).`,
+      })
+    } catch (reason) {
+      setMinutesError(
+        reason instanceof Error ? reason.message : 'Failed to retry delivery for failed recipients.',
+      )
+    } finally {
+      setMinutesRetrying(false)
+    }
+  }
+
+  function handleRefreshMinutes() {
+    if (!meetingId || !user || !isOrganizer) return
+    setMinutesLoading(true)
+    setMinutesError('')
+    getMeetingMinutes(meetingId, user.id)
+      .then((data) => setMeetingMinutes(data))
+      .catch((err: unknown) => {
+        if (err instanceof MeetingApiError && err.status === 404) {
+          setMeetingMinutes(null)
+          return
+        }
+        setMinutesError(err instanceof Error ? err.message : 'Failed to reload meeting minutes')
+      })
+      .finally(() => setMinutesLoading(false))
+  }
+
+
   function openTranscriptSegment(item: MeetingActionItem) {
     setTranscriptOpen(true)
     setSourceFocusRequestId((requestId) => requestId + 1)
@@ -412,6 +643,18 @@ export function MeetingReportPage() {
                   {summaryOpen ? 'Hide Summary' : 'View Summary'}
                 </button>
               )}
+              {isOrganizer && (
+                <button
+                  className="button secondary"
+                  type="button"
+                  aria-expanded={minutesOpen}
+                  aria-controls="meeting-minutes-panel"
+                  onClick={() => setMinutesOpen((open) => !open)}
+                >
+                  <FileCheck size={16} aria-hidden="true" />
+                  {minutesOpen ? 'Hide Minutes' : 'View Minutes'}
+                </button>
+              )}
             </div>
           </section>
 
@@ -421,6 +664,32 @@ export function MeetingReportPage() {
                 summary={meetingSummary}
                 loading={summaryLoading}
                 error={summaryError}
+              />
+            </div>
+          )}
+
+          {isOrganizer && minutesOpen && (
+            <div id="meeting-minutes-panel">
+              <MeetingMinutesPanel
+                meetingId={meetingId}
+                minutes={meetingMinutes}
+                isOrganizer={isOrganizer}
+                loading={minutesLoading}
+                generating={minutesGenerating}
+                approving={minutesApproving}
+                sending={minutesSending}
+                retrying={minutesRetrying}
+                updating={minutesUpdating}
+                refreshingContent={minutesRefreshingContent}
+                error={minutesError}
+                feedback={minutesFeedback}
+                onGenerate={handleGenerateMinutes}
+                onApprove={handleApproveMinutes}
+                onSend={handleSendMinutes}
+                onRetryFailed={handleRetryFailedMinutes}
+                onRefresh={handleRefreshMinutes}
+                onUpdateMinutes={handleUpdateMinutes}
+                onRefreshContent={handleRefreshContent}
               />
             </div>
           )}

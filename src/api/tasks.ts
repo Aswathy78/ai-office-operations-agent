@@ -81,7 +81,40 @@ export interface TaskActor {
   team: string | null
 }
 
-const API_BASE_URL = 'http://127.0.0.1:8000'
+export let API_BASE_URL =
+  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) ||
+  'http://127.0.0.1:8000'
+
+function getFallbackBaseUrl(current: string): string | null {
+  if (current.includes(':8000')) {
+    return current.replace(':8000', ':9000')
+  }
+  if (current.includes(':9000')) {
+    return current.replace(':9000', ':8000')
+  }
+  return null
+}
+
+async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const urlStr = typeof input === 'string' ? input : input.toString()
+  try {
+    return init !== undefined ? await fetch(urlStr, init) : await fetch(urlStr)
+  } catch (err) {
+    const fallback = getFallbackBaseUrl(API_BASE_URL)
+    if (fallback && urlStr.startsWith(API_BASE_URL)) {
+      const fallbackUrl = urlStr.replace(API_BASE_URL, fallback)
+      try {
+        const response =
+          init !== undefined ? await fetch(fallbackUrl, init) : await fetch(fallbackUrl)
+        API_BASE_URL = fallback
+        return response
+      } catch {
+        // preserve original error
+      }
+    }
+    throw err
+  }
+}
 
 async function readTasks(response: Response): Promise<TaskRecord[]> {
   const body: unknown = await response.json().catch(() => null)
@@ -115,11 +148,11 @@ async function readTask(response: Response): Promise<TaskRecord> {
 
 export function getMyTasks(assigneeEmail: string): Promise<TaskRecord[]> {
   const query = new URLSearchParams({ assignee_email: assigneeEmail })
-  return fetch(`${API_BASE_URL}/api/v1/tasks/?${query}`).then(readTasks)
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/?${query}`).then(readTasks)
 }
 
 export function getDashboardTasks(): Promise<TaskRecord[]> {
-  return fetch(`${API_BASE_URL}/api/v1/tasks/dashboard`).then(readTasks)
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/dashboard`).then(readTasks)
 }
 
 export function taskCalendarUrl(assigneeEmail: string): string {
@@ -128,7 +161,7 @@ export function taskCalendarUrl(assigneeEmail: string): string {
 }
 
 export async function retryAssignmentEmail(taskId: string): Promise<TaskRecord> {
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/assignment-email/retry`,
     { method: 'POST' },
   )
@@ -162,7 +195,7 @@ export function reassignTask(
   reason: string,
   actor: TaskActor,
 ): Promise<TaskChangeResult> {
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/assignee?${actorQuery(actor)}`,
     {
       method: 'PATCH',
@@ -178,7 +211,7 @@ export function changeTaskDueDate(
   reason: string,
   actor: TaskActor,
 ): Promise<TaskChangeResult> {
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/due-date?${actorQuery(actor)}`,
     {
       method: 'PATCH',
@@ -192,7 +225,7 @@ export function getReassignmentRequests(
   status: 'pending' | 'approved' | 'rejected' | '' = 'pending',
 ): Promise<TaskReassignmentRequest[]> {
   const query = new URLSearchParams({ status })
-  return fetch(`${API_BASE_URL}/api/v1/tasks/reassignment-requests?${query}`)
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/reassignment-requests?${query}`)
     .then((response) => readJson<TaskReassignmentRequest[]>(response))
 }
 
@@ -202,7 +235,7 @@ export function decideReassignmentRequest(
   note: string,
   actor: TaskActor,
 ): Promise<TaskChangeResult> {
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/tasks/reassignment-requests/${encodeURIComponent(requestId)}/decision?${actorQuery(actor)}`,
     {
       method: 'POST',
@@ -213,11 +246,11 @@ export function decideReassignmentRequest(
 }
 
 export function getTaskAudit(taskId: string): Promise<TaskAuditEntry[]> {
-  return fetch(`${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/audit`)
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/audit`)
     .then((response) => readJson<TaskAuditEntry[]>(response))
 }
 
 export function getTaskNotifications(taskId: string): Promise<TaskNotification[]> {
-  return fetch(`${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/notifications`)
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/notifications`)
     .then((response) => readJson<TaskNotification[]>(response))
 }

@@ -9,6 +9,11 @@ import {
   getMeetingTranscriptCorrections,
   reviewActionItem,
   updateMeetingTranscript,
+  getMeetingMinutes,
+  generateMeetingMinutes,
+  approveMeetingMinutes,
+  sendMeetingMinutes,
+  getMeetingMinutesRecipients,
 } from './meetings'
 import type {
   MeetingActionItems,
@@ -16,6 +21,9 @@ import type {
   MeetingTranscriptUpdateRequest,
   TranscriptCorrection,
   TranscriptSegment,
+  MeetingMinutes,
+  MeetingMinutesDeliveryResponse,
+  MeetingMinutesRecipient,
 } from '../types/meeting'
 
 const transcriptFixture: MeetingTranscript = {
@@ -369,5 +377,180 @@ describe('transcript API', () => {
     expect(fetchMock).toHaveBeenCalledWith(
       'http://127.0.0.1:8000/api/v1/meetings/meeting-1/transcript/corrections?organizer_id=organizer-1&transcript_id=transcript-2',
     )
+  })
+
+  describe('meeting minutes client (Story 4.2)', () => {
+    const minutesFixture: MeetingMinutes = {
+      id: 'minutes-1',
+      meeting_id: 'meeting-1',
+      summary_id: 'summary-1',
+      status: 'pending_approval',
+      policy: 'manual_approval',
+      approved_by: null,
+      approved_at: null,
+      content_summary: 'Discussed sprint items.',
+      content_decisions: ['Agreed on feature delivery date'],
+      content_action_items: [
+        {
+          id: 'item-1',
+          task_description: 'Write frontend tests',
+          owner_name: 'Alice',
+          owner_email: 'alice@example.com',
+          deadline_at: '2026-10-20T17:00:00Z',
+          deadline_text: 'by next Tuesday',
+          priority: 'high',
+        },
+      ],
+      error_message: null,
+      created_at: '2026-10-14T10:00:00Z',
+      updated_at: '2026-10-14T10:00:00Z',
+      recipients: [
+        {
+          id: 'recipient-1',
+          minutes_id: 'minutes-1',
+          recipient_name: 'Alice',
+          recipient_email: 'alice@example.com',
+          attendance_log_id: 'log-1',
+          delivery_status: 'pending',
+          error_message: null,
+          idempotency_key: 'minutes:minutes-1:alice@example.com',
+          sent_at: null,
+          created_at: '2026-10-14T10:00:00Z',
+        },
+      ],
+    }
+
+    it('requests meeting minutes for an organizer', async () => {
+      const fetchMock = stubFetch(minutesFixture)
+
+      const result = await getMeetingMinutes('meeting-1', 'organizer-1')
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes?organizer_id=organizer-1',
+        expect.objectContaining({
+          headers: expect.objectContaining({ 'X-User-Id': 'organizer-1' }),
+        }),
+      )
+      expect(result.id).toBe('minutes-1')
+      expect(result.status).toBe('pending_approval')
+      expect(result.recipients).toHaveLength(1)
+    })
+
+    it('generates meeting minutes snapshot', async () => {
+      const fetchMock = stubFetch(minutesFixture)
+
+      const result = await generateMeetingMinutes('meeting-1', 'organizer-1')
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes/generate?organizer_id=organizer-1',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ 'X-User-Id': 'organizer-1' }),
+        }),
+      )
+      expect(result.content_summary).toBe('Discussed sprint items.')
+    })
+
+    it('approves meeting minutes with optional notes', async () => {
+      const approvedMinutes: MeetingMinutes = {
+        ...minutesFixture,
+        status: 'approved',
+        approved_by: 'organizer-1',
+        approved_at: '2026-10-14T11:00:00Z',
+      }
+      const fetchMock = stubFetch(approvedMinutes)
+
+      const result = await approveMeetingMinutes('meeting-1', 'organizer-1', { notes: 'Approved for sending' })
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes/approve?organizer_id=organizer-1',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Content-Type': 'application/json',
+            'X-User-Id': 'organizer-1',
+          }),
+          body: JSON.stringify({ notes: 'Approved for sending' }),
+        }),
+      )
+      expect(result.status).toBe('approved')
+      expect(result.approved_by).toBe('organizer-1')
+    })
+
+    it('sends meeting minutes to attendee recipients without retry', async () => {
+      const deliveryResponse: MeetingMinutesDeliveryResponse = {
+        minutes_id: 'minutes-1',
+        meeting_id: 'meeting-1',
+        total: 1,
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        recipients: [
+          {
+            ...minutesFixture.recipients[0],
+            delivery_status: 'sent',
+            sent_at: '2026-10-14T11:05:00Z',
+          },
+        ],
+      }
+      const fetchMock = stubFetch(deliveryResponse)
+
+      const result = await sendMeetingMinutes('meeting-1', 'organizer-1', false)
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes/send?organizer_id=organizer-1&retry_failed=false',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ 'X-User-Id': 'organizer-1' }),
+        }),
+      )
+      expect(result.sent).toBe(1)
+      expect(result.failed).toBe(0)
+    })
+
+    it('retries sending meeting minutes for failed recipients only', async () => {
+      const deliveryResponse: MeetingMinutesDeliveryResponse = {
+        minutes_id: 'minutes-1',
+        meeting_id: 'meeting-1',
+        total: 1,
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        recipients: [
+          {
+            ...minutesFixture.recipients[0],
+            delivery_status: 'sent',
+            sent_at: '2026-10-14T11:10:00Z',
+          },
+        ],
+      }
+      const fetchMock = stubFetch(deliveryResponse)
+
+      const result = await sendMeetingMinutes('meeting-1', 'organizer-1', true)
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes/send?organizer_id=organizer-1&retry_failed=true',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ 'X-User-Id': 'organizer-1' }),
+        }),
+      )
+      expect(result.sent).toBe(1)
+    })
+
+    it('retrieves delivery status of meeting minutes recipients', async () => {
+      const fetchMock = stubFetch(minutesFixture.recipients)
+
+      const recipients = await getMeetingMinutesRecipients('meeting-1', 'organizer-1')
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://127.0.0.1:8000/api/v1/meetings/meeting-1/minutes/recipients?organizer_id=organizer-1',
+        expect.objectContaining({
+          headers: expect.objectContaining({ 'X-User-Id': 'organizer-1' }),
+        }),
+      )
+      expect(recipients).toHaveLength(1)
+      expect(recipients[0].recipient_email).toBe('alice@example.com')
+    })
   })
 })
