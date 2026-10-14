@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
-import { getDashboardTasks, getMyTasks } from '../api/tasks'
+import { getDashboardTasks, getMyTasks, taskCalendarUrl } from '../api/tasks'
 import { demoUsers } from '../mocks/mockUser'
 import { TaskWorkspacePage } from './TaskWorkspacePage'
 
@@ -29,6 +30,89 @@ afterEach(() => {
 })
 
 describe('TaskWorkspacePage employee identity', () => {
+  it('renders the calendar grid and preserves export and manual refresh', async () => {
+    authValue.user = demoUsers.employee
+    vi.mocked(getMyTasks).mockResolvedValue([])
+    vi.mocked(taskCalendarUrl).mockReturnValue('/api/v1/tasks/calendar.ics')
+    const user = userEvent.setup()
+
+    render(
+      <MemoryRouter>
+        <TaskWorkspacePage view="calendar" />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('table', { name: /task calendar/i })).toBeInTheDocument()
+    expect(
+      screen.getByRole('heading', {
+        name: new Intl.DateTimeFormat('en-US', {
+          month: 'long',
+          year: 'numeric',
+        }).format(new Date()),
+      }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Add deadlines to calendar' }))
+      .toHaveAttribute('href', '/api/v1/tasks/calendar.ics')
+    expect(getMyTasks).toHaveBeenCalledWith(demoUsers.employee.email)
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(getMyTasks).toHaveBeenCalledTimes(2))
+  })
+
+  it('shows a task on its due date after Calendar Refresh fetches it', async () => {
+    authValue.user = demoUsers.employee
+    const dueAt = new Date()
+    dueAt.setDate(15)
+    dueAt.setHours(16, 0, 0, 0)
+    const dueDateLabel = new Intl.DateTimeFormat('en-US', {
+      weekday: 'long',
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    }).format(dueAt)
+    vi.mocked(getMyTasks)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'task-refresh',
+          title: 'Newly confirmed calendar task',
+          assignee_id: 'employee-1',
+          assignee_name: 'Rahul',
+          creator_id: 'manager-1',
+          source: 'meeting_action_item',
+          source_action_item_id: 'action-1',
+          meeting_id: 'meeting-1',
+          meeting_title: 'Planning meeting',
+          transcript_id: 'transcript-1',
+          source_segment_index: 0,
+          source_timestamp_seconds: 5,
+          due_at: dueAt.toISOString(),
+          priority: 'medium',
+          status: 'pending',
+          assignment_email_status: 'sent',
+          assignment_email_error: null,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    const user = userEvent.setup()
+
+    render(
+      <MemoryRouter>
+        <TaskWorkspacePage view="calendar" />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('table', { name: /task calendar/i })).toBeInTheDocument()
+    expect(screen.queryByText('Newly confirmed calendar task')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+
+    const dueDay = await screen.findByRole('cell', { name: dueDateLabel })
+    expect(within(dueDay).getByRole('button', {
+      name: /Newly confirmed calendar task/,
+    })).toBeInTheDocument()
+  })
+
   it('selects and focuses the task requested by the task deep link', async () => {
     authValue.user = demoUsers.employee
     vi.mocked(getMyTasks).mockResolvedValue([

@@ -99,7 +99,11 @@ def _task_response(
         transcript_id=task.transcript_id,
         source_segment_index=task.source_segment_index,
         source_timestamp_seconds=task.source_timestamp_seconds,
-        due_at=task.due_at,
+        due_at=(
+            task.due_at.replace(tzinfo=timezone.utc)
+            if task.due_at.tzinfo is None
+            else task.due_at.astimezone(timezone.utc)
+        ),
         priority=task.priority,
         status=task.status,
         assignment_email_status=task.assignment_email_status,

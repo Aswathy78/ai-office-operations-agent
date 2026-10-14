@@ -1,6 +1,7 @@
 """Task creation and assignment-email delivery for confirmed action items."""
 
 from email.message import EmailMessage
+from datetime import datetime, timezone
 import logging
 import os
 import smtplib
@@ -22,6 +23,12 @@ from app.meeting.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def prepare_task_from_confirmed_action_item(
@@ -52,7 +59,7 @@ def prepare_task_from_confirmed_action_item(
         assignee_changed = task.assignee_id != employee.id
         task.title = item.task_description
         task.assignee_id = employee.id
-        task.due_at = item.deadline_at
+        task.due_at = _as_utc(item.deadline_at)
         task.priority = item.priority
         task.source_segment_index = item.source_segment_index
         task.source_timestamp_seconds = item.source_start_seconds
@@ -74,7 +81,7 @@ def prepare_task_from_confirmed_action_item(
         transcript_id=extraction.transcript_id,
         source_segment_index=item.source_segment_index,
         source_timestamp_seconds=item.source_start_seconds,
-        due_at=item.deadline_at,
+        due_at=_as_utc(item.deadline_at),
         priority=item.priority,
         status=TASK_STATUS_PENDING,
     )
