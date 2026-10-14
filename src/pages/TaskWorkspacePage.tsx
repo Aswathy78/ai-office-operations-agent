@@ -10,6 +10,7 @@ import {
   type TaskActor,
   type TaskRecord,
 } from '../api/tasks'
+import { TaskCalendarMonth } from '../components/tasks/TaskCalendarMonth'
 import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
 import { useAuth } from '../contexts/AuthContext'
 import type { Employee } from '../types/meeting'
@@ -207,6 +208,8 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
 
       {loading ? (
         <div className="meetings-loading" role="status">Loading tasks...</div>
+      ) : isCalendar ? (
+        <TaskCalendarMonth tasks={tasks} />
       ) : tasks.length === 0 ? (
         <section className="meetings-empty">
           <div className="state-icon" aria-hidden="true">

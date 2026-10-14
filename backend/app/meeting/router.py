@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
@@ -1205,7 +1206,7 @@ def _single_action_item_response(
         is_task_eligible=is_task_eligible,
         requires_approval=requires_approval,
         task_description=action_item.task_description,
-        deadline_at=action_item.deadline_at,
+        deadline_at=_as_utc(action_item.deadline_at),
         deadline_text=action_item.deadline_text,
         priority=action_item.priority,
         confidence=action_item.confidence,
@@ -1218,6 +1219,14 @@ def _single_action_item_response(
         source_quote_end_seconds=action_item.source_quote_end_seconds,
         source_quote=action_item.source_quote,
     )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _meeting_action_items_response(

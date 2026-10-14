@@ -83,7 +83,7 @@ def _resolve_deadline_text(
     meeting_start_at: datetime,
     organization_timezone: ZoneInfo,
 ) -> datetime | None:
-    """Resolve supported relative deadlines using the meeting's local date.
+    """Resolve supported explicit and relative deadlines in the organization zone.
 
     Unsupported or ambiguous phrases return None so they can be reviewed.
     """
@@ -124,6 +124,60 @@ def _resolve_deadline_text(
         "",
         phrase,
     ).strip()
+
+    absolute_match = re.fullmatch(
+        r"(?:(?P<day_first>\d{1,2})\s+(?P<day_month>[a-z]+),?\s+"
+        r"(?P<day_year>\d{4})|(?P<month_first>[a-z]+)\s+"
+        r"(?P<month_day>\d{1,2}),?\s+(?P<month_year>\d{4}))"
+        r"(?:\s+at\s+(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*"
+        r"(?P<meridiem>am|pm))?",
+        phrase,
+    )
+    if absolute_match:
+        if absolute_match.group("day_first") is not None:
+            date_text = (
+                f"{absolute_match.group('day_first')} "
+                f"{absolute_match.group('day_month')} "
+                f"{absolute_match.group('day_year')}"
+            )
+            date_formats = ("%d %B %Y", "%d %b %Y")
+        else:
+            date_text = (
+                f"{absolute_match.group('month_first')} "
+                f"{absolute_match.group('month_day')} "
+                f"{absolute_match.group('month_year')}"
+            )
+            date_formats = ("%B %d %Y", "%b %d %Y")
+
+        deadline_date = None
+        for date_format in date_formats:
+            try:
+                deadline_date = datetime.strptime(date_text, date_format).date()
+                break
+            except ValueError:
+                continue
+        if deadline_date is None:
+            return None
+
+        hour_text = absolute_match.group("hour")
+        minute_text = absolute_match.group("minute") or "00"
+        meridiem = absolute_match.group("meridiem")
+        if hour_text is None:
+            deadline_time = datetime.min.time()
+        else:
+            try:
+                deadline_time = datetime.strptime(
+                    f"{hour_text}:{minute_text} {meridiem}",
+                    "%I:%M %p",
+                ).time()
+            except ValueError:
+                return None
+
+        return datetime.combine(
+            deadline_date,
+            deadline_time,
+            tzinfo=organization_timezone,
+        )
 
     # "Tomorrow" means the next calendar day.
     if phrase in {"tomorrow", "the next day"}:
@@ -519,6 +573,8 @@ def _validate_candidates(
                 meeting_start_at=meeting_start_at,
                 organization_timezone=organization_timezone,
             )
+            if deadline_at is not None:
+                deadline_at = deadline_at.astimezone(timezone.utc)
 
 
         print(
@@ -975,7 +1031,11 @@ def review_action_item(
         item.owner_name = owner_name.strip() if owner_name.strip() else None
 
     if deadline_at is not None:
-        item.deadline_at = deadline_at
+        item.deadline_at = (
+            deadline_at.astimezone(timezone.utc)
+            if deadline_at.tzinfo is not None
+            else deadline_at.replace(tzinfo=timezone.utc)
+        )
 
     if deadline_text is not None:
         item.deadline_text = deadline_text.strip() if deadline_text.strip() else None

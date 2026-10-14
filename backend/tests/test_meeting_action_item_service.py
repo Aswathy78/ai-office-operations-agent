@@ -194,7 +194,9 @@ def test_extracts_explicit_assignment_and_persists_source_timestamps(
     days_until_friday = (4 - meeting_date.weekday()) % 7
     expected_friday = meeting_date + timedelta(days=days_until_friday)
 
-    assert item.deadline_at.date() == expected_friday
+    assert item.deadline_at.replace(tzinfo=timezone.utc).astimezone(
+        ZoneInfo("Asia/Kolkata")
+    ).date() == expected_friday
 
 
     assert item.deadline_text == "by Friday"
@@ -215,6 +217,36 @@ def test_extracts_explicit_assignment_and_persists_source_timestamps(
             "text": "I will send the draft by Friday.",
         }
     ]
+
+
+def test_resolves_explicit_deadline_date_and_time_in_organization_timezone(
+    db_session: Session,
+    monkeypatch,
+):
+    transcript = _create_completed_transcript(
+        db_session,
+        [
+            {
+                "start": 2.0,
+                "end": 6.0,
+                "text": "Alex will prepare the report by 22 October, 2026 at 4pm.",
+                "speaker": "Alex",
+            }
+        ],
+    )
+    candidate = _candidate(
+        source_quote="Alex will prepare the report by 22 October, 2026 at 4pm.",
+        task_description="Prepare the report.",
+        deadline_text="22 October, 2026 at 4pm",
+    )
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    _install_groq(monkeypatch, _response([candidate]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    deadline_at = extraction.items[0].deadline_at
+    assert deadline_at == datetime(2026, 10, 22, 10, 30)
+    assert deadline_at.tzinfo is None
 
 
 def test_extracts_multiple_action_items_from_distinct_segments(

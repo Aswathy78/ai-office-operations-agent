@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 import uuid
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -227,6 +228,11 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     )
     assert assigned_tasks.status_code == 200
     assert [row["id"] for row in assigned_tasks.json()] == [task.id]
+    due_at_response = datetime.fromisoformat(assigned_tasks.json()[0]["due_at"])
+    assert due_at_response.tzinfo is not None
+    assert due_at_response.astimezone(timezone.utc) == item.deadline_at.replace(
+        tzinfo=timezone.utc
+    )
 
     calendar = client.get(
         f"/api/v1/tasks/calendar.ics?assignee_email={employee.email}"
@@ -419,6 +425,62 @@ def test_confirmation_requires_assignee_and_due_date_without_partial_task(
     assert db_session.query(Task).count() == 0
     db_session.refresh(item)
     assert item.review_status == ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW
+
+
+def test_local_deadline_is_saved_and_returned_as_utc_for_calendar(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    meeting, _, employee, item = _create_confirmable_action_item(db_session)
+    item.deadline_at = None
+    db_session.commit()
+    monkeypatch.setattr("app.task_service.send_email", lambda *_args: None)
+
+    confirmation = client.patch(
+        f"/api/v1/meetings/{meeting.id}/action-items/{item.id}/review"
+        f"?organizer_id={ORGANIZER_ID}",
+        json={
+            "action": "confirm",
+            "deadline_at": datetime(
+                2026,
+                10,
+                22,
+                16,
+                0,
+                tzinfo=ZoneInfo("Asia/Kolkata"),
+            ).isoformat(),
+        },
+    )
+    assert confirmation.status_code == 200
+    action_item_deadline = datetime.fromisoformat(
+        confirmation.json()["deadline_at"]
+    )
+    assert action_item_deadline == datetime(
+        2026,
+        10,
+        22,
+        10,
+        30,
+        tzinfo=timezone.utc,
+    )
+
+    task = db_session.query(Task).one()
+    assert task.due_at == datetime(2026, 10, 22, 10, 30)
+
+    tasks_response = client.get(
+        "/api/v1/tasks/",
+        params={"assignee_email": employee.email},
+    )
+    assert tasks_response.status_code == 200
+    due_at = datetime.fromisoformat(tasks_response.json()[0]["due_at"])
+    assert due_at == datetime(2026, 10, 22, 10, 30, tzinfo=timezone.utc)
+
+    calendar_response = client.get(
+        "/api/v1/tasks/calendar.ics",
+        params={"assignee_email": employee.email},
+    )
+    assert "DTSTART:20261022T103000Z" in calendar_response.text
 
 
 def test_assignment_email_uses_configured_smtp(
