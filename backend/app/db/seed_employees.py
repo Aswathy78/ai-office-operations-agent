@@ -14,7 +14,7 @@ DEVELOPMENT_EMPLOYEES = [
     {"name": "Marcus Chen", "email": "marcus.chen@northstar.example", "team": "Engineering"},
     {"name": "Isabella Lopez", "email": "isabella.lopez@northstar.example", "team": "Finance"},
     {"name": "Daniel Brooks", "email": "daniel.brooks@northstar.example", "team": "Engineering"},
-    {"name": "Priya Sharma", "email": "priya.sharma@northstar.example", "team": "Finance"},
+    {"name": "Priya Sharma", "email": "priyasharma.example@gmail.com","team": "Finance"},
     {"name": "Noah Martin", "email": "noah.martin@northstar.example", "team": "Finance"},
     {"name": "Chloe Nguyen", "email": "chloe.nguyen@northstar.example", "team": "Operations"},
     {"name": "Ethan Walker", "email": "ethan.walker@northstar.example", "team": "Operations"},
