@@ -11,6 +11,7 @@ import {
   type TaskActor,
   type TaskRecord,
 } from '../api/tasks'
+import { EmailDeliveryPanel } from '../components/email/EmailDeliveryPanel'
 import { TaskCalendarMonth } from '../components/tasks/TaskCalendarMonth'
 import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
 import { useAuth } from '../contexts/AuthContext'
@@ -216,6 +217,8 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
           </button>
         </div>
       </section>
+
+      {isDashboard && canManageTasks && actor && <EmailDeliveryPanel actor={actor} />}
 
       {error && (
         <section className="meetings-error" role="alert">

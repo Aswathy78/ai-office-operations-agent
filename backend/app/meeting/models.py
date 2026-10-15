@@ -1098,25 +1098,29 @@ class MeetingMinutesRecipient(Base):
     attendance_log: Mapped["MeetingAttendanceLog | None"] = relationship()
 
 
-# Allowed values for EmailDraft.status (Story 4.3 — e-mail drafting from chat).
+# EmailDraft.status — the delivery lifecycle (Story 4.4 / FR-22). Every e-mail
+# has exactly one of these seven statuses; allowed moves are defined in
+# app.email_delivery_service.ALLOWED_TRANSITIONS.
 EMAIL_DRAFT_STATUS_DRAFT = "draft"
-EMAIL_DRAFT_STATUS_PENDING_APPROVAL = "pending_approval"
-EMAIL_DRAFT_STATUS_APPROVED = "approved"
-EMAIL_DRAFT_STATUS_REJECTED = "rejected"
+EMAIL_DRAFT_STATUS_APPROVAL = "approval"
+EMAIL_DRAFT_STATUS_QUEUED = "queued"
+EMAIL_DRAFT_STATUS_SENDING = "sending"
 EMAIL_DRAFT_STATUS_SENT = "sent"
-EMAIL_DRAFT_STATUS_PARTIALLY_SENT = "partially_sent"
 EMAIL_DRAFT_STATUS_FAILED = "failed"
-EMAIL_DRAFT_STATUS_DISCARDED = "discarded"
+EMAIL_DRAFT_STATUS_RETRY = "retry"
 EMAIL_DRAFT_STATUSES = (
     EMAIL_DRAFT_STATUS_DRAFT,
-    EMAIL_DRAFT_STATUS_PENDING_APPROVAL,
-    EMAIL_DRAFT_STATUS_APPROVED,
-    EMAIL_DRAFT_STATUS_REJECTED,
+    EMAIL_DRAFT_STATUS_APPROVAL,
+    EMAIL_DRAFT_STATUS_QUEUED,
+    EMAIL_DRAFT_STATUS_SENDING,
     EMAIL_DRAFT_STATUS_SENT,
-    EMAIL_DRAFT_STATUS_PARTIALLY_SENT,
     EMAIL_DRAFT_STATUS_FAILED,
-    EMAIL_DRAFT_STATUS_DISCARDED,
+    EMAIL_DRAFT_STATUS_RETRY,
 )
+
+# Outcome of an approval request; the draft returns to "draft" either way.
+EMAIL_APPROVAL_DECISION_APPROVED = "approved"
+EMAIL_APPROVAL_DECISION_REJECTED = "rejected"
 
 EMAIL_DRAFT_SOURCE_TEMPLATE = "template"
 EMAIL_DRAFT_SOURCE_LLM = "llm"
@@ -1138,6 +1142,7 @@ class EmailDraft(Base):
         ),
         Index("ix_email_drafts_created_by_id", "created_by_id"),
         Index("ix_email_drafts_status", "status"),
+        Index("ix_email_drafts_status_next_attempt", "status", "next_attempt_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -1165,18 +1170,58 @@ class EmailDraft(Base):
         nullable=False,
         default=EMAIL_DRAFT_STATUS_DRAFT,
     )
+    # "approved" / "rejected" once an approver has decided; cleared by any edit.
+    approval_decision: Mapped[str | None] = mapped_column(String(20), nullable=True)
     decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # [{"email", "status": "sent" | "failed", "error"}]
+    # One entry per recipient: {"email", "status": "sent" | "failed", "error",
+    # "message_id", "accepted_at", "attempt"}. "sent" means the provider accepted it.
     delivery_results: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Delivery bookkeeping.
+    acknowledged_sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    discarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class EmailDraftEvent(Base):
+    """One status change of an e-mail draft, so the sender can see exactly what happened."""
+
+    __tablename__ = "email_draft_events"
+    __table_args__ = (
+        Index("ix_email_draft_events_draft_created", "draft_id", "created_at"),
+        UniqueConstraint("draft_id", "sequence", name="uq_email_draft_events_draft_sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("email_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # 1, 2, 3, ... per e-mail; orders events even when timestamps tie.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    to_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Who caused it: a user id, or "system" for the dispatcher.
+    actor_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),

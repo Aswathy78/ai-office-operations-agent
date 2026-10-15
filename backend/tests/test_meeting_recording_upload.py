@@ -68,6 +68,11 @@ def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeyp
         "start_task_reminder_scheduler",
         lambda: events.append(("start_reminder_scheduler",)),
     )
+    monkeypatch.setattr(
+        main_module,
+        "start_email_dispatcher",
+        lambda: events.append(("start_email_dispatcher",)),
+    )
 
     main_module.startup()
 
@@ -77,6 +82,7 @@ def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeyp
         ("create_tables",),
         ("seed_employees",),
         ("start_reminder_scheduler",),
+        ("start_email_dispatcher",),
     ]
 
 

@@ -2,14 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Bot, MessageSquare, SendHorizontal } from 'lucide-react'
 import {
+  EMAIL_STATUS_POLL_MS,
   createEmailDraft,
   getDirectoryGroups,
   getMyEmailDrafts,
+  isInFlight,
   type DirectoryGroup,
   type EmailDraft,
 } from '../api/emailDrafts'
 import { EmailDraftPreview, EmailDraftStatusPill } from '../components/email/EmailDraftPreview'
 import { useAuth } from '../contexts/AuthContext'
+import { usePolling } from '../hooks/usePolling'
 
 type ChatMessage =
   | { id: string; role: 'user'; text: string }
@@ -84,9 +87,30 @@ export function ChatPage() {
     setDrafts((current) => ({ ...current, [draft.id]: draft }))
     setRecent((current) => {
       const others = current.filter((item) => item.id !== draft.id)
-      return draft.status === 'discarded' ? others : [draft, ...others]
+      return draft.discarded_at ? others : [draft, ...others]
     })
   }
+
+  // While any e-mail is in Approval, Queued, Sending or Retry, refresh every 2 seconds so
+  // each status change (e.g. Queued -> Sending -> Sent) shows up within 5 seconds.
+  const anyInFlight = recent.some(isInFlight) || Object.values(drafts).some(isInFlight)
+  usePolling(
+    async () => {
+      if (!actor) return
+      const latest = await getMyEmailDrafts(actor)
+      setRecent(latest)
+      setDrafts((current) => {
+        const next = { ...current }
+        for (const draft of latest) if (next[draft.id]) next[draft.id] = draft
+        return next
+      })
+    },
+    EMAIL_STATUS_POLL_MS,
+    anyInFlight,
+  )
+
+  const needsAttention = recent.filter((draft) => draft.status === 'failed' || draft.status === 'retry')
+  const others = recent.filter((draft) => draft.status !== 'failed' && draft.status !== 'retry')
 
   async function submit(text: string) {
     const prompt = text.trim()
@@ -205,17 +229,39 @@ export function ChatPage() {
         {recent.length === 0 ? (
           <p className="task-manage-hint">Drafts you create will appear here.</p>
         ) : (
-          <ul>
-            {recent.map((draft) => (
-              <li key={draft.id}>
-                <button type="button" onClick={() => openDraft(draft)}>
-                  <strong>{draft.subject || '(no subject)'}</strong>
-                  <span>{draft.recipient_count} recipient{draft.recipient_count === 1 ? '' : 's'}</span>
-                  <EmailDraftStatusPill status={draft.status} />
-                </button>
-              </li>
-            ))}
-          </ul>
+          <>
+            {needsAttention.length > 0 && (
+              <section className="chat-sidebar-attention" aria-label="E-mails that need attention">
+                <h4>Needs attention ({needsAttention.length})</h4>
+                <ul>
+                  {needsAttention.map((draft) => (
+                    <li key={draft.id}>
+                      <button type="button" onClick={() => openDraft(draft)}>
+                        <strong>{draft.subject || '(no subject)'}</strong>
+                        <span>
+                          {draft.status === 'retry'
+                            ? `Retrying automatically (attempt ${draft.attempt_count} of ${draft.max_attempts})`
+                            : 'Not delivered to every recipient'}
+                        </span>
+                        <EmailDraftStatusPill status={draft.status} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            <ul>
+              {others.map((draft) => (
+                <li key={draft.id}>
+                  <button type="button" onClick={() => openDraft(draft)}>
+                    <strong>{draft.subject || '(no subject)'}</strong>
+                    <span>{draft.recipient_count} recipient{draft.recipient_count === 1 ? '' : 's'}</span>
+                    <EmailDraftStatusPill status={draft.status} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </>
         )}
       </aside>
     </div>

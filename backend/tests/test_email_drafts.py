@@ -1,4 +1,5 @@
 """Story 4.3 (FR-20): draft an e-mail from chat, preview it, and stay in control of sending."""
+from datetime import datetime, timedelta, timezone
 import uuid
 
 import pytest
@@ -10,6 +11,7 @@ from sqlalchemy.pool import StaticPool
 from main import app
 from app import email_draft_service
 from app.db.database import get_db
+from app.email_delivery_service import process_due_emails
 from app.email_draft_service import scan_sensitive
 from app.meeting.models import Base, Employee
 
@@ -60,12 +62,20 @@ def no_llm(monkeypatch):
 
 @pytest.fixture()
 def sent_emails(monkeypatch):
+    """Fake mail provider: accepts every message and returns a Message-ID."""
     sent: list[tuple[str, str, str]] = []
-    monkeypatch.setattr(
-        "app.task_service.send_email",
-        lambda recipient, subject, body: sent.append((recipient, subject, body)),
-    )
+
+    def accept(recipient, subject, body):
+        sent.append((recipient, subject, body))
+        return f"<{len(sent)}@test.example>"
+
+    monkeypatch.setattr("app.task_service.deliver_email", accept)
     return sent
+
+
+def _dispatch(db: Session, now=None):
+    """Run one pass of the background dispatcher (disabled in tests)."""
+    return process_due_emails(db, now=now)
 
 
 def _employee(db: Session, name: str, team: str | None, email: str | None = None) -> Employee:
@@ -144,7 +154,7 @@ def test_llm_failure_falls_back_to_general_template_with_note(client, directory)
     assert draft["subject"] == "The Q3 budget summary"
 
 
-def test_external_recipient_requires_approval_before_send(client, directory, sent_emails):
+def test_external_recipient_requires_approval_before_send(client, db_session, directory, sent_emails):
     draft = _create(client, "Email partner@vendor.com and Ava about the contract renewal deadline")
 
     assert {r["email"]: r["internal"] for r in draft["recipients"]} == {
@@ -160,20 +170,25 @@ def test_external_recipient_requires_approval_before_send(client, directory, sen
     assert "Approval is required" in blocked.json()["detail"]
 
     submitted = client.post(f"/api/v1/email-drafts/{draft['id']}/submit", params=EMPLOYEE)
-    assert submitted.json()["status"] == "pending_approval"
+    assert submitted.json()["status"] == "approval"
 
     queue = client.get("/api/v1/email-drafts/approvals", params=MANAGER).json()
     assert [item["id"] for item in queue] == [draft["id"]]
 
     decided = client.post(f"/api/v1/email-drafts/{draft['id']}/decision", params=MANAGER,
                           json={"decision": "approve", "note": "OK"})
-    assert decided.json()["status"] == "approved"
-    assert sent_emails == []  # approval does not send; the employee does
+    # Approval returns the e-mail to Draft with the decision recorded; it does not send.
+    assert decided.json()["status"] == "draft"
+    assert decided.json()["approval_decision"] == "approved"
+    assert sent_emails == []
 
-    sent = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
-                       json={"confirm": True})
-    assert sent.status_code == 200, sent.text
-    assert sent.json()["status"] == "sent"
+    queued = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
+                         json={"confirm": True})
+    assert queued.status_code == 200, queued.text
+    assert queued.json()["status"] == "queued"
+    _dispatch(db_session)
+    sent = client.get(f"/api/v1/email-drafts/{draft['id']}", params=EMPLOYEE).json()
+    assert sent["status"] == "sent"
     assert sorted(r for r, _, _ in sent_emails) == ["ava.patel@northstar.example", "partner@vendor.com"]
 
 
@@ -211,7 +226,7 @@ def test_editing_an_approved_draft_invalidates_approval(client, directory):
     assert blocked.status_code == 409
 
 
-def test_sensitive_data_must_be_acknowledged_before_send(client, directory, sent_emails):
+def test_sensitive_data_must_be_acknowledged_before_send(client, db_session, directory, sent_emails):
     draft = _create(client, "Email Ava about the review meeting")
     updated = client.patch(
         f"/api/v1/email-drafts/{draft['id']}", params=EMPLOYEE,
@@ -229,9 +244,12 @@ def test_sensitive_data_must_be_acknowledged_before_send(client, directory, sent
     assert "sensitive" in blocked.json()["detail"]
     assert sent_emails == []
 
-    sent = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
-                       json={"confirm": True, "acknowledge_sensitive": True})
-    assert sent.json()["status"] == "sent"
+    queued = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
+                         json={"confirm": True, "acknowledge_sensitive": True})
+    assert queued.json()["status"] == "queued"
+    assert queued.json()["acknowledged_sensitive"] is True
+    _dispatch(db_session)
+    assert client.get(f"/api/v1/email-drafts/{draft['id']}", params=EMPLOYEE).json()["status"] == "sent"
     assert len(sent_emails) == 1
 
 
@@ -280,23 +298,25 @@ def test_recipients_can_be_removed_and_groups_added(client, directory):
     assert invalid.status_code == 422
 
 
-def test_failed_delivery_can_be_retried_without_resending(client, directory, monkeypatch):
+def test_failed_delivery_can_be_retried_without_resending(client, db_session, directory, monkeypatch):
     attempts: list[str] = []
 
     def flaky(recipient, subject, body):
         attempts.append(recipient)
         if recipient.startswith("marcus") and attempts.count(recipient) == 1:
             raise OSError("SMTP down")
+        return f"<{len(attempts)}@test.example>"
 
-    monkeypatch.setattr("app.task_service.send_email", flaky)
+    monkeypatch.setattr("app.task_service.deliver_email", flaky)
     draft = _create(client, "Email Ava and Marcus about the review meeting")
 
-    first = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
-                        json={"confirm": True}).json()
-    assert first["status"] == "partially_sent"
+    client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE, json={"confirm": True})
+    _dispatch(db_session)
+    first = client.get(f"/api/v1/email-drafts/{draft['id']}", params=EMPLOYEE).json()
+    assert first["status"] == "retry"  # temporary failure: retried automatically
 
-    retry = client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE,
-                        json={"confirm": True}).json()
+    _dispatch(db_session, now=datetime.now(timezone.utc) + timedelta(minutes=5))
+    retry = client.get(f"/api/v1/email-drafts/{draft['id']}", params=EMPLOYEE).json()
     assert retry["status"] == "sent"
     assert attempts.count("ava.patel@northstar.example") == 1
 

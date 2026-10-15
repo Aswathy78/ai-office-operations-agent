@@ -16,6 +16,11 @@ vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => authValue,
 }))
 
+vi.mock('../api/emailDrafts', () => ({
+  EMAIL_STATUS_POLL_MS: 2000,
+  getEmailDeliveryIssues: vi.fn().mockResolvedValue([]),
+}))
+
 vi.mock('../api/tasks', () => ({
   getMyTasks: vi.fn(),
   getDashboardTasks: vi.fn(),

@@ -982,3 +982,32 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 /* Task completion (Story 4.4) */
 .task-status-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+/* E-mail delivery lifecycle (Story 4.4 / FR-22) */
+.status-pill.info { background: var(--blue-soft); color: var(--blue); }
+.email-lifecycle { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.email-lifecycle-step { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; border-radius: 999px; background: #f1f4f9; color: var(--muted); font-size: 11px; font-weight: 700; }
+.email-lifecycle-step + .email-lifecycle-step::before { content: '›'; margin-right: 4px; color: #a2adbd; }
+.email-lifecycle-dot { width: 8px; height: 8px; border-radius: 50%; background: #c6cfdb; }
+.email-lifecycle-step.done { color: #33445e; }
+.email-lifecycle-step.done .email-lifecycle-dot { background: var(--success); }
+.email-lifecycle-step.current { background: var(--blue-soft); color: var(--blue); }
+.email-lifecycle-step.current .email-lifecycle-dot { background: var(--blue); }
+.email-lifecycle-step.current.danger { background: #fdecec; color: var(--danger); }
+.email-lifecycle-step.current.danger .email-lifecycle-dot { background: var(--danger); }
+.email-lifecycle-step.current.warning { background: #fff3dc; color: var(--warning); }
+.email-lifecycle-step.current.warning .email-lifecycle-dot { background: var(--warning); }
+.email-status-detail { margin: 0; font-size: 12px; color: var(--muted); }
+.email-status-detail.danger { color: var(--danger); }
+.email-status-detail.warning { color: var(--warning); }
+.email-status-error { display: block; margin-top: 2px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.email-history { display: grid; gap: 6px; }
+.email-history .text-button { display: inline-flex; align-items: center; gap: 4px; justify-self: start; }
+.email-history-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12px; color: #33445e; }
+.email-history-list time { color: var(--muted); }
+.chat-sidebar-attention { margin-bottom: 12px; padding: 10px; border-radius: 10px; background: #fff7f7; border: 1px solid #f1c9c9; }
+.chat-sidebar-attention h4 { margin: 0 0 8px; font-size: 12px; color: var(--danger); }
+.email-delivery-panel { flex-direction: column; align-items: stretch; }
+.email-delivery-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.email-delivery-list li { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.email-delivery-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }

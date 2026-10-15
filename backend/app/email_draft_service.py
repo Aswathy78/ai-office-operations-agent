@@ -12,6 +12,9 @@ asked for it reviews the preview and explicitly confirms. Specifically:
   draft must be approved by a manager / HR / admin before it can be sent.
 - A sensitive-data scan runs on every draft change and again immediately
   before sending; findings must be acknowledged by the sender.
+
+Sending queues the e-mail; delivery and its status lifecycle (Story 4.4 /
+FR-22) are handled by ``app.email_delivery_service``.
 """
 
 from __future__ import annotations
@@ -22,22 +25,20 @@ import json
 import logging
 import os
 import re
-import smtplib
 import uuid
 
 from sqlalchemy.orm import Session
 
+from app import email_delivery_service as delivery
 from app.meeting.models import (
+    EMAIL_APPROVAL_DECISION_APPROVED,
+    EMAIL_APPROVAL_DECISION_REJECTED,
     EMAIL_DRAFT_SOURCE_LLM,
     EMAIL_DRAFT_SOURCE_TEMPLATE,
-    EMAIL_DRAFT_STATUS_APPROVED,
-    EMAIL_DRAFT_STATUS_DISCARDED,
+    EMAIL_DRAFT_STATUS_APPROVAL,
     EMAIL_DRAFT_STATUS_DRAFT,
     EMAIL_DRAFT_STATUS_FAILED,
-    EMAIL_DRAFT_STATUS_PARTIALLY_SENT,
-    EMAIL_DRAFT_STATUS_PENDING_APPROVAL,
-    EMAIL_DRAFT_STATUS_REJECTED,
-    EMAIL_DRAFT_STATUS_SENT,
+    EMAIL_DRAFT_STATUS_QUEUED,
     EmailDraft,
     Employee,
 )
@@ -46,19 +47,8 @@ logger = logging.getLogger(__name__)
 
 APPROVER_ROLES = frozenset({"manager", "hr_operations", "admin"})
 EVERYONE_GROUP = "Everyone"
-EDITABLE_STATUSES = frozenset({
-    EMAIL_DRAFT_STATUS_DRAFT,
-    EMAIL_DRAFT_STATUS_PENDING_APPROVAL,
-    EMAIL_DRAFT_STATUS_APPROVED,
-    EMAIL_DRAFT_STATUS_REJECTED,
-})
-# Statuses a send may start from; partially_sent / failed retry only undelivered recipients.
-SENDABLE_STATUSES = frozenset({
-    EMAIL_DRAFT_STATUS_DRAFT,
-    EMAIL_DRAFT_STATUS_APPROVED,
-    EMAIL_DRAFT_STATUS_PARTIALLY_SENT,
-    EMAIL_DRAFT_STATUS_FAILED,
-})
+# Content can change only before delivery starts; editing during approval withdraws it.
+EDITABLE_STATUSES = frozenset({EMAIL_DRAFT_STATUS_DRAFT, EMAIL_DRAFT_STATUS_APPROVAL})
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 MAX_SUBJECT_LENGTH = 255
@@ -556,13 +546,20 @@ def compose_draft(
 
 
 # ---------------------------------------------------------------------------
-# Draft lifecycle
+# Draft lifecycle (statuses and transitions live in app.email_delivery_service)
 # ---------------------------------------------------------------------------
 
 
 def _refresh_checks(draft: EmailDraft) -> None:
     draft.approval_required, draft.approval_reasons = evaluate_approval(draft.recipients)
     draft.sensitive_findings = scan_sensitive(draft.subject, draft.body)
+
+
+def _clear_decision(draft: EmailDraft) -> None:
+    draft.approval_decision = None
+    draft.decided_by = None
+    draft.decided_at = None
+    draft.decision_note = None
 
 
 def create_draft_from_chat(
@@ -612,11 +609,15 @@ def create_draft_from_chat(
         unresolved_recipients=unresolved,
         status=EMAIL_DRAFT_STATUS_DRAFT,
         delivery_results=[],
+        attempt_count=0,
+        acknowledged_sensitive=False,
         created_at=now,
         updated_at=now,
     )
     _refresh_checks(draft)
     db.add(draft)
+    db.flush()
+    delivery.record_created(db, draft, actor.id)
     db.commit()
     db.refresh(draft)
     return draft
@@ -624,7 +625,7 @@ def create_draft_from_chat(
 
 def get_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
     draft = db.get(EmailDraft, draft_id)
-    if draft is None:
+    if draft is None or draft.discarded_at is not None:
         raise EmailDraftNotFound("E-mail draft not found.")
     if draft.created_by_id != actor.id and actor.role not in APPROVER_ROLES:
         raise EmailDraftDenied("You can only view your own e-mail drafts.")
@@ -634,6 +635,10 @@ def get_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
 def _require_owner(draft: EmailDraft, actor: EmailActor) -> None:
     if draft.created_by_id != actor.id:
         raise EmailDraftDenied("Only the employee who created this draft can change or send it.")
+
+
+def _status_label(status: str) -> str:
+    return status.replace("_", " ")
 
 
 def update_draft(
@@ -650,7 +655,9 @@ def update_draft(
     draft = get_draft(db, draft_id, actor)
     _require_owner(draft, actor)
     if draft.status not in EDITABLE_STATUSES:
-        raise EmailDraftConflict(f"A draft that is {draft.status.replace('_', ' ')} can no longer be edited.")
+        raise EmailDraftConflict(
+            f"An e-mail that is {_status_label(draft.status)} can no longer be edited."
+        )
 
     if subject is not None:
         draft.subject = subject.strip()[:MAX_SUBJECT_LENGTH]
@@ -688,11 +695,14 @@ def update_draft(
         draft.recipients = recipients
         draft.unresolved_recipients = []
 
-    if draft.status != EMAIL_DRAFT_STATUS_DRAFT:
-        draft.status = EMAIL_DRAFT_STATUS_DRAFT
-        draft.decided_by = None
-        draft.decided_at = None
-        draft.decision_note = None
+    if draft.status == EMAIL_DRAFT_STATUS_APPROVAL:
+        delivery.transition(db, draft, EMAIL_DRAFT_STATUS_DRAFT, actor_id=actor.id,
+                            detail="Edited by the sender; approval request withdrawn.")
+    elif draft.approval_decision is not None:
+        delivery._record_event(db, draft, draft.status, draft.status, actor.id,
+                               "Edited by the sender; the earlier approval decision no longer applies.",
+                               _now())
+    _clear_decision(draft)
     _refresh_checks(draft)
     draft.updated_at = _now()
     db.commit()
@@ -706,14 +716,16 @@ def submit_for_approval(db: Session, draft_id: str, actor: EmailActor) -> EmailD
     _refresh_checks(draft)
     if not draft.approval_required:
         raise EmailDraftConflict("This e-mail does not need approval; you can send it directly.")
-    if draft.status not in (EMAIL_DRAFT_STATUS_DRAFT, EMAIL_DRAFT_STATUS_REJECTED):
-        raise EmailDraftConflict(f"A draft that is {draft.status.replace('_', ' ')} cannot be submitted.")
+    if draft.status != EMAIL_DRAFT_STATUS_DRAFT:
+        raise EmailDraftConflict(
+            f"An e-mail that is {_status_label(draft.status)} cannot be submitted for approval."
+        )
+    if draft.approval_decision == EMAIL_APPROVAL_DECISION_APPROVED:
+        raise EmailDraftConflict("This e-mail is already approved; you can send it.")
     _validate_content(draft)
-    draft.status = EMAIL_DRAFT_STATUS_PENDING_APPROVAL
-    draft.decided_by = None
-    draft.decided_at = None
-    draft.decision_note = None
-    draft.updated_at = _now()
+    _clear_decision(draft)
+    delivery.transition(db, draft, EMAIL_DRAFT_STATUS_APPROVAL, actor_id=actor.id,
+                        detail="Submitted for approval: " + " ".join(draft.approval_reasons))
     db.commit()
     db.refresh(draft)
     return draft
@@ -728,22 +740,29 @@ def decide_draft(
     note: str | None,
 ) -> EmailDraft:
     draft = db.get(EmailDraft, draft_id)
-    if draft is None:
+    if draft is None or draft.discarded_at is not None:
         raise EmailDraftNotFound("E-mail draft not found.")
     if actor.role not in APPROVER_ROLES:
         raise EmailDraftDenied("Only managers, HR / Operations or admins can approve e-mails.")
     if draft.created_by_id == actor.id:
         raise EmailDraftDenied("You cannot approve your own e-mail.")
-    if draft.status != EMAIL_DRAFT_STATUS_PENDING_APPROVAL:
+    if draft.status != EMAIL_DRAFT_STATUS_APPROVAL:
         raise EmailDraftConflict("This e-mail is not waiting for approval.")
     if decision not in ("approve", "reject"):
         raise ValueError("Decision must be 'approve' or 'reject'.")
 
-    draft.status = EMAIL_DRAFT_STATUS_APPROVED if decision == "approve" else EMAIL_DRAFT_STATUS_REJECTED
+    now = _now()
+    draft.approval_decision = (
+        EMAIL_APPROVAL_DECISION_APPROVED if decision == "approve" else EMAIL_APPROVAL_DECISION_REJECTED
+    )
     draft.decided_by = actor.id
-    draft.decided_at = _now()
+    draft.decided_at = now
     draft.decision_note = (note or "").strip() or None
-    draft.updated_at = draft.decided_at
+    verdict = "Approved" if decision == "approve" else "Rejected"
+    delivery.transition(
+        db, draft, EMAIL_DRAFT_STATUS_DRAFT, actor_id=actor.id, now=now,
+        detail=f"{verdict} by {actor.id}" + (f": {draft.decision_note}" if draft.decision_note else "."),
+    )
     db.commit()
     db.refresh(draft)
     return draft
@@ -771,27 +790,26 @@ def send_draft(
     confirm: bool,
     acknowledge_sensitive: bool,
 ) -> EmailDraft:
-    """Send the previewed e-mail. Only the creator can send, and only on explicit confirmation."""
-    from app.task_service import send_email  # local import keeps SMTP config in one place
+    """Queue the previewed e-mail for delivery (Draft -> Queued).
 
+    Only the creator can send, and only on explicit confirmation. The approval
+    rule and the sensitive-data scan are re-checked against exactly what will go
+    out; the background dispatcher then delivers it.
+    """
     draft = get_draft(db, draft_id, actor)
     _require_owner(draft, actor)
     if not confirm:
         raise ValueError("Sending requires explicit confirmation of the previewed e-mail.")
-    if draft.status not in SENDABLE_STATUSES:
-        if draft.status == EMAIL_DRAFT_STATUS_PENDING_APPROVAL:
-            raise EmailDraftConflict("This e-mail is still waiting for approval.")
-        raise EmailDraftConflict(f"A draft that is {draft.status.replace('_', ' ')} cannot be sent.")
+    if draft.status == EMAIL_DRAFT_STATUS_APPROVAL:
+        raise EmailDraftConflict("This e-mail is still waiting for approval.")
+    if draft.status == EMAIL_DRAFT_STATUS_FAILED:
+        raise EmailDraftConflict("This e-mail failed to send. Use Retry to send it again.")
+    if draft.status != EMAIL_DRAFT_STATUS_DRAFT:
+        raise EmailDraftConflict(f"An e-mail that is {_status_label(draft.status)} cannot be sent again.")
     _validate_content(draft)
 
-    # Re-run both checks against exactly what is about to go out.
     _refresh_checks(draft)
-    already_approved = draft.status in (
-        EMAIL_DRAFT_STATUS_APPROVED,
-        EMAIL_DRAFT_STATUS_PARTIALLY_SENT,
-        EMAIL_DRAFT_STATUS_FAILED,
-    ) and draft.decided_at is not None
-    if draft.approval_required and not already_approved:
+    if draft.approval_required and draft.approval_decision != EMAIL_APPROVAL_DECISION_APPROVED:
         db.commit()
         raise EmailDraftConflict(
             "Approval is required before sending: " + " ".join(draft.approval_reasons)
@@ -804,45 +822,50 @@ def send_draft(
             "Review the flagged items and confirm to send anyway."
         )
 
-    delivered = {
-        r["email"].casefold() for r in draft.delivery_results if r["status"] == "sent"
-    }
-    results = [r for r in draft.delivery_results if r["email"].casefold() in delivered]
-    for recipient in draft.recipients:
-        if recipient["email"].casefold() in delivered:
-            continue
-        try:
-            send_email(recipient["email"], draft.subject, draft.body)
-        except (OSError, smtplib.SMTPException, ValueError) as exc:
-            logger.exception("E-mail draft delivery failed draft_id=%s recipient=%s",
-                             draft.id, recipient["email"])
-            results.append({"email": recipient["email"], "status": "failed", "error": str(exc)[:500]})
-        else:
-            results.append({"email": recipient["email"], "status": "sent", "error": None})
-
-    sent_count = sum(1 for r in results if r["status"] == "sent")
-    if sent_count == len(draft.recipients):
-        draft.status = EMAIL_DRAFT_STATUS_SENT
-    elif sent_count:
-        draft.status = EMAIL_DRAFT_STATUS_PARTIALLY_SENT
-    else:
-        draft.status = EMAIL_DRAFT_STATUS_FAILED
-    draft.delivery_results = results
-    if sent_count:
-        draft.sent_at = _now()
-    draft.updated_at = _now()
-    db.commit()
+    delivery.queue_for_delivery(
+        db, draft, actor_id=actor.id,
+        acknowledged_sensitive=bool(draft.sensitive_findings and acknowledge_sensitive),
+    )
     db.refresh(draft)
     return draft
 
 
+def retry_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
+    """Failed -> Retry: send again to the recipients that did not receive it."""
+    draft = get_draft(db, draft_id, actor)
+    _require_owner(draft, actor)
+    if draft.status != EMAIL_DRAFT_STATUS_FAILED:
+        raise EmailDraftConflict(f"Only a failed e-mail can be retried (this one is {_status_label(draft.status)}).")
+    delivery.request_retry(db, draft, actor_id=actor.id)
+    db.refresh(draft)
+    return draft
+
+
+def cancel_send(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
+    """Queued -> Draft, if delivery has not started yet."""
+    draft = get_draft(db, draft_id, actor)
+    _require_owner(draft, actor)
+    if draft.status != EMAIL_DRAFT_STATUS_QUEUED or not delivery.cancel_queued(db, draft, actor_id=actor.id):
+        db.refresh(draft)
+        raise EmailDraftConflict(
+            f"Too late to cancel: the e-mail is already {_status_label(draft.status)}."
+        )
+    return draft
+
+
 def discard_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
+    """Hide an unsent draft. An approval request is withdrawn first."""
     draft = get_draft(db, draft_id, actor)
     _require_owner(draft, actor)
     if draft.status not in EDITABLE_STATUSES:
-        raise EmailDraftConflict(f"A draft that is {draft.status.replace('_', ' ')} cannot be discarded.")
-    draft.status = EMAIL_DRAFT_STATUS_DISCARDED
-    draft.updated_at = _now()
+        raise EmailDraftConflict(
+            f"An e-mail that is {_status_label(draft.status)} cannot be discarded."
+        )
+    if draft.status == EMAIL_DRAFT_STATUS_APPROVAL:
+        delivery.transition(db, draft, EMAIL_DRAFT_STATUS_DRAFT, actor_id=actor.id,
+                            detail="Approval request withdrawn; draft discarded.")
+    draft.discarded_at = _now()
+    draft.updated_at = draft.discarded_at
     db.commit()
     db.refresh(draft)
     return draft
@@ -852,7 +875,7 @@ def list_my_drafts(db: Session, actor: EmailActor, limit: int = 20) -> list[Emai
     return (
         db.query(EmailDraft)
         .filter(EmailDraft.created_by_id == actor.id)
-        .filter(EmailDraft.status != EMAIL_DRAFT_STATUS_DISCARDED)
+        .filter(EmailDraft.discarded_at.is_(None))
         .order_by(EmailDraft.updated_at.desc())
         .limit(limit)
         .all()
@@ -860,11 +883,32 @@ def list_my_drafts(db: Session, actor: EmailActor, limit: int = 20) -> list[Emai
 
 
 def list_approval_queue(db: Session, actor: EmailActor, status: str | None) -> list[EmailDraft]:
+    """E-mails that needed approval. ``status`` filters by lifecycle status (e.g. "approval")."""
     if actor.role not in APPROVER_ROLES:
         raise EmailDraftDenied("Only managers, HR / Operations or admins can review e-mail approvals.")
-    query = db.query(EmailDraft).filter(EmailDraft.approval_required.is_(True))
+    query = (
+        db.query(EmailDraft)
+        .filter(EmailDraft.approval_required.is_(True))
+        .filter(EmailDraft.discarded_at.is_(None))
+    )
     if status:
         query = query.filter(EmailDraft.status == status)
-    else:
-        query = query.filter(EmailDraft.status != EMAIL_DRAFT_STATUS_DISCARDED)
     return query.order_by(EmailDraft.updated_at.desc()).all()
+
+
+def list_delivery_issues(db: Session, actor: EmailActor) -> list[EmailDraft]:
+    """Failed and Retry e-mails across the organisation, for the manager dashboard."""
+    if actor.role not in APPROVER_ROLES:
+        raise EmailDraftDenied("Only managers, HR / Operations or admins can view delivery issues.")
+    return (
+        db.query(EmailDraft)
+        .filter(EmailDraft.status.in_(delivery.ATTENTION_STATUSES))
+        .filter(EmailDraft.discarded_at.is_(None))
+        .order_by(EmailDraft.status_changed_at.desc())
+        .all()
+    )
+
+
+def list_draft_events(db: Session, draft_id: str, actor: EmailActor):
+    get_draft(db, draft_id, actor)
+    return delivery.list_events(db, draft_id)

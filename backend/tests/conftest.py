@@ -2,9 +2,10 @@ import os
 
 import pytest
 
-# TestClient(app) runs the startup hook. Never let the reminder scheduler run
-# against the real database (and send real e-mails) during tests.
+# TestClient(app) runs the startup hook. Never let the reminder scheduler or the
+# e-mail dispatcher run against the real database (and send real e-mails) during tests.
 os.environ["TASK_REMINDER_SCHEDULER_ENABLED"] = "false"
+os.environ["EMAIL_DISPATCHER_ENABLED"] = "false"
 
 
 @pytest.fixture(autouse=True)
@@ -12,6 +13,7 @@ def _no_background_reminder_scheduler(monkeypatch):
     import main
 
     monkeypatch.setattr(main, "start_task_reminder_scheduler", lambda: False)
+    monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
 
 
 _MACHINE_SPECIFIC_ENV = ("WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE")

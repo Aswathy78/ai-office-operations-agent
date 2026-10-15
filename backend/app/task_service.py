@@ -1,6 +1,7 @@
 """Task creation and assignment-email delivery for confirmed action items."""
 
 from email.message import EmailMessage
+from email.utils import make_msgid
 from datetime import datetime, timezone
 import logging
 import os
@@ -137,6 +138,15 @@ def synchronize_confirmed_action_item_tasks(
 
 def send_email(recipient: str, subject: str, body: str) -> None:
     """Deliver one plain-text e-mail through the configured SMTP server."""
+    deliver_email(recipient, subject, body)
+
+
+def deliver_email(recipient: str, subject: str, body: str) -> str:
+    """Hand one plain-text e-mail to the SMTP provider and return its Message-ID.
+
+    Returns only once the provider has accepted the message for the recipient;
+    any refusal raises ``smtplib.SMTPRecipientsRefused`` instead.
+    """
     host = os.getenv("SMTP_HOST", "").strip()
     sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
     if not host or not sender:
@@ -156,6 +166,8 @@ def send_email(recipient: str, subject: str, body: str) -> None:
     message["Subject"] = subject
     message["From"] = sender
     message["To"] = recipient
+    message_id = make_msgid(domain=sender.rsplit("@", 1)[-1] or None)
+    message["Message-ID"] = message_id
     message.set_content(body)
 
     with smtplib.SMTP(host, port, timeout=10) as smtp:
@@ -167,7 +179,11 @@ def send_email(recipient: str, subject: str, body: str) -> None:
             smtp.starttls()
         if username:
             smtp.login(username, password)
-        smtp.send_message(message)
+        refused = smtp.send_message(message)
+    if refused:
+        # The server answered but did not accept this recipient.
+        raise smtplib.SMTPRecipientsRefused(refused)
+    return message_id
 
 
 def assignment_notification_key(task: Task) -> str:

@@ -4,15 +4,21 @@ import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  cancelEmailDraft,
+  retryEmailDraft,
   sendEmailDraft,
   submitEmailDraft,
   updateEmailDraft,
   type EmailDraft,
 } from '../../api/emailDrafts'
 import { EmailDraftPreview } from './EmailDraftPreview'
+import { sampleDraft } from './emailTestFixtures'
 
 vi.mock('../../api/emailDrafts', () => ({
+  cancelEmailDraft: vi.fn(),
   discardEmailDraft: vi.fn(),
+  getEmailDraftEvents: vi.fn().mockResolvedValue([]),
+  retryEmailDraft: vi.fn(),
   sendEmailDraft: vi.fn(),
   submitEmailDraft: vi.fn(),
   updateEmailDraft: vi.fn(),
@@ -20,38 +26,7 @@ vi.mock('../../api/emailDrafts', () => ({
 
 const actor = { id: 'user-001', role: 'employee', team: 'Engineering' }
 
-const baseDraft: EmailDraft = {
-  id: 'draft-1',
-  created_by_id: 'user-001',
-  created_by_name: 'Rahul',
-  created_by_email: 'rahul@northstar.example',
-  created_by_role: 'employee',
-  prompt: 'Email the development team about the demo',
-  source: 'template',
-  template_key: 'meeting_reminder',
-  generation_note: null,
-  subject: 'Reminder: Sprint demo',
-  body: 'Hi Engineering team,\n\nDemo at 10am.\n\nRahul',
-  recipients: [
-    { name: 'Ava Patel', email: 'ava.patel@northstar.example', internal: true, source: 'Engineering team' },
-    { name: 'Marcus Chen', email: 'marcus.chen@northstar.example', internal: true, source: 'Engineering team' },
-  ],
-  recipient_groups: [{ name: 'Engineering team', count: 2 }],
-  unresolved_recipients: [],
-  recipient_count: 2,
-  approval_required: false,
-  approval_reasons: [],
-  approval_threshold: 10,
-  sensitive_findings: [],
-  status: 'draft',
-  decided_by: null,
-  decided_at: null,
-  decision_note: null,
-  delivery_results: [],
-  sent_at: null,
-  created_at: '2026-10-15T00:00:00Z',
-  updated_at: '2026-10-15T00:00:00Z',
-}
+const baseDraft: EmailDraft = sampleDraft
 
 afterEach(() => {
   cleanup()
@@ -61,7 +36,7 @@ afterEach(() => {
 describe('EmailDraftPreview', () => {
   it('shows the full preview and only sends after explicit confirmation', async () => {
     const onChange = vi.fn()
-    vi.mocked(sendEmailDraft).mockResolvedValue({ ...baseDraft, status: 'sent' })
+    vi.mocked(sendEmailDraft).mockResolvedValue({ ...baseDraft, status: 'queued' })
     render(<EmailDraftPreview draft={baseDraft} actor={actor} onChange={onChange} />)
 
     expect(screen.getByText('2 recipients')).toBeInTheDocument()
@@ -73,7 +48,7 @@ describe('EmailDraftPreview', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Confirm send' }))
     expect(sendEmailDraft).toHaveBeenCalledWith('draft-1', false, actor)
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ status: 'sent' }))
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued' }))
   })
 
   it('requires saving edits before sending', async () => {
@@ -97,7 +72,7 @@ describe('EmailDraftPreview', () => {
       approval_required: true,
       approval_reasons: ['External recipient(s): p@vendor.com.'],
     }
-    vi.mocked(submitEmailDraft).mockResolvedValue({ ...draft, status: 'pending_approval' })
+    vi.mocked(submitEmailDraft).mockResolvedValue({ ...draft, status: 'approval' })
     render(<EmailDraftPreview draft={draft} actor={actor} />)
 
     expect(screen.getByText('External')).toBeInTheDocument()
@@ -115,7 +90,7 @@ describe('EmailDraftPreview', () => {
         { type: 'password', label: 'Password or PIN', severity: 'high', match: 'pa••••••d1', field: 'body' },
       ],
     }
-    vi.mocked(sendEmailDraft).mockResolvedValue({ ...draft, status: 'sent' })
+    vi.mocked(sendEmailDraft).mockResolvedValue({ ...draft, status: 'queued' })
     render(<EmailDraftPreview draft={draft} actor={actor} />)
 
     const send = screen.getByRole('button', { name: /send e-mail/i })
@@ -128,8 +103,78 @@ describe('EmailDraftPreview', () => {
   })
 
   it('is read-only for approvers', () => {
-    render(<EmailDraftPreview draft={{ ...baseDraft, status: 'pending_approval' }} actor={actor} readOnly />)
+    render(<EmailDraftPreview draft={{ ...baseDraft, status: 'approval' }} actor={actor} readOnly />)
     expect(screen.getByDisplayValue('Reminder: Sprint demo')).toHaveAttribute('readonly')
     expect(screen.queryByRole('button', { name: /send|discard|remove/i })).not.toBeInTheDocument()
+  })
+})
+
+describe('EmailDraftPreview delivery lifecycle (FR-22)', () => {
+  const statuses = ['draft', 'approval', 'queued', 'sending', 'sent', 'failed', 'retry'] as const
+
+  it.each(statuses)('shows exactly one current status for %s', (status) => {
+    render(<EmailDraftPreview draft={{ ...baseDraft, status, approval_required: true }} actor={actor} />)
+
+    const pills = document.querySelectorAll('.email-status[data-status]')
+    expect(pills).toHaveLength(1)
+    expect(pills[0]).toHaveAttribute('data-status', status)
+    expect(screen.getAllByRole('listitem').filter((li) => li.getAttribute('aria-current') === 'step')).toHaveLength(1)
+  })
+
+  it('lets the sender cancel while queued', async () => {
+    vi.mocked(cancelEmailDraft).mockResolvedValue({ ...baseDraft, status: 'draft' })
+    render(<EmailDraftPreview draft={{ ...baseDraft, status: 'queued' }} actor={actor} />)
+
+    expect(screen.queryByRole('button', { name: /send e-mail/i })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel sending' }))
+    expect(cancelEmailDraft).toHaveBeenCalledWith('draft-1', actor)
+  })
+
+  it('offers Retry for a failed e-mail and explains what was delivered', async () => {
+    const failed: EmailDraft = {
+      ...baseDraft,
+      status: 'failed',
+      attempt_count: 1,
+      last_error: '1 of 2 recipient(s) not delivered. Recipient refused by the mail server: 550 No such user',
+      delivery_results: [
+        { email: 'ava.patel@northstar.example', status: 'sent', error: null, message_id: '<1@x>' },
+        { email: 'marcus.chen@northstar.example', status: 'failed', error: '550 No such user' },
+      ],
+    }
+    vi.mocked(retryEmailDraft).mockResolvedValue({ ...failed, status: 'retry' })
+    render(<EmailDraftPreview draft={failed} actor={actor} />)
+
+    expect(screen.getByText(/Delivered to 1 of 2 recipients/)).toBeInTheDocument()
+    expect(screen.getAllByText(/550 No such user/).length).toBeGreaterThan(0)
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(retryEmailDraft).toHaveBeenCalledWith('draft-1', actor)
+  })
+
+  it('shows automatic retry progress without offering actions', () => {
+    render(
+      <EmailDraftPreview
+        draft={{ ...baseDraft, status: 'retry', attempt_count: 1, next_attempt_at: '2026-10-16T10:00:30Z', last_error: 'timed out' }}
+        actor={actor}
+      />,
+    )
+
+    expect(screen.getByText(/Attempt 1 of 3 failed; retrying automatically/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry|send e-mail|cancel sending/i })).not.toBeInTheDocument()
+  })
+
+  it('says Sent only with provider acceptance details', () => {
+    render(<EmailDraftPreview draft={{ ...baseDraft, status: 'sent', sent_at: '2026-10-16T10:00:00Z' }} actor={actor} />)
+    expect(screen.getByText(/Accepted by the mail provider for all 2 recipients/)).toBeInTheDocument()
+  })
+
+  it('allows sending once an approval-required e-mail is approved', () => {
+    render(
+      <EmailDraftPreview
+        draft={{ ...baseDraft, approval_required: true, approval_reasons: ['External recipient(s): p@vendor.com.'], approval_decision: 'approved' }}
+        actor={actor}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /send e-mail/i })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'Request approval' })).not.toBeInTheDocument()
   })
 })

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Mail, RefreshCw } from 'lucide-react'
-import { decideEmailDraft, getEmailApprovals, type EmailDraft } from '../../api/emailDrafts'
+import {
+  EMAIL_STATUS_POLL_MS,
+  decideEmailDraft,
+  getEmailApprovals,
+  type EmailDraft,
+} from '../../api/emailDrafts'
 import type { TaskActor } from '../../api/tasks'
+import { usePolling } from '../../hooks/usePolling'
 import { EmailDraftPreview } from './EmailDraftPreview'
 
 function formatTimestamp(iso: string): string {
@@ -11,7 +17,7 @@ function formatTimestamp(iso: string): string {
 
 /** Approval queue for e-mails drafted from chat that exceed the recipient limit or go outside the company. */
 export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
-  const [filter, setFilter] = useState<'pending_approval' | ''>('pending_approval')
+  const [filter, setFilter] = useState<'approval' | ''>('approval')
   const [drafts, setDrafts] = useState<EmailDraft[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -19,21 +25,29 @@ export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
   const [deciding, setDeciding] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<Record<string, { tone: 'success' | 'error'; message: string }>>({})
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setLoading(true)
     try {
-      setDrafts(await getEmailApprovals(filter, actor))
+      const fetched = await getEmailApprovals(filter, actor)
+      // Keep e-mails decided on this page visible (with their feedback) after they leave the queue.
+      setDrafts((current) => [
+        ...fetched,
+        ...current.filter((item) => item.approval_decision && !fetched.some((f) => f.id === item.id)),
+      ])
       setError('')
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'E-mail approvals could not be loaded.')
     } finally {
-      setLoading(false)
+      if (!quiet) setLoading(false)
     }
   }, [filter, actor])
 
   useEffect(() => {
     void load()
   }, [load])
+
+  // New requests, withdrawals and other approvers' decisions show up within 5 seconds.
+  usePolling(() => load(true), EMAIL_STATUS_POLL_MS, !loading)
 
   async function decide(draft: EmailDraft, decision: 'approve' | 'reject') {
     setDeciding(draft.id)
@@ -74,9 +88,9 @@ export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
           <select
             aria-label="E-mail approval status"
             value={filter}
-            onChange={(event) => setFilter(event.target.value as 'pending_approval' | '')}
+            onChange={(event) => setFilter(event.target.value as 'approval' | '')}
           >
-            <option value="pending_approval">Pending</option>
+            <option value="approval">Pending</option>
             <option value="">All e-mails</option>
           </select>
           <button className="button secondary" type="button" onClick={() => void load()} disabled={loading}>
@@ -106,8 +120,8 @@ export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
             <li key={draft.id} className="approval-card">
               <p className="task-manage-hint">
                 Requested by {draft.created_by_name} ({draft.created_by_role}) on {formatTimestamp(draft.updated_at)}
-                {draft.decided_at && draft.status !== 'pending_approval'
-                  ? ` · Decided by ${draft.decided_by} on ${formatTimestamp(draft.decided_at)}`
+                {draft.decided_at && draft.approval_decision
+                  ? ` · ${draft.approval_decision === 'approved' ? 'Approved' : 'Rejected'} by ${draft.decided_by} on ${formatTimestamp(draft.decided_at)}`
                   : ''}
               </p>
               <EmailDraftPreview draft={draft} actor={actor} readOnly />
@@ -119,7 +133,7 @@ export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
                   {feedback[draft.id].message}
                 </p>
               )}
-              {draft.status === 'pending_approval' && draft.created_by_id !== actor.id && (
+              {draft.status === 'approval' && draft.created_by_id !== actor.id && (
                 <div className="approval-actions">
                   <input
                     type="text"
@@ -137,7 +151,7 @@ export function EmailApprovalsSection({ actor }: { actor: TaskActor }) {
                   </button>
                 </div>
               )}
-              {draft.status === 'pending_approval' && draft.created_by_id === actor.id && (
+              {draft.status === 'approval' && draft.created_by_id === actor.id && (
                 <p className="task-manage-pending">You cannot approve your own e-mail.</p>
               )}
             </li>

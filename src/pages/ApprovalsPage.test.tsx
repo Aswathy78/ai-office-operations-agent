@@ -25,6 +25,7 @@ vi.mock('../api/tasks', () => ({
 }))
 
 vi.mock('../api/emailDrafts', () => ({
+  EMAIL_STATUS_POLL_MS: 2000,
   decideEmailDraft: vi.fn(),
   getEmailApprovals: vi.fn().mockResolvedValue([]),
 }))

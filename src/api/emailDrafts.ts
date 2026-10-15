@@ -1,14 +1,58 @@
 import { API_BASE_URL, actorQuery, apiFetch, readJson, type TaskActor } from './tasks'
 
+/** The delivery lifecycle (FR-22): every e-mail has exactly one of these. */
 export type EmailDraftStatus =
   | 'draft'
-  | 'pending_approval'
-  | 'approved'
-  | 'rejected'
+  | 'approval'
+  | 'queued'
+  | 'sending'
   | 'sent'
-  | 'partially_sent'
   | 'failed'
-  | 'discarded'
+  | 'retry'
+
+export const EMAIL_LIFECYCLE: readonly EmailDraftStatus[] = [
+  'draft',
+  'approval',
+  'queued',
+  'sending',
+  'sent',
+  'failed',
+  'retry',
+]
+
+/** Statuses that change without the sender acting; the UI polls while any are shown. */
+export const IN_FLIGHT_STATUSES: ReadonlySet<EmailDraftStatus> = new Set([
+  'approval',
+  'queued',
+  'sending',
+  'retry',
+])
+
+/** Status changes must reach the UI within 5 seconds; poll comfortably inside that. */
+export const EMAIL_STATUS_POLL_MS = 2000
+
+export function isInFlight(draft: Pick<EmailDraft, 'status'>): boolean {
+  return IN_FLIGHT_STATUSES.has(draft.status)
+}
+
+export interface EmailDeliveryResult {
+  email: string
+  /** "sent" only once the mail provider accepted the message for this recipient. */
+  status: 'sent' | 'failed'
+  error: string | null
+  message_id?: string | null
+  accepted_at?: string | null
+  attempt?: number | null
+}
+
+export interface EmailDraftEvent {
+  id: string
+  from_status: EmailDraftStatus | null
+  to_status: EmailDraftStatus
+  actor_id: string
+  detail: string | null
+  created_at: string
+}
 
 export interface EmailRecipient {
   name: string
@@ -46,11 +90,20 @@ export interface EmailDraft {
   approval_threshold: number
   sensitive_findings: SensitiveFinding[]
   status: EmailDraftStatus
+  status_changed_at: string | null
+  approval_decision: 'approved' | 'rejected' | null
   decided_by: string | null
   decided_at: string | null
   decision_note: string | null
-  delivery_results: { email: string; status: 'sent' | 'failed'; error: string | null }[]
+  delivery_results: EmailDeliveryResult[]
   sent_at: string | null
+  queued_at: string | null
+  attempt_count: number
+  max_attempts: number
+  next_attempt_at: string | null
+  last_error: string | null
+  acknowledged_sensitive: boolean
+  discarded_at: string | null
   created_at: string
   updated_at: string
 }
@@ -120,7 +173,7 @@ export function discardEmailDraft(id: string, actor: TaskActor): Promise<EmailDr
 }
 
 export function getEmailApprovals(
-  status: 'pending_approval' | '',
+  status: 'approval' | '',
   actor: TaskActor,
 ): Promise<EmailDraft[]> {
   const query = new URLSearchParams(actorQuery(actor))
@@ -142,4 +195,31 @@ export function decideEmailDraft(
 
 export function getDirectoryGroups(): Promise<DirectoryGroup[]> {
   return apiFetch(`${base()}/directory/groups`).then((response) => readJson<DirectoryGroup[]>(response))
+}
+
+export function getEmailDraft(id: string, actor: TaskActor): Promise<EmailDraft> {
+  return apiFetch(`${draftUrl(id)}?${actorQuery(actor)}`).then((response) => readJson<EmailDraft>(response))
+}
+
+/** Failed -> Retry: deliver again to recipients the provider has not accepted. */
+export function retryEmailDraft(id: string, actor: TaskActor): Promise<EmailDraft> {
+  return apiFetch(`${draftUrl(id, '/retry')}?${actorQuery(actor)}`, jsonInit('POST'))
+    .then((response) => readJson<EmailDraft>(response))
+}
+
+/** Queued -> Draft, if delivery has not started yet. */
+export function cancelEmailDraft(id: string, actor: TaskActor): Promise<EmailDraft> {
+  return apiFetch(`${draftUrl(id, '/cancel')}?${actorQuery(actor)}`, jsonInit('POST'))
+    .then((response) => readJson<EmailDraft>(response))
+}
+
+export function getEmailDraftEvents(id: string, actor: TaskActor): Promise<EmailDraftEvent[]> {
+  return apiFetch(`${draftUrl(id, '/events')}?${actorQuery(actor)}`)
+    .then((response) => readJson<EmailDraftEvent[]>(response))
+}
+
+/** Failed and Retry e-mails across the organisation (manager dashboard). */
+export function getEmailDeliveryIssues(actor: TaskActor): Promise<EmailDraft[]> {
+  return apiFetch(`${base()}/delivery-issues?${actorQuery(actor)}`)
+    .then((response) => readJson<EmailDraft[]>(response))
 }

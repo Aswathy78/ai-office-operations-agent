@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { AlertTriangle, Mail, Send, ShieldAlert, Trash2, Users, X } from 'lucide-react'
+import { AlertTriangle, Mail, RotateCcw, Send, ShieldAlert, Trash2, Users, X } from 'lucide-react'
 import {
+  cancelEmailDraft,
   discardEmailDraft,
+  retryEmailDraft,
   sendEmailDraft,
   submitEmailDraft,
   updateEmailDraft,
@@ -11,19 +13,10 @@ import {
   type EmailDraftStatus,
 } from '../../api/emailDrafts'
 import type { TaskActor } from '../../api/tasks'
+import { EmailHistory, EmailLifecycleTracker, EmailStatusDetail, EmailStatusPill } from './EmailLifecycle'
 
-const STATUS_LABELS: Record<EmailDraftStatus, { label: string; tone: string }> = {
-  draft: { label: 'Draft – not sent', tone: 'muted' },
-  pending_approval: { label: 'Awaiting approval', tone: 'warning' },
-  approved: { label: 'Approved – ready to send', tone: '' },
-  rejected: { label: 'Approval rejected', tone: 'danger' },
-  sent: { label: 'Sent', tone: '' },
-  partially_sent: { label: 'Partially sent', tone: 'warning' },
-  failed: { label: 'Delivery failed', tone: 'danger' },
-  discarded: { label: 'Discarded', tone: 'muted' },
-}
-
-const EDITABLE: EmailDraftStatus[] = ['draft', 'pending_approval', 'approved', 'rejected']
+/** Content can change only before delivery starts; editing during Approval withdraws the request. */
+const EDITABLE: EmailDraftStatus[] = ['draft', 'approval']
 
 interface Props {
   draft: EmailDraft
@@ -34,10 +27,7 @@ interface Props {
   onChange?: (draft: EmailDraft) => void
 }
 
-export function EmailDraftStatusPill({ status }: { status: EmailDraftStatus }) {
-  const { label, tone } = STATUS_LABELS[status]
-  return <span className={`status-pill ${tone}`}>{label}</span>
-}
+export { EmailStatusPill as EmailDraftStatusPill }
 
 export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false, onChange }: Props) {
   const [subject, setSubject] = useState(draft.subject)
@@ -58,15 +48,17 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
   const editable = !readOnly && EDITABLE.includes(draft.status)
   const dirty = subject !== draft.subject || body !== draft.body
   const findings = draft.sensitive_findings
-  const awaitingApproval = draft.status === 'pending_approval'
-  const needsApproval =
-    draft.approval_required && (draft.status === 'draft' || draft.status === 'rejected')
+  const approved = draft.approval_decision === 'approved'
+  const awaitingApproval = draft.status === 'approval'
+  const needsApproval = draft.approval_required && draft.status === 'draft' && !approved
   const canSend =
     !readOnly &&
     !dirty &&
     draft.recipient_count > 0 &&
-    (['approved', 'partially_sent', 'failed'].includes(draft.status) ||
-      (draft.status === 'draft' && !draft.approval_required))
+    draft.status === 'draft' &&
+    (!draft.approval_required || approved)
+  const canRetry = !readOnly && draft.status === 'failed'
+  const canCancel = !readOnly && draft.status === 'queued'
   const failedResults = draft.delivery_results.filter((result) => result.status === 'failed')
 
   async function run(action: () => Promise<EmailDraft>) {
@@ -113,8 +105,11 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
             {draft.source === 'llm' ? 'Written by AI' : `From template${draft.template_key ? ` · ${draft.template_key.replace(/_/g, ' ')}` : ''}`}
           </span>
         </div>
-        <EmailDraftStatusPill status={draft.status} />
+        <EmailStatusPill status={draft.status} />
       </header>
+
+      <EmailLifecycleTracker draft={draft} />
+      <EmailStatusDetail draft={draft} />
 
       {draft.generation_note && <p className="email-draft-note">{draft.generation_note}</p>}
 
@@ -208,8 +203,10 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
             <ul>
               {draft.approval_reasons.map((reason) => <li key={reason}>{reason}</li>)}
             </ul>
-            {draft.status === 'rejected' && draft.decision_note && <p>Reviewer note: {draft.decision_note}</p>}
-            {draft.status === 'approved' && (
+            {draft.approval_decision === 'rejected' && (
+              <p>Rejected{draft.decision_note ? ` · Reviewer note: ${draft.decision_note}` : ''}. Edit it and request approval again.</p>
+            )}
+            {approved && draft.status === 'draft' && (
               <p>Approved{draft.decision_note ? ` · ${draft.decision_note}` : ''}. Editing the e-mail will require approval again.</p>
             )}
           </div>
@@ -251,14 +248,9 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
           Not delivered to: {failedResults.map((result) => `${result.email} (${result.error ?? 'error'})`).join(', ')}
         </p>
       )}
-      {draft.status === 'sent' && (
-        <p className="task-manage-feedback success" role="status">
-          Sent to {draft.recipient_count} recipient{draft.recipient_count === 1 ? '' : 's'}.
-        </p>
-      )}
       {error && <p className="task-manage-feedback error" role="alert">{error}</p>}
 
-      {!readOnly && draft.status !== 'sent' && draft.status !== 'discarded' && (
+      {!readOnly && (editable || canRetry || canCancel) && (
         <footer className="email-draft-actions">
           {dirty && (
             <>
@@ -294,6 +286,26 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
           {!dirty && awaitingApproval && (
             <span className="task-manage-pending">Waiting for a manager, HR / Operations or admin to approve.</span>
           )}
+          {canCancel && (
+            <button
+              className="button secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => void run(() => cancelEmailDraft(draft.id, actor))}
+            >
+              Cancel sending
+            </button>
+          )}
+          {canRetry && (
+            <button
+              className="button primary"
+              type="button"
+              disabled={busy}
+              onClick={() => void run(() => retryEmailDraft(draft.id, actor))}
+            >
+              <RotateCcw size={15} aria-hidden="true" /> Retry
+            </button>
+          )}
           {canSend && !confirming && (
             <button
               className="button primary"
@@ -302,7 +314,7 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
               onClick={() => setConfirming(true)}
             >
               <Send size={15} aria-hidden="true" />
-              {draft.status === 'partially_sent' || draft.status === 'failed' ? 'Retry failed recipients' : 'Send e-mail'}
+              Send e-mail
             </button>
           )}
           {canSend && confirming && (
@@ -316,7 +328,7 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
                 disabled={busy}
                 onClick={() => void run(() => sendEmailDraft(draft.id, acknowledged, actor)).then(() => setConfirming(false))}
               >
-                {busy ? 'Sending…' : 'Confirm send'}
+                {busy ? 'Queueing…' : 'Confirm send'}
               </button>
               <button className="button secondary" type="button" disabled={busy} onClick={() => setConfirming(false)}>
                 Cancel
@@ -335,6 +347,8 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
           )}
         </footer>
       )}
+
+      <EmailHistory draft={draft} actor={actor} />
     </article>
   )
 }
