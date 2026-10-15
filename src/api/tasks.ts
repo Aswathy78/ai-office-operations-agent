@@ -13,7 +13,8 @@ export interface TaskRecord {
   source_timestamp_seconds: number
   due_at: string
   priority: 'low' | 'medium' | 'high' | 'urgent'
-  status: 'pending'
+  status: 'pending' | 'completed'
+  completed_at?: string | null
   assignment_email_status: 'pending' | 'sent' | 'failed'
   assignment_email_error: string | null
   created_at: string
@@ -79,6 +80,8 @@ export interface TaskActor {
   id: string
   role: string
   team: string | null
+  /** Lets an employee complete their own tasks. */
+  email?: string | null
 }
 
 export let API_BASE_URL =
@@ -95,7 +98,7 @@ function getFallbackBaseUrl(current: string): string | null {
   return null
 }
 
-async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const urlStr = typeof input === 'string' ? input : input.toString()
   try {
     return init !== undefined ? await fetch(urlStr, init) : await fetch(urlStr)
@@ -168,7 +171,7 @@ export async function retryAssignmentEmail(taskId: string): Promise<TaskRecord> 
   return readTask(response)
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+export async function readJson<T>(response: Response): Promise<T> {
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) {
     const detail =
@@ -183,9 +186,10 @@ async function readJson<T>(response: Response): Promise<T> {
   return body as T
 }
 
-function actorQuery(actor: TaskActor): string {
+export function actorQuery(actor: TaskActor): string {
   const query = new URLSearchParams({ actor_id: actor.id, actor_role: actor.role })
   if (actor.team) query.set('actor_team', actor.team)
+  if (actor.email) query.set('actor_email', actor.email)
   return query.toString()
 }
 
@@ -253,4 +257,20 @@ export function getTaskAudit(taskId: string): Promise<TaskAuditEntry[]> {
 export function getTaskNotifications(taskId: string): Promise<TaskNotification[]> {
   return apiFetch(`${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/notifications`)
     .then((response) => readJson<TaskNotification[]>(response))
+}
+
+/** Mark a task Completed (stops reminder / escalation e-mails) or reopen it. */
+export function setTaskStatus(
+  taskId: string,
+  status: 'pending' | 'completed',
+  actor: TaskActor,
+): Promise<TaskChangeResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/status?${actorQuery(actor)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    },
+  ).then((response) => readJson<TaskChangeResult>(response))
 }

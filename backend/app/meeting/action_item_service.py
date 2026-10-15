@@ -271,6 +271,27 @@ class ActionItemCandidates(BaseModel):
     action_items: list[ActionItemCandidate]
 
 
+def _parse_candidates(payload: object) -> ActionItemCandidates:
+    """Validate each candidate on its own so one malformed item (for example an
+    owner-only fragment with no task) does not discard the whole extraction."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("action_items"), list):
+        raise _SafeExtractionFailure("Groq returned malformed action-item data.")
+    valid: list[ActionItemCandidate] = []
+    for index, raw in enumerate(payload["action_items"]):
+        try:
+            valid.append(ActionItemCandidate.model_validate(raw))
+        except (ValidationError, TypeError) as error:
+            logger.warning(
+                "Discarding malformed action-item candidate candidate_index=%d errors=%d",
+                index,
+                len(error.errors()) if isinstance(error, ValidationError) else 1,
+            )
+    if payload["action_items"] and not valid:
+        # Nothing usable at all is a model failure, not "no action items".
+        raise _SafeExtractionFailure("Groq returned malformed action-item data.")
+    return ActionItemCandidates(action_items=valid)
+
+
 class MeetingActionItemExtractionError(RuntimeError):
     """Raised when persisted meeting action items cannot be generated."""
 
@@ -407,6 +428,46 @@ def _find_quote_timestamps(
     )
 
 
+# "The task is book two tickets." — an explicit statement of a task.
+_TASK_LEAD_IN = re.compile(
+    r"^\s*(?:(?:the|my|your|our|their|next)\s+)*(?:task|action item|to-?do)\s+"
+    r"(?:is|will be)\s+(?:to\s+)?"
+    # Not status/scheduling remarks such as "the task is due Friday" or "is done".
+    r"(?!(?:due|done|complete|completed|finished|over|assigned|on|at|by|for)\b)\w",
+    flags=re.IGNORECASE,
+)
+# "... The task is assigned to Priya." at the end of the preceding segment.
+_TRAILING_ASSIGNMENT = re.compile(
+    r"\bassigned to\s+([A-Z][\w'-]+(?:\s+[A-Z][\w'-]+)?)\s*[.!?]?\s*$",
+)
+
+
+def _owner_from_previous_segment(
+    context: str,
+    segment_index: int,
+    segments: list[TranscriptSegment],
+) -> str | None:
+    """Owner spoken in the sentence right before a "The task is ..." sentence.
+
+    Speakers often name the owner and the task in consecutive sentences, which
+    the transcriber can split into separate segments. The owner is taken only
+    from the explicit words "assigned to <Name>" ending the previous segment.
+    """
+    if segment_index == 0 or not _TASK_LEAD_IN.search(context):
+        return None
+    match = _TRAILING_ASSIGNMENT.search(segments[segment_index - 1].text)
+    return match.group(1) if match else None
+
+
+def _states_other_task(quote: str) -> bool:
+    """Whether a quote says more than "... assigned to <Name>." — i.e. names its own task."""
+    sentences = re.split(r"(?<=[.!?])\s+", quote.strip())
+    remainder = " ".join(s for s in sentences if "assigned to" not in s.casefold())
+    return bool(remainder.strip()) and (
+        _has_actionable_intent(remainder) or bool(_TASK_LEAD_IN.search(remainder))
+    )
+
+
 def _has_actionable_intent(quote: str) -> bool:
     if re.search(
         r"^\s*(?:if|unless|assuming|provided that)\b[^.!?]*[,;]\s*"
@@ -517,6 +578,9 @@ def _validate_candidates(
     ] = []
     seen: set[tuple[int, str]] = set()
     unsupported_quote_count = 0
+    # (segment index, owner) of "assigned to <Name>" sentences whose owner was
+    # attached to the task stated in the following segment.
+    consumed_assignments: set[tuple[int, str]] = set()
 
     for candidate_index, candidate in enumerate(candidates.action_items):
         if candidate.source_segment_index >= len(segments):
@@ -550,9 +614,23 @@ def _validate_candidates(
                 "An action item must include a task description."
             )
 
-        if not _has_actionable_intent(quote) and not _has_actionable_intent(
-            _quote_sentence_context(quote, evidence_text)
+        sentence_context = _quote_sentence_context(quote, evidence_text)
+        borrowed_owner = _owner_from_previous_segment(
+            sentence_context,
+            candidate.source_segment_index,
+            segments,
+        )
+        if (
+            not _has_actionable_intent(quote)
+            and not _has_actionable_intent(sentence_context)
+            and not _TASK_LEAD_IN.search(sentence_context)
         ):
+            logger.info(
+                "Discarding action-item candidate without actionable intent "
+                "candidate_index=%d source_segment_index=%d",
+                candidate_index,
+                candidate.source_segment_index,
+            )
             continue
         quote_timestamps = _find_quote_timestamps(quote, segment)
 
@@ -576,13 +654,12 @@ def _validate_candidates(
             if deadline_at is not None:
                 deadline_at = deadline_at.astimezone(timezone.utc)
 
-
-        print(
-           "[DEADLINE DEBUG]",
-           "text =", repr(deadline_text),
-           "resolved =", repr(deadline_at),
-           "meeting_start =", repr(meeting_start_at),
-           "timezone =", str(organization_timezone),
+        logger.debug(
+            "Deadline resolution text=%r resolved=%r meeting_start=%r timezone=%s",
+            deadline_text,
+            deadline_at,
+            meeting_start_at,
+            organization_timezone,
         )
         candidate = candidate.model_copy(
             update={
@@ -599,6 +676,11 @@ def _validate_candidates(
             candidate = candidate.model_copy(update={"owner_name": None})
         else:
             candidate = candidate.model_copy(update={"owner_name": owner_name})
+        if candidate.owner_name is None and borrowed_owner:
+            candidate = candidate.model_copy(update={"owner_name": borrowed_owner})
+            consumed_assignments.add(
+                (candidate.source_segment_index - 1, _normalize_quote(borrowed_owner))
+            )
         candidate = candidate.model_copy(update={"task_description": task_description})
 
         duplicate_key = (
@@ -613,6 +695,20 @@ def _validate_candidates(
         raise _SafeExtractionFailure(
             "No action-item candidates had verifiable source transcript quotes."
         )
+
+    if consumed_assignments:
+        # The bare "... assigned to <Name>." sentence is not a separate task once
+        # its owner has been attached to the task that follows it.
+        validated = [
+            (candidate, segment, quote_timestamps)
+            for candidate, segment, quote_timestamps in validated
+            if not any(
+                candidate.source_segment_index == index
+                and f"assigned to {owner}" in _normalize_quote(candidate.source_quote)
+                and not _states_other_task(candidate.source_quote)
+                for index, owner in consumed_assignments
+            )
+        ]
 
     full_segment_quote_counts: dict[tuple[int, str], int] = {}
     for candidate, segment, _quote_timestamps in validated:
@@ -734,7 +830,15 @@ def _refresh_existing_quote_timestamps(
 def generate_meeting_action_items(
     db: Session,
     transcript_id: str,
+    *,
+    retry_empty: bool = False,
 ) -> MeetingActionItemExtraction:
+    """Extract action items once per transcript.
+
+    A completed extraction is reused. With ``retry_empty`` a completed
+    extraction that found no items is run again; one that has items is never
+    re-run, so reviewed items and their tasks are not lost.
+    """
     transcript = db.get(MeetingTranscript, transcript_id)
     if transcript is None:
         raise ValueError("Meeting transcript not found.")
@@ -772,9 +876,11 @@ def generate_meeting_action_items(
     )
     if extraction is None:
         extraction = _create_extraction(db, recording.meeting_id, transcript.id)
-    if extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED:
-                extraction = _refresh_existing_quote_timestamps(db, extraction, transcript)
-                return refresh_missing_employee_matches(db, extraction)
+    if extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED and not (
+        retry_empty and not extraction.items
+    ):
+        extraction = _refresh_existing_quote_timestamps(db, extraction, transcript)
+        return refresh_missing_employee_matches(db, extraction)
     if extraction.status == ACTION_ITEM_EXTRACTION_STATUS_PROCESSING:
         return extraction
 
@@ -838,7 +944,15 @@ def generate_meeting_action_items(
                             "an adjacent segment boundary, source_quote may combine "
                             "verbatim text from the current segment and its adjacent "
                             "segment. Set source_segment_index to the segment where "
-                            "the action task begins. For all other items, source_quote "
+                            "the action task begins. When the owner and the task are "
+                            "stated in adjacent sentences or segments (for example "
+                            "'The task is assigned to Priya.' followed by 'The task is "
+                            "book two tickets.'), return ONE item with that owner and "
+                            "that task, set source_segment_index to the segment that "
+                            "states the task, and let source_quote combine the verbatim "
+                            "text of both. Every item must have a task_description; "
+                            "never return an item for an owner alone. "
+                            "For all other items, source_quote "
                             "must be verbatim from its indexed segment. Return only "
                             "source_segment_index values present in the input. Keep "
                             "source_quote to "
@@ -871,10 +985,8 @@ def generate_meeting_action_items(
             if not content:
                 raise _SafeExtractionFailure("Groq returned no action-item data.")
             try:
-                parsed_candidates = ActionItemCandidates.model_validate(
-                    json.loads(content)
-                )
-            except (json.JSONDecodeError, ValidationError, TypeError) as error:
+                parsed_candidates = _parse_candidates(json.loads(content))
+            except json.JSONDecodeError as error:
                 raise _SafeExtractionFailure(
                     "Groq returned malformed action-item data."
                 ) from error

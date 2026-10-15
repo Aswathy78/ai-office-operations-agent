@@ -15,6 +15,7 @@ import { MeetingRoomPage } from './pages/MeetingRoomPage'
 import { MeetingsPage } from './pages/MeetingsPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
+import { ChatPage } from './pages/ChatPage'
 import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
@@ -60,7 +61,7 @@ function AppRoutes() {
       <Route path="/meetings/:meetingId/report" element={<ProtectedAppPage path="/meetings"><MeetingReportPage /></ProtectedAppPage>} />
 
       {/* Other authenticated routes inside AppShell */}
-      <Route path="/chat" element={<ProtectedAppPage path="/chat"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/chat" element={<ProtectedAppPage path="/chat"><ChatPage /></ProtectedAppPage>} />
       <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><TaskWorkspacePage view="mine" /></ProtectedAppPage>} />
       <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
       <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />

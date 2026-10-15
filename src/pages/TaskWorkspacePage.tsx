@@ -6,6 +6,7 @@ import {
   getDashboardTasks,
   getMyTasks,
   retryAssignmentEmail,
+  setTaskStatus,
   taskCalendarUrl,
   type TaskActor,
   type TaskRecord,
@@ -37,6 +38,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null)
+  const [statusTaskId, setStatusTaskId] = useState<string | null>(null)
   const [managingTaskId, setManagingTaskId] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [employees, setEmployees] = useState<Employee[]>([])
@@ -45,7 +47,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
 
   const canManageTasks = view === 'dashboard' && user?.role !== 'employee'
   const actor: TaskActor | null = user
-    ? { id: user.id, role: user.role, team: user.department || null }
+    ? { id: user.id, role: user.role, team: user.department || null, email: user.email }
     : null
 
   useEffect(() => {
@@ -152,6 +154,24 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
       setError(reason instanceof Error ? reason.message : 'Email could not be retried.')
     } finally {
       setRetryingTaskId(null)
+    }
+  }
+
+  async function handleStatusChange(task: TaskRecord) {
+    if (!actor) return
+    setStatusTaskId(task.id)
+    try {
+      const result = await setTaskStatus(
+        task.id,
+        task.status === 'completed' ? 'pending' : 'completed',
+        actor,
+      )
+      replaceTask(result.task)
+      setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Task status could not be updated.')
+    } finally {
+      setStatusTaskId(null)
     }
   }
 
@@ -265,7 +285,30 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                     </time>
                   </td>
                   <td className="task-capitalize">{task.priority}</td>
-                  <td><span className="status-pill muted">Pending</span></td>
+                  <td>
+                    <div className="task-status-cell">
+                      {task.status === 'completed' ? (
+                        <span className="status-pill">Completed</span>
+                      ) : (
+                        <span className="status-pill muted">Pending</span>
+                      )}
+                      {task.status !== 'completed' && new Date(task.due_at).getTime() < Date.now() && (
+                        <span className="status-pill danger">Overdue</span>
+                      )}
+                      {(view === 'mine' || canManageTasks) && actor && (
+                        <button
+                          className="text-button"
+                          type="button"
+                          disabled={statusTaskId === task.id}
+                          onClick={() => void handleStatusChange(task)}
+                        >
+                          {statusTaskId === task.id
+                            ? 'Saving...'
+                            : task.status === 'completed' ? 'Reopen' : 'Mark complete'}
+                        </button>
+                      )}
+                    </div>
+                  </td>
                   <td>
                     <Link
                       to={`/meetings/${encodeURIComponent(task.meeting_id)}/report?transcript_id=${encodeURIComponent(task.transcript_id)}&segment=${task.source_segment_index}`}

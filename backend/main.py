@@ -8,8 +8,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import create_tables
+from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
 from app.task_router import router as task_router
+from app.task_reminder_scheduler import (
+    start_task_reminder_scheduler,
+    stop_task_reminder_scheduler,
+)
 
 
 app = FastAPI(
@@ -34,6 +39,7 @@ app.add_middleware(
 
 app.include_router(meeting_router)
 app.include_router(task_router)
+app.include_router(email_draft_router)
 
 
 @app.on_event("startup")
@@ -47,6 +53,12 @@ def startup():
             seed_development_employees(db)
     except Exception:
         pass
+    start_task_reminder_scheduler()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    stop_task_reminder_scheduler()
 
 
 @app.get("/")

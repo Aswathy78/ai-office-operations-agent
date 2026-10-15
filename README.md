@@ -613,7 +613,10 @@ action item assigned to Rahul sends a real assignment email when SMTP is
 configured.
 
 Run the transcription worker in a second terminal from the same `backend`
-directory:
+directory. The worker needs `faster-whisper`, which has no wheels for Python
+3.15 yet, so install the requirements into a Python 3.11–3.13 environment
+(for example `py -3.11 -m venv ..\.venv-py311`). Transcripts stay `pending`,
+and no summaries or action items are produced, until the worker is running:
 
 ``` powershell
 python -m app.meeting.transcription_worker

@@ -63,15 +63,16 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
     first_run = seed_development_employees(db_session)
     second_run = seed_development_employees(db_session)
 
-    assert len(first_run) == 9
+    assert len(first_run) == 10
     assert len(second_run) == 0
-    assert db_session.query(Employee).count() == 9
+    assert db_session.query(Employee).count() == 10
     assert {employee.email for employee in db_session.query(Employee).all()} == {
+        "manager@example.com",
         "ava.patel@northstar.example",
         "marcus.chen@northstar.example",
         "isabella.lopez@northstar.example",
         "daniel.brooks@northstar.example",
-        "priya.sharma@northstar.example",
+        "priyasharma.example@gmail.com",
         "noah.martin@northstar.example",
         "chloe.nguyen@northstar.example",
         "ethan.walker@northstar.example",
@@ -80,6 +81,21 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
     rahul = db_session.query(Employee).filter_by(email="rahulexample.test@gmail.com").one()
     assert rahul.name == "Rahul"
     assert rahul.is_active is True
+
+
+def test_seed_assigns_team_line_managers(db_session: Session):
+    seed_development_employees(db_session)
+    by_email = {e.email: e for e in db_session.query(Employee).all()}
+    maya = by_email["manager@example.com"]
+
+    assert by_email["rahulexample.test@gmail.com"].manager_id == maya.id
+    assert maya.manager_id is None
+    assert by_email["noah.martin@northstar.example"].manager_id == (
+        by_email["isabella.lopez@northstar.example"].id
+    )
+    assert by_email["ethan.walker@northstar.example"].manager_id == (
+        by_email["chloe.nguyen@northstar.example"].id
+    )
 
 
 @pytest.mark.parametrize("app_env", [None, "production", "development-test"])

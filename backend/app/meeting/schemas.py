@@ -292,7 +292,8 @@ class TaskResponse(BaseModel):
     source_timestamp_seconds: float
     due_at: datetime
     priority: Literal["low", "medium", "high", "urgent"]
-    status: Literal["pending"]
+    status: Literal["pending", "completed"]
+    completed_at: datetime | None = None
     assignment_email_status: Literal["pending", "sent", "failed"]
     assignment_email_error: str | None = None
     created_at: datetime
@@ -304,6 +305,21 @@ class TaskResponse(BaseModel):
 
 
 TaskActorRole = Literal["employee", "manager", "hr_operations", "admin"]
+
+
+class TaskStatusUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["pending", "completed"]
+
+
+class TaskReminderRunResponse(BaseModel):
+    checked: int
+    reminders_sent: int
+    escalations_sent: int
+    failed: int
+    skipped_no_manager: int
+    notification_ids: list[str]
 
 
 class TaskReassignRequest(BaseModel):

@@ -440,3 +440,58 @@ def test_existing_processing_summary_is_returned_without_second_call(
     assert returned.id == processing.id
 
     assert returned.status == SUMMARY_STATUS_PROCESSING
+
+def _fake_groq_sequence(monkeypatch, outputs: list[SummarySections], calls: list):
+    """Fake Groq client that returns each output in turn."""
+    remaining = list(outputs)
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            content = remaining.pop(0).model_dump_json()
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+            )
+
+    class FakeGroq:
+        def __init__(self, *, api_key):
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setitem(sys.modules, "groq", SimpleNamespace(Groq=FakeGroq))
+
+
+def _empty_sections() -> SummarySections:
+    return SummarySections(overview="", decisions=[], discussion_topics=[], open_questions=[])
+
+
+def test_empty_overview_is_retried_once(db_session: Session, monkeypatch):
+    transcript = _create_transcript(db_session)
+    calls = []
+    _disable_dotenv(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    _fake_groq_sequence(monkeypatch, [_empty_sections(), _sections()], calls)
+
+    summary = generate_meeting_summary(db_session, transcript.id)
+
+    assert len(calls) == 2
+    assert "Never leave overview empty" in calls[0]["messages"][0]["content"]
+    assert summary.status == SUMMARY_STATUS_COMPLETED
+    assert summary.overview == "The team agreed to run a pilot in May."
+
+
+def test_repeated_empty_overview_fails_instead_of_saving_blank_summary(
+    db_session: Session,
+    monkeypatch,
+):
+    transcript = _create_transcript(db_session)
+    calls = []
+    _disable_dotenv(monkeypatch)
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    _fake_groq_sequence(monkeypatch, [_empty_sections(), _empty_sections()], calls)
+
+    with pytest.raises(MeetingSummaryGenerationError, match="empty summary overview"):
+        generate_meeting_summary(db_session, transcript.id)
+
+    summary = db_session.query(MeetingSummary).filter_by(transcript_id=transcript.id).one()
+    assert summary.status == SUMMARY_STATUS_FAILED
+    assert summary.overview in (None, "")

@@ -206,8 +206,11 @@ export function reviewActionItem(
 export function extractMeetingActionItems(
   meetingId: string,
   organizerId: string,
+  options: { retryEmpty?: boolean } = {},
 ): Promise<MeetingActionItems> {
   const query = new URLSearchParams({ organizer_id: organizerId })
+  // Re-runs an extraction that completed without finding any action items.
+  if (options.retryEmpty) query.set('retry_empty', 'true')
   return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/extract?${query}`,
     { method: 'POST' },

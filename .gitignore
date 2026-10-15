@@ -20,3 +20,5 @@ backend/storage/
 *.db-shm
 *.db-wal
 *.db.backup*
+# Python virtual environments
+.venv*/

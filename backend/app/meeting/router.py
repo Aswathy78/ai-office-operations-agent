@@ -1267,6 +1267,10 @@ def _meeting_action_items_response(
 def extract_meeting_action_items(
     meeting_id: str,
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    retry_empty: bool = Query(
+        default=False,
+        description="Re-run an extraction that completed without finding any action items.",
+    ),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -1290,7 +1294,11 @@ def extract_meeting_action_items(
         )
 
     try:
-        extraction = generate_meeting_action_items(db, transcript.id)
+        extraction = (
+            generate_meeting_action_items(db, transcript.id, retry_empty=True)
+            if retry_empty
+            else generate_meeting_action_items(db, transcript.id)
+        )
     except MeetingActionItemExtractionError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

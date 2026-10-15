@@ -111,6 +111,49 @@ const extraction: MeetingActionItems = {
 }
 
 describe('MeetingActionItemsPanel — Story 3.3 Action Item Review (FR-14)', () => {
+  it('offers Retry Extraction when an extraction completed with no items', async () => {
+    const onExtract = vi.fn()
+    render(
+      <MeetingActionItemsPanel
+        extraction={{ ...extraction, action_items: [] }}
+        employees={employees}
+        employeesLoading={false}
+        isOrganizer={true}
+        loading={false}
+        triggering={false}
+        confirmingActionItemId={null}
+        ownerConfirmationFeedback={null}
+        onExtract={onExtract}
+        onConfirmOwner={vi.fn()}
+        onOpenSource={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('No action items were identified.')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry Extraction' }))
+    expect(onExtract).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not offer re-extraction once items exist', () => {
+    render(
+      <MeetingActionItemsPanel
+        extraction={extraction}
+        employees={employees}
+        employeesLoading={false}
+        isOrganizer={true}
+        loading={false}
+        triggering={false}
+        confirmingActionItemId={null}
+        ownerConfirmationFeedback={null}
+        onExtract={vi.fn()}
+        onConfirmOwner={vi.fn()}
+        onOpenSource={vi.fn()}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /extract/i })).not.toBeInTheDocument()
+  })
+
   it('shows automatic no-match separately from organizer-confirmed ownership', () => {
     render(
       <MeetingActionItemsPanel

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.meeting.models import Employee
 
 DEVELOPMENT_EMPLOYEES = [
+    {"name": "Maya Thompson", "email": "manager@example.com", "team": "Engineering"},
     {"name": "Ava Patel", "email": "ava.patel@northstar.example", "team": "Engineering"},
     {"name": "Marcus Chen", "email": "marcus.chen@northstar.example", "team": "Engineering"},
     {"name": "Isabella Lopez", "email": "isabella.lopez@northstar.example", "team": "Finance"},
@@ -20,6 +21,14 @@ DEVELOPMENT_EMPLOYEES = [
     {"name": "Ethan Walker", "email": "ethan.walker@northstar.example", "team": "Operations"},
     {"name": "Rahul", "email": "rahulexample.test@gmail.com", "team": "Engineering"},
 ]
+
+# Line manager (by e-mail) for each team; receives reminder escalations (Story 4.4).
+# Maya Thompson matches the demo "manager" login.
+TEAM_MANAGERS = {
+    "Engineering": "manager@example.com",
+    "Finance": "isabella.lopez@northstar.example",
+    "Operations": "chloe.nguyen@northstar.example",
+}
 
 
 def seed_development_employees(db: Session) -> list[Employee]:
@@ -46,12 +55,33 @@ def seed_development_employees(db: Session) -> list[Employee]:
         db.add(employee)
         created.append(employee)
 
+    if created:
+        db.flush()
+    updated = _assign_team_managers(db) or updated
+
     if created or updated:
         db.commit()
         for employee in created:
             db.refresh(employee)
 
     return created
+
+
+def _assign_team_managers(db: Session) -> bool:
+    """Back-fill missing line managers for seeded employees; never overrides a set manager."""
+    seeded = {data["email"] for data in DEVELOPMENT_EMPLOYEES}
+    managers = {
+        team: db.query(Employee).filter(Employee.email == email).first()
+        for team, email in TEAM_MANAGERS.items()
+    }
+    updated = False
+    for employee in db.query(Employee).filter(Employee.email.in_(seeded)).all():
+        manager = managers.get(employee.team or "")
+        if manager is None or manager.id == employee.id or employee.manager_id is not None:
+            continue
+        employee.manager_id = manager.id
+        updated = True
+    return updated
 
 
 def require_development_environment() -> None:

@@ -54,12 +54,29 @@ def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeyp
         "create_tables",
         lambda: events.append(("create_tables",)),
     )
+    # Startup also seeds the employee directory; keep that off the real database.
+    import app.db.seed_employees as seed_module
+
+    monkeypatch.setattr(
+        seed_module,
+        "seed_development_employees",
+        lambda db: events.append(("seed_employees",)),
+    )
+
+    monkeypatch.setattr(
+        main_module,
+        "start_task_reminder_scheduler",
+        lambda: events.append(("start_reminder_scheduler",)),
+    )
 
     main_module.startup()
 
+    # backend/.env deliberately overrides stale shell variables.
     assert events == [
-        ("load_dotenv", expected_env, False),
+        ("load_dotenv", expected_env, True),
         ("create_tables",),
+        ("seed_employees",),
+        ("start_reminder_scheduler",),
     ]
 
 

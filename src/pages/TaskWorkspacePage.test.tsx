@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
-import { getDashboardTasks, getMyTasks, taskCalendarUrl } from '../api/tasks'
+import { getDashboardTasks, getMyTasks, setTaskStatus, taskCalendarUrl, type TaskRecord } from '../api/tasks'
 import { demoUsers } from '../mocks/mockUser'
 import { TaskWorkspacePage } from './TaskWorkspacePage'
 
@@ -20,6 +20,7 @@ vi.mock('../api/tasks', () => ({
   getMyTasks: vi.fn(),
   getDashboardTasks: vi.fn(),
   retryAssignmentEmail: vi.fn(),
+  setTaskStatus: vi.fn(),
   taskCalendarUrl: vi.fn(),
 }))
 
@@ -274,5 +275,60 @@ describe('TaskWorkspacePage employee identity', () => {
 
     expect(getMyTasks).toHaveBeenCalledTimes(1)
     expect(getDashboardTasks).not.toHaveBeenCalled()
+  })
+})
+
+describe('TaskWorkspacePage task completion (Story 4.4)', () => {
+  const overdueTask: TaskRecord = {
+    id: 'task-9',
+    title: 'Send the vendor contract',
+    assignee_id: 'rahul',
+    assignee_name: 'Rahul',
+    creator_id: 'user-002',
+    source: 'meeting_action_item',
+    source_action_item_id: 'item-9',
+    meeting_id: 'meeting-9',
+    meeting_title: 'Vendor sync',
+    transcript_id: 'transcript-9',
+    source_segment_index: 0,
+    source_timestamp_seconds: 3,
+    due_at: '2020-01-01T09:00:00Z',
+    priority: 'high',
+    status: 'pending',
+    assignment_email_status: 'sent',
+    assignment_email_error: null,
+    created_at: '2019-12-30T00:00:00Z',
+  }
+
+  it('lets the assignee mark an overdue task complete, which stops reminders', async () => {
+    authValue.user = demoUsers.employee
+    vi.mocked(getMyTasks).mockResolvedValue([overdueTask])
+    vi.mocked(setTaskStatus).mockResolvedValue({
+      outcome: 'applied',
+      message: 'Task marked as Completed. No further reminders will be sent.',
+      task: { ...overdueTask, status: 'completed', completed_at: '2026-10-15T10:00:00Z' },
+      reassignment_request: null,
+      notifications: [],
+    })
+    const user = userEvent.setup()
+
+    render(
+      <MemoryRouter>
+        <TaskWorkspacePage view="mine" />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByText('Overdue')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Mark complete' }))
+
+    expect(setTaskStatus).toHaveBeenCalledWith('task-9', 'completed', {
+      id: demoUsers.employee.id,
+      role: 'employee',
+      team: demoUsers.employee.department,
+      email: demoUsers.employee.email,
+    })
+    expect(await screen.findByText('Completed')).toBeInTheDocument()
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument()
   })
 })

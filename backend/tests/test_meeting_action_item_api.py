@@ -1138,3 +1138,27 @@ def test_confidence_threshold_requires_approval(
     assert items[0]["review_status"] == "approval_required"
     assert items[0]["requires_approval"] is True
     assert items[0]["is_task_eligible"] is False
+
+
+def test_retry_empty_query_is_passed_to_extraction(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    meeting, transcript = _create_meeting_and_transcript(db_session)
+    extraction = _create_extraction(db_session, meeting, transcript, with_item=False)
+    calls = []
+
+    def fake_generate(db, transcript_id, **kwargs):
+        calls.append(kwargs)
+        return extraction
+
+    monkeypatch.setattr("app.meeting.router.generate_meeting_action_items", fake_generate)
+
+    client.post(f"/api/v1/meetings/{meeting.id}/action-items/extract?organizer_id={ORGANIZER_ID}")
+    client.post(
+        f"/api/v1/meetings/{meeting.id}/action-items/extract"
+        f"?organizer_id={ORGANIZER_ID}&retry_empty=true"
+    )
+
+    assert calls == [{}, {"retry_empty": True}]

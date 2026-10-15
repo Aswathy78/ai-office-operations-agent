@@ -34,6 +34,8 @@ from app.meeting.models import (
     TASK_REASSIGNMENT_STATUS_APPROVED,
     TASK_REASSIGNMENT_STATUS_PENDING,
     TASK_REASSIGNMENT_STATUS_REJECTED,
+    TASK_STATUS_COMPLETED,
+    TASK_STATUS_PENDING,
 )
 from app.task_service import (
     assignment_notification_key,
@@ -52,6 +54,7 @@ APPROVER_ROLES = {ROLE_HR_OPERATIONS, ROLE_ADMIN}
 ACTION_REASSIGN = "reassign"
 ACTION_CHANGE_DUE_DATE = "change_due_date"
 ACTION_DECIDE_REASSIGNMENT = "decide_reassignment"
+ACTION_CHANGE_STATUS = "change_status"
 
 NOTIFICATION_REASSIGNED_AWAY = "reassigned_away"
 NOTIFICATION_REASSIGNED_TO = "reassigned_to"
@@ -63,6 +66,8 @@ class TaskActor:
     id: str
     role: str
     team: str | None = None
+    # Signed-in user's e-mail; lets an employee act on tasks assigned to them.
+    email: str | None = None
 
 
 class TaskChangeDenied(Exception):
@@ -540,3 +545,39 @@ def change_task_due_date(
         task=task,
         notifications=[notification],
     )
+
+
+def set_task_status(db: Session, task_id: str, actor: TaskActor, new_status: str) -> TaskChangeResult:
+    """Mark a task Completed (or reopen it). Completing stops reminders and escalations.
+
+    The assignee may change their own task; otherwise the manager-scope rules apply.
+    """
+    if new_status not in (TASK_STATUS_PENDING, TASK_STATUS_COMPLETED):
+        raise ValueError("Status must be 'pending' or 'completed'.")
+    task = _load_task(db, task_id)
+    assignee = db.get(Employee, task.assignee_id)
+    verb = "complete tasks" if new_status == TASK_STATUS_COMPLETED else "reopen tasks"
+    is_assignee = bool(
+        actor.email and assignee and actor.email.strip().casefold() == assignee.email.casefold()
+    )
+    if not is_assignee:
+        _require_manager_scope(db, task, actor, ACTION_CHANGE_STATUS, verb)
+
+    if task.status == new_status:
+        label = "completed" if new_status == TASK_STATUS_COMPLETED else "open"
+        return TaskChangeResult(outcome=TASK_AUDIT_OUTCOME_APPLIED, message=f"The task is already {label}.", task=task)
+
+    now = _now()
+    task.status = new_status
+    task.completed_at = now if new_status == TASK_STATUS_COMPLETED else None
+    task.updated_at = now
+    message = (
+        "Task marked as Completed. No further reminders will be sent."
+        if new_status == TASK_STATUS_COMPLETED
+        else "Task reopened. Reminders will resume based on its due date."
+    )
+    _audit(db, task, actor, ACTION_CHANGE_STATUS, TASK_AUDIT_OUTCOME_APPLIED,
+           f"Status changed to {new_status}.")
+    db.commit()
+    db.refresh(task)
+    return TaskChangeResult(outcome=TASK_AUDIT_OUTCOME_APPLIED, message=message, task=task)

@@ -92,7 +92,8 @@ ACTION_ITEM_PRIORITIES = (
 )
 
 TASK_STATUS_PENDING = "pending"
-TASK_STATUSES = (TASK_STATUS_PENDING,)
+TASK_STATUS_COMPLETED = "completed"
+TASK_STATUSES = (TASK_STATUS_PENDING, TASK_STATUS_COMPLETED)
 
 TASK_REASSIGNMENT_STATUS_PENDING = "pending"
 TASK_REASSIGNMENT_STATUS_APPROVED = "approved"
@@ -244,6 +245,12 @@ class Employee(Base):
         unique=True,
     )
     team: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Line manager; receives escalations when this employee's tasks go unanswered.
+    manager_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -767,6 +774,10 @@ class Task(Base):
         nullable=False,
         default=TASK_STATUS_PENDING,
     )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     assignment_email_status: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
@@ -1085,3 +1096,88 @@ class MeetingMinutesRecipient(Base):
 
     minutes: Mapped["MeetingMinutes"] = relationship(back_populates="recipients")
     attendance_log: Mapped["MeetingAttendanceLog | None"] = relationship()
+
+
+# Allowed values for EmailDraft.status (Story 4.3 — e-mail drafting from chat).
+EMAIL_DRAFT_STATUS_DRAFT = "draft"
+EMAIL_DRAFT_STATUS_PENDING_APPROVAL = "pending_approval"
+EMAIL_DRAFT_STATUS_APPROVED = "approved"
+EMAIL_DRAFT_STATUS_REJECTED = "rejected"
+EMAIL_DRAFT_STATUS_SENT = "sent"
+EMAIL_DRAFT_STATUS_PARTIALLY_SENT = "partially_sent"
+EMAIL_DRAFT_STATUS_FAILED = "failed"
+EMAIL_DRAFT_STATUS_DISCARDED = "discarded"
+EMAIL_DRAFT_STATUSES = (
+    EMAIL_DRAFT_STATUS_DRAFT,
+    EMAIL_DRAFT_STATUS_PENDING_APPROVAL,
+    EMAIL_DRAFT_STATUS_APPROVED,
+    EMAIL_DRAFT_STATUS_REJECTED,
+    EMAIL_DRAFT_STATUS_SENT,
+    EMAIL_DRAFT_STATUS_PARTIALLY_SENT,
+    EMAIL_DRAFT_STATUS_FAILED,
+    EMAIL_DRAFT_STATUS_DISCARDED,
+)
+
+EMAIL_DRAFT_SOURCE_TEMPLATE = "template"
+EMAIL_DRAFT_SOURCE_LLM = "llm"
+EMAIL_DRAFT_SOURCES = (EMAIL_DRAFT_SOURCE_TEMPLATE, EMAIL_DRAFT_SOURCE_LLM)
+
+
+class EmailDraft(Base):
+    """An e-mail prepared by the assistant that the employee previews, edits and sends."""
+
+    __tablename__ = "email_drafts"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in EMAIL_DRAFT_STATUSES)})",
+            name="ck_email_drafts_status",
+        ),
+        CheckConstraint(
+            f"source IN ({', '.join(repr(source) for source in EMAIL_DRAFT_SOURCES)})",
+            name="ck_email_drafts_source",
+        ),
+        Index("ix_email_drafts_created_by_id", "created_by_id"),
+        Index("ix_email_drafts_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_by_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_by_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_by_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_by_role: Mapped[str] = mapped_column(String(30), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(String(20), nullable=False)
+    template_key: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    generation_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # [{"name", "email", "internal", "source"}]
+    recipients: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # [{"name", "count"}] — directory groups that were expanded into recipients.
+    recipient_groups: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    unresolved_recipients: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    approval_reasons: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # [{"type", "label", "severity", "match", "field"}]
+    sensitive_findings: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=EMAIL_DRAFT_STATUS_DRAFT,
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # [{"email", "status": "sent" | "failed", "error"}]
+    delivery_results: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

@@ -903,3 +903,82 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 .button.danger:hover { background: #dc2626; }
 .button.danger:disabled { opacity: .45; cursor: not-allowed; }
+
+/* AI Assistant chat + e-mail draft preview (Story 4.3) */
+.chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; align-items: start; }
+.chat-panel { display: flex; flex-direction: column; min-height: calc(100vh - 140px); background: #fff; border: 1px solid var(--border); border-radius: 12px; }
+.chat-header { display: flex; gap: 14px; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.chat-header h2 { margin: 0; font-size: 19px; }
+.chat-header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+.chat-header .eyebrow { margin: 0 0 4px; }
+.chat-messages { flex: 1; display: grid; align-content: start; gap: 14px; margin: 0; padding: 20px; list-style: none; overflow-y: auto; }
+.chat-message { display: flex; gap: 10px; align-items: flex-start; }
+.chat-message.user { justify-content: flex-end; }
+.chat-avatar { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--blue-soft); color: var(--blue); }
+.chat-bubble { display: grid; gap: 12px; max-width: min(760px, 100%); min-width: 0; flex: 0 1 auto; }
+.chat-message.assistant .chat-bubble { flex: 1; }
+.chat-bubble > p { margin: 0; padding: 10px 14px; border-radius: 12px; background: #f1f4f9; font-size: 14px; line-height: 1.5; justify-self: start; }
+.chat-message.user .chat-bubble > p { background: var(--blue); color: #fff; justify-self: end; }
+.chat-message.error .chat-bubble > p { background: #fdecec; color: var(--danger); }
+.chat-scroll-anchor { height: 1px; }
+.chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 12px; }
+.chat-suggestion { border: 1px solid #bfd0e5; background: #fff; color: #174d8e; border-radius: 999px; padding: 7px 12px; font-size: 12px; cursor: pointer; text-align: left; }
+.chat-suggestion:hover { background: var(--blue-soft); }
+.chat-input { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid var(--border); align-items: flex-end; }
+.chat-input textarea { flex: 1; resize: vertical; min-height: 44px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.chat-input .button { min-height: 44px; }
+.chat-sidebar { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px; position: sticky; top: 90px; }
+.chat-sidebar h3 { margin: 0 0 10px; font-size: 14px; }
+.chat-sidebar ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; max-height: 60vh; overflow-y: auto; }
+.chat-sidebar li button { width: 100%; display: grid; gap: 4px; justify-items: start; text-align: left; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; cursor: pointer; }
+.chat-sidebar li button:hover { border-color: #bfd0e5; background: #f8fbff; }
+.chat-sidebar li strong { font-size: 13px; overflow-wrap: anywhere; }
+.chat-sidebar li span:not(.status-pill) { color: var(--muted); font-size: 12px; }
+
+.email-draft { display: grid; gap: 12px; padding: 16px; border: 1px solid #bfd0e5; border-radius: 12px; background: #fbfdff; }
+.email-draft-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.email-draft-title { display: flex; align-items: center; gap: 8px; color: var(--navy); }
+.email-draft-source { color: var(--muted); font-size: 12px; }
+.email-draft-note { margin: 0; padding: 8px 10px; border-radius: 8px; background: #fff3dc; color: var(--warning); font-size: 12px; }
+.email-draft-field { display: grid; gap: 6px; }
+.email-draft-field input, .email-draft-field textarea, .email-add-recipient input { width: 100%; padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.email-draft-field textarea { resize: vertical; line-height: 1.5; font-size: 14px; }
+.email-draft-field input[readonly], .email-draft-field textarea[readonly] { background: #f5f7fb; }
+.email-draft-label { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 750; color: #33445e; }
+.email-draft-count { margin-left: auto; padding: 2px 8px; border-radius: 999px; background: var(--blue-soft); color: var(--blue); font-size: 11px; }
+.email-draft-groups { margin: 0; color: var(--muted); font-size: 12px; }
+.email-recipient-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.email-recipient { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 4px 6px 4px 10px; border-radius: 999px; background: #eef3fa; font-size: 12px; }
+.email-recipient > span:first-child { overflow-wrap: anywhere; }
+.email-recipient.external { background: #fff3dc; }
+.email-recipient-tag { font-size: 10px; font-weight: 800; color: var(--warning); text-transform: uppercase; }
+.email-recipient button { display: grid; place-items: center; width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; cursor: pointer; color: var(--muted); }
+.email-recipient button:hover { background: rgba(0,0,0,.08); color: var(--danger); }
+.email-draft-empty { color: var(--muted); font-size: 12px; }
+.email-add-recipient { display: flex; gap: 8px; }
+.email-draft-alert { display: flex; gap: 10px; padding: 10px 12px; border-radius: 8px; font-size: 13px; }
+.email-draft-alert ul { margin: 6px 0 0; padding-left: 18px; }
+.email-draft-alert p { margin: 6px 0 0; }
+.email-draft-alert.warning { background: #fff3dc; color: var(--warning); }
+.email-draft-alert.danger { background: #fdecec; color: var(--danger); }
+.email-draft-alert code { background: rgba(255,255,255,.7); padding: 1px 4px; border-radius: 4px; }
+.email-severity { font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.email-draft-ack { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; color: #5a1f1f; }
+.email-draft-scan-ok { margin: 0; color: var(--success); font-size: 12px; }
+.email-draft-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.email-draft-actions .button { display: inline-flex; align-items: center; gap: 6px; }
+.email-draft-discard { margin-left: auto; }
+.email-draft-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; background: var(--blue-soft); font-size: 13px; }
+
+@media (max-width: 1000px) {
+  .chat-layout { grid-template-columns: 1fr; }
+  .chat-sidebar { position: static; }
+}
+@media (max-width: 520px) {
+  .chat-messages, .chat-input { padding-left: 12px; padding-right: 12px; }
+  .email-draft { padding: 12px; }
+  .email-add-recipient { flex-direction: column; }
+}
+
+/* Task completion (Story 4.4) */
+.task-status-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

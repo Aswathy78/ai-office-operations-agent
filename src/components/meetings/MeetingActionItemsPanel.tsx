@@ -347,7 +347,7 @@ export function MeetingActionItemsPanel({
             </button>
           )}
 
-          {(!status || status === 'failed') && (
+          {(!status || status === 'failed' || (status === 'completed' && actionItems.length === 0)) && (
             <button
               className="button secondary"
               type="button"
@@ -358,7 +358,7 @@ export function MeetingActionItemsPanel({
               <RefreshCw size={14} aria-hidden="true" />
               {triggering
                 ? 'Extracting…'
-                : status === 'failed'
+                : status === 'failed' || status === 'completed'
                   ? 'Retry Extraction'
                   : 'Extract Action Items'}
             </button>

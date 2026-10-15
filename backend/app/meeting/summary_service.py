@@ -39,6 +39,9 @@ class SummarySections(BaseModel):
         return value
 
 
+SUMMARY_ATTEMPTS = 2
+
+
 class MeetingSummaryGenerationError(RuntimeError):
     """Raised when a persisted meeting summary cannot be generated."""
 
@@ -116,41 +119,54 @@ def generate_meeting_summary(
                 "GROQ_API_KEY is not set in the environment or backend/.env."
             )
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Summarize only the supplied persisted meeting transcript. "
-                        "Do not invent, infer, or add information not stated in it. "
-                        "Return exactly these four fields: overview (a string of "
-                        "one or two sentences describing what was said), "
-                        "and decisions, discussion_topics, and open_questions "
-                        "(each an array of strings). Return an empty array for "
-                        "any array field with no supported items. "
-                        "The response must be valid JSON."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": transcript.transcript_text,
-                },
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-
-        content = response.choices[0].message.content
-
-        if not content:
-            raise MeetingSummaryGenerationError(
-                "Groq returned no summary."
+        sections = None
+        # Some models return an empty overview for very short transcripts;
+        # retry once rather than saving a blank "completed" summary.
+        for _ in range(SUMMARY_ATTEMPTS):
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Summarize only the supplied persisted meeting transcript. "
+                            "Do not invent, infer, or add information not stated in it. "
+                            "Return a JSON object with exactly these four fields: "
+                            "overview, a non-empty string of one or two sentences "
+                            "describing what was said (for a very short transcript, "
+                            "restate its main point in your own words); and "
+                            "decisions, discussion_topics, and open_questions, each "
+                            "an array of strings that is empty when the transcript "
+                            "supports no items. Never leave overview empty. "
+                            "The response must be valid JSON."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": transcript.transcript_text,
+                    },
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
             )
 
-        parsed = json.loads(content)
+            content = response.choices[0].message.content
 
-        sections = SummarySections.model_validate(parsed)
+            if not content:
+                raise MeetingSummaryGenerationError(
+                    "Groq returned no summary."
+                )
+
+            parsed = json.loads(content)
+
+            sections = SummarySections.model_validate(parsed)
+
+            if sections.overview.strip():
+                break
+        else:
+            raise MeetingSummaryGenerationError(
+                "Groq returned an empty summary overview."
+            )
 
     except Exception as error:
         summary.status = SUMMARY_STATUS_FAILED

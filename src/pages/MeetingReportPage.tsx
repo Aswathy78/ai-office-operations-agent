@@ -254,7 +254,11 @@ export function MeetingReportPage() {
     setActionItemsTriggering(true)
     setActionItemsError('')
     try {
-      const result = await extractMeetingActionItems(meetingId, user.id)
+      const retryEmpty =
+        actionItems?.status === 'completed' && actionItems.action_items.length === 0
+      const result = retryEmpty
+        ? await extractMeetingActionItems(meetingId, user.id, { retryEmpty })
+        : await extractMeetingActionItems(meetingId, user.id)
       setActionItems(result)
     } catch (reason) {
       setActionItemsError(

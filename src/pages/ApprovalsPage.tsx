@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { RefreshCw, ShieldCheck } from 'lucide-react'
 import {
   decideReassignmentRequest,
   getReassignmentRequests,
   type TaskReassignmentRequest,
 } from '../api/tasks'
+import { EmailApprovalsSection } from '../components/email/EmailApprovalsSection'
 import { useAuth } from '../contexts/AuthContext'
 
 type StatusFilter = 'pending' | ''
@@ -27,6 +28,10 @@ export function ApprovalsPage() {
   const [feedback, setFeedback] = useState<Record<string, { tone: 'success' | 'error'; message: string }>>({})
 
   const canDecide = Boolean(user && APPROVER_ROLES.has(user.role))
+  const emailActor = useMemo(
+    () => (user ? { id: user.id, role: user.role, team: user.department || null } : null),
+    [user],
+  )
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -189,6 +194,8 @@ export function ApprovalsPage() {
           ))}
         </ul>
       )}
+
+      {emailActor && <EmailApprovalsSection actor={emailActor} />}
     </div>
   )
 }

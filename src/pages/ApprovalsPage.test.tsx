@@ -24,6 +24,11 @@ vi.mock('../api/tasks', () => ({
   getReassignmentRequests: vi.fn(),
 }))
 
+vi.mock('../api/emailDrafts', () => ({
+  decideEmailDraft: vi.fn(),
+  getEmailApprovals: vi.fn().mockResolvedValue([]),
+}))
+
 const pendingRequest: TaskReassignmentRequest = {
   id: 'request-1',
   task_id: 'task-1',

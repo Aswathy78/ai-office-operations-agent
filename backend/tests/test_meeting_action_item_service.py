@@ -1138,3 +1138,141 @@ def test_empty_timestamped_segment_list_completes_with_zero_items(
 
     assert extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED
     assert extraction.items == []
+
+
+# --- Owner and task stated in adjacent segments (real "jailer ticket" transcript) ---
+
+SPLIT_ASSIGNMENT_SEGMENTS = [
+    {
+        "start": 1.0,
+        "end": 9.5,
+        "text": "Hi, good morning. There is a meeting scheduled for tomorrow. "
+        "The task is assigned to Priya.",
+        "speaker": "Maya",
+        "flagged_for_correction": False,
+    },
+    {
+        "start": 12.4,
+        "end": 18.3,
+        "text": "The task is book 2 tickets for jailer 2 movie.",
+        "speaker": "Maya",
+        "flagged_for_correction": False,
+    },
+]
+
+
+def _split_candidate(**overrides) -> dict[str, object]:
+    candidate = _candidate(
+        source_segment_index=1,
+        source_quote="The task is book 2 tickets for jailer 2 movie.",
+        task_description="Book 2 tickets for jailer 2 movie",
+        owner_name=None,
+        deadline_text=None,
+    )
+    candidate["intent_type"] = "assignment"
+    candidate.update(overrides)
+    return candidate
+
+
+def test_task_sentence_after_assignment_sentence_gets_owner(db_session: Session, monkeypatch):
+    """Model output seen in production: owner-only fragment (no task) + ownerless task."""
+    transcript = _create_completed_transcript(db_session, segments=SPLIT_ASSIGNMENT_SEGMENTS)
+    owner_only = _candidate(
+        source_segment_index=0,
+        source_quote="The task is assigned to Priya.",
+        owner_name=None,
+        deadline_text=None,
+    )
+    owner_only["task_description"] = None  # malformed: must not sink the extraction
+    _install_groq(monkeypatch, _response([owner_only, _split_candidate()]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    assert extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED
+    assert [(item.owner_name, item.task_description, item.source_segment_index)
+            for item in extraction.items] == [("Priya", "Book 2 tickets for jailer 2 movie", 1)]
+
+
+def test_owner_only_sentence_is_not_kept_as_a_separate_task(db_session: Session, monkeypatch):
+    """Other model output seen: an invented task for the assignment sentence + the real task."""
+    transcript = _create_completed_transcript(db_session, segments=SPLIT_ASSIGNMENT_SEGMENTS)
+    invented = _candidate(
+        source_segment_index=0,
+        source_quote="There is a meeting scheduled for tomorrow. The task is assigned to Priya.",
+        task_description="Attend the meeting scheduled for tomorrow",
+        owner_name="Priya",
+        deadline_text=None,
+    )
+    _install_groq(monkeypatch, _response([invented, _split_candidate()]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    assert [(item.owner_name, item.task_description) for item in extraction.items] == [
+        ("Priya", "Book 2 tickets for jailer 2 movie"),
+    ]
+
+
+def test_combined_cross_segment_item_is_accepted(db_session: Session, monkeypatch):
+    """The prompt now asks for one item quoting both segments."""
+    transcript = _create_completed_transcript(db_session, segments=SPLIT_ASSIGNMENT_SEGMENTS)
+    combined = _split_candidate(
+        owner_name="Priya",
+        source_quote="The task is assigned to Priya. The task is book 2 tickets for jailer 2 movie.",
+    )
+    calls = _install_groq(monkeypatch, _response([combined]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    assert "return ONE item with that owner" in calls[1]["messages"][0]["content"]
+    assert [(item.owner_name, item.task_description) for item in extraction.items] == [
+        ("Priya", "Book 2 tickets for jailer 2 movie"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["The task is due on Friday.", "The task is done.", "The task is assigned to Priya."],
+)
+def test_task_status_remarks_are_not_tasks(db_session: Session, monkeypatch, text):
+    transcript = _create_completed_transcript(db_session, segments=[{
+        "start": 0.0, "end": 3.0, "text": text, "speaker": "Maya", "flagged_for_correction": False,
+    }])
+    remark = _split_candidate(source_segment_index=0, source_quote=text, task_description="Something")
+    _install_groq(monkeypatch, _response([remark]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    owner_only_assignment = "assigned to" in text
+    assert [item.task_description for item in extraction.items] == (
+        ["Something"] if owner_only_assignment else []
+    )
+
+
+def test_one_malformed_candidate_does_not_discard_valid_ones(db_session: Session, monkeypatch):
+    transcript = _create_completed_transcript(db_session)
+    _install_groq(monkeypatch, _response([_candidate(priority="critical"), _candidate()]))
+
+    extraction = generate_meeting_action_items(db_session, transcript.id)
+
+    assert extraction.status == ACTION_ITEM_EXTRACTION_STATUS_COMPLETED
+    assert [item.task_description for item in extraction.items] == ["Send the draft."]
+
+
+def test_retry_empty_reruns_only_extractions_without_items(db_session: Session, monkeypatch):
+    transcript = _create_completed_transcript(db_session)
+    _install_groq(monkeypatch, _response([]))
+    empty = generate_meeting_action_items(db_session, transcript.id)
+    assert empty.items == []
+
+    calls = _install_groq(monkeypatch, _response([_candidate()]))
+    assert generate_meeting_action_items(db_session, transcript.id).items == []  # reused
+    assert calls == []
+
+    retried = generate_meeting_action_items(db_session, transcript.id, retry_empty=True)
+    assert retried.id == empty.id
+    assert [item.task_description for item in retried.items] == ["Send the draft."]
+
+    calls = _install_groq(monkeypatch, _response([]))
+    kept = generate_meeting_action_items(db_session, transcript.id, retry_empty=True)
+    assert calls == []  # has items now, so it is never re-run
+    assert [item.task_description for item in kept.items] == ["Send the draft."]

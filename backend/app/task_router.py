@@ -27,7 +27,9 @@ from app.meeting.schemas import (
     TaskReassignRequest,
     TaskReassignmentDecisionRequest,
     TaskReassignmentRequestResponse,
+    TaskReminderRunResponse,
     TaskResponse,
+    TaskStatusUpdateRequest,
 )
 from app.task_reassignment_service import (
     TaskActor,
@@ -37,7 +39,9 @@ from app.task_reassignment_service import (
     change_task_due_date,
     decide_reassignment_request,
     reassign_task,
+    set_task_status,
 )
+from app.task_reminder_service import run_task_reminders
 from app.task_service import attempt_assignment_email
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
@@ -106,6 +110,7 @@ def _task_response(
         ),
         priority=task.priority,
         status=task.status,
+        completed_at=task.completed_at,
         assignment_email_status=task.assignment_email_status,
         assignment_email_error=task.assignment_email_error,
         created_at=task.created_at,
@@ -255,8 +260,11 @@ def _actor(
     actor_id: str = Query(min_length=1),
     actor_role: TaskActorRole = Query(),
     actor_team: str | None = Query(default=None),
+    actor_email: str | None = Query(default=None),
 ) -> TaskActor:
-    return TaskActor(id=actor_id, role=actor_role, team=actor_team or None)
+    return TaskActor(
+        id=actor_id, role=actor_role, team=actor_team or None, email=actor_email or None,
+    )
 
 
 def _notification_responses(
@@ -425,3 +433,34 @@ def get_task_notifications(task_id: str, db: Session = Depends(get_db)):
         .all()
     )
     return _notification_responses(db, notifications)
+
+
+@router.patch(
+    "/{task_id}/status",
+    response_model=TaskChangeResponse,
+    summary="Mark a task Completed (stops reminders) or reopen it",
+)
+def update_task_status_endpoint(
+    task_id: str,
+    payload: TaskStatusUpdateRequest,
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    return _run_change(db, lambda: set_task_status(db, task_id, actor, payload.status))
+
+
+@router.post(
+    "/reminders/run",
+    response_model=TaskReminderRunResponse,
+    summary="Run the reminder / escalation pass now (the scheduler also runs it automatically)",
+)
+def run_task_reminders_endpoint(
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    if actor.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers, HR / Operations or admins can trigger reminders.",
+        )
+    return run_task_reminders(db).as_dict()
