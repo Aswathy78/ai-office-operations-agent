@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 from pydantic import (
     AliasChoices,
@@ -32,10 +32,23 @@ class MeetingCreate(BaseModel):
         if self.meeting_type == "scheduled":
             if self.start_at is None or self.end_at is None:
                 raise ValueError("start_at and end_at are required for scheduled meetings")
-            if self.end_at <= self.start_at:
+            start_at = self._as_utc_naive(self.start_at)
+            end_at = self._as_utc_naive(self.end_at)
+            if end_at <= start_at:
                 raise ValueError("End time must be after start time")
+            self.start_at = start_at
+            self.end_at = end_at
 
         return self
+
+    @staticmethod
+    def _as_utc_naive(value: datetime) -> datetime:
+        """Persist offset-aware values as UTC; treat naive API values as UTC."""
+        if value.utcoffset() is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.replace(tzinfo=None)
 
 
 class MeetingResponse(BaseModel):
@@ -47,6 +60,29 @@ class MeetingResponse(BaseModel):
     join_url: str
     status: str
     organizer_id: str | None = None
+    timezone: str
+
+
+class MeetingCalendarAttendeeResponse(BaseModel):
+    employee_id: str | None = None
+    name: str
+    email: str
+
+
+class MeetingCalendarEventResponse(BaseModel):
+    id: str
+    title: str
+    start_at: datetime
+    end_at: datetime
+    join_url: str
+    status: str
+    organizer_id: str | None = None
+    attendees: list[MeetingCalendarAttendeeResponse] = Field(default_factory=list)
+
+
+class MeetingCalendarResponse(BaseModel):
+    timezone: str
+    meetings: list[MeetingCalendarEventResponse] = Field(default_factory=list)
 
 
 class EmployeeResponse(BaseModel):
@@ -543,6 +579,32 @@ class MeetingMinutesDeliveryResponse(BaseModel):
     failed: int
     pending: int
     recipients: list[MeetingMinutesRecipientResponse] = Field(default_factory=list)
+
+
+class NaturalLanguageScheduleRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    organizer_id: str | None = None
+
+
+class ConflictDetail(BaseModel):
+    attendee_email: str
+    conflicting_event_title: str
+    conflicting_start_at: datetime
+    conflicting_end_at: datetime
+    attendee_name: str | None = None
+
+
+class NaturalLanguageScheduleResponse(BaseModel):
+    status: Literal["Completed", "needs_clarification", "conflict", "error"]
+    meeting: MeetingResponse | None = None
+    timezone: str
+    clarifying_question: str | None = None
+    conflicts: list[ConflictDetail] = Field(default_factory=list)
+    message: str | None = None
+    resolved_attendees: list[EmployeeResponse] = Field(default_factory=list)
+    invitations_sent: list[str] = Field(default_factory=list)
+    invitation_failures: list[str] = Field(default_factory=list)
+    calendar_provider: str = "local"
 
 
 TaskResponse.model_rebuild()

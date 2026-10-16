@@ -10,15 +10,51 @@ import {
   type DirectoryGroup,
   type EmailDraft,
 } from '../api/emailDrafts'
+import { scheduleMeetingNL } from '../api/meetings'
 import { EmailDraftPreview, EmailDraftStatusPill } from '../components/email/EmailDraftPreview'
+import { ScheduledMeetingCard } from '../components/meetings/ScheduledMeetingCard'
 import { useAuth } from '../contexts/AuthContext'
 import { usePolling } from '../hooks/usePolling'
+import type { ScheduleResult } from '../types/meeting'
+
+export function isMeetingSchedulingIntent(prompt: string): boolean {
+  const p = prompt.trim()
+  if (!p) return false
+
+  // If prompt explicitly starts with an email action, prioritize email drafting
+  if (/^(email|send\s+(an?\s+)?email|draft\s+(an?\s+)?email|write\s+(an?\s+)?email)\b/i.test(p)) {
+    return false
+  }
+
+  // Common scheduling verbs paired with meeting nouns or time/participants
+  const schedulingVerb = /\b(schedule|reschedule|book|set\s+up|arrange|organize)\b/i
+  const meetingNoun = /\b(meeting|sync|call|discussion|demo|session|catchup|catch-up|1-on-1|one-on-one)\b/i
+
+  if (schedulingVerb.test(p) && meetingNoun.test(p)) {
+    return true
+  }
+
+  // Starts with "schedule ", "reschedule ", or "book "
+  if (/^(schedule|reschedule|book)\b/i.test(p)) {
+    return true
+  }
+
+  return false
+}
 
 type ChatMessage =
   | { id: string; role: 'user'; text: string }
-  | { id: string; role: 'assistant'; text: string; draftId?: string; tone?: 'error' }
+  | {
+      id: string
+      role: 'assistant'
+      text: string
+      draftId?: string
+      meetingResult?: ScheduleResult
+      tone?: 'error' | 'warning'
+    }
 
 const SUGGESTIONS = [
+  'Schedule a project meeting tomorrow at 10 AM with the development team',
   "Email the development team a reminder about tomorrow's sprint demo at 10am",
   'Let the finance team know I will be on leave next Monday and Tuesday',
   'Email Ava about the deadline for the Q3 report on Friday',
@@ -54,8 +90,8 @@ export function ChatPage() {
       id: 'welcome',
       role: 'assistant',
       text:
-        'Hi! Tell me what e-mail you need and who it is for — a person, an address, or a team such as ' +
-        '"the development team". I will prepare a draft for you to review; nothing is sent until you confirm.',
+        'Hi! Tell me what you need — draft an e-mail or schedule a meeting with a person or team such as ' +
+        '"the development team". I will prepare everything for you to review; nothing is sent until you confirm.',
     },
   ])
   const [drafts, setDrafts] = useState<Record<string, EmailDraft>>({})
@@ -64,6 +100,7 @@ export function ChatPage() {
   const [input, setInput] = useState('')
   const [pending, setPending] = useState(false)
   const endRef = useRef<HTMLLIElement>(null)
+  const lastClarificationPromptRef = useRef<string | null>(null)
 
   const loadRecent = useCallback(async () => {
     if (!actor) return
@@ -118,6 +155,84 @@ export function ChatPage() {
     setInput('')
     setPending(true)
     setMessages((current) => [...current, { id: nextId(), role: 'user', text: prompt }])
+
+    const isScheduling =
+      isMeetingSchedulingIntent(prompt) ||
+      (lastClarificationPromptRef.current !== null &&
+        !/^(email|send\s+(an?\s+)?email|draft\s+(an?\s+)?email|write\s+(an?\s+)?email)\b/i.test(prompt))
+
+    if (isScheduling) {
+      const effectivePrompt = lastClarificationPromptRef.current
+        ? `${lastClarificationPromptRef.current} ${prompt}`
+        : prompt
+
+      try {
+        const result = await scheduleMeetingNL(effectivePrompt, actor)
+        if (result.status === 'Completed') {
+          lastClarificationPromptRef.current = null
+          setMessages((current) => [
+            ...current,
+            {
+              id: nextId(),
+              role: 'assistant',
+              text: result.message || `Scheduled "${result.meeting?.title}" successfully.`,
+              meetingResult: result,
+            },
+          ])
+        } else if (result.status === 'needs_clarification') {
+          lastClarificationPromptRef.current = effectivePrompt
+          setMessages((current) => [
+            ...current,
+            {
+              id: nextId(),
+              role: 'assistant',
+              text: result.clarifying_question || 'Could you provide more details for this meeting?',
+              meetingResult: result,
+            },
+          ])
+        } else if (result.status === 'conflict') {
+          lastClarificationPromptRef.current = null
+          setMessages((current) => [
+            ...current,
+            {
+              id: nextId(),
+              role: 'assistant',
+              text: result.message || 'There is a scheduling conflict with one or more attendees.',
+              meetingResult: result,
+              tone: 'warning',
+            },
+          ])
+        } else {
+          lastClarificationPromptRef.current = null
+          setMessages((current) => [
+            ...current,
+            {
+              id: nextId(),
+              role: 'assistant',
+              tone: 'error',
+              text: result.message || 'Failed to schedule meeting.',
+              meetingResult: result,
+            },
+          ])
+        }
+      } catch (reason) {
+        lastClarificationPromptRef.current = null
+        setMessages((current) => [
+          ...current,
+          {
+            id: nextId(),
+            role: 'assistant',
+            tone: 'error',
+            text: `I couldn't schedule that meeting: ${reason instanceof Error ? reason.message : 'unknown error'}`,
+          },
+        ])
+      } finally {
+        setPending(false)
+      }
+      return
+    }
+
+    lastClarificationPromptRef.current = null
     try {
       const draft = await createEmailDraft(prompt, { name: user.name, email: user.email }, actor)
       storeDraft(draft)
@@ -162,8 +277,8 @@ export function ChatPage() {
           <div className="meeting-icon" aria-hidden="true"><MessageSquare size={21} /></div>
           <div>
             <p className="eyebrow">AI Assistant</p>
-            <h2>Draft an e-mail</h2>
-            <p>The assistant prepares the e-mail. You review, edit, and decide whether it is sent.</p>
+            <h2>AI Assistant</h2>
+            <p>Draft e-mails or schedule meetings with colleagues using natural language.</p>
           </div>
         </header>
 
@@ -180,6 +295,9 @@ export function ChatPage() {
                   {draft && (
                     <EmailDraftPreview draft={draft} actor={actor} groups={groups} onChange={storeDraft} />
                   )}
+                  {message.role === 'assistant' && message.meetingResult && (
+                    <ScheduledMeetingCard result={message.meetingResult} />
+                  )}
                 </div>
               </li>
             )
@@ -187,7 +305,7 @@ export function ChatPage() {
           {pending && (
             <li className="chat-message assistant">
               <span className="chat-avatar" aria-hidden="true"><Bot size={16} /></span>
-              <div className="chat-bubble" role="status"><p>Drafting your e-mail…</p></div>
+              <div className="chat-bubble" role="status"><p>Thinking…</p></div>
             </li>
           )}
           <li ref={endRef} aria-hidden="true" className="chat-scroll-anchor" />
@@ -206,7 +324,7 @@ export function ChatPage() {
         <form className="chat-input" onSubmit={onSubmit}>
           <textarea
             aria-label="Message the AI Assistant"
-            placeholder="e.g. Email the development team about Friday's release"
+            placeholder="e.g. Schedule a meeting tomorrow at 10 AM with the development team, or draft an email..."
             value={input}
             rows={2}
             onChange={(event) => setInput(event.target.value)}

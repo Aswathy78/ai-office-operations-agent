@@ -66,7 +66,13 @@ def create_meeting(
 ) -> Meeting:
 
     meeting_id = str(uuid.uuid4())
-    join_url = f"http://localhost:5173/meetings/{meeting_id}"
+    frontend_base_url = os.getenv(
+        "FRONTEND_BASE_URL",
+        "http://localhost:5173",
+    ).strip().rstrip("/")
+    if not frontend_base_url:
+        raise ValueError("FRONTEND_BASE_URL must not be empty.")
+    join_url = f"{frontend_base_url}/meetings/{meeting_id}"
     now = datetime.now(timezone.utc)
 
     if meeting_data.meeting_type == "instant":
@@ -111,6 +117,8 @@ def get_user_meetings(
     db: Session,
     user_id: str | None = None,
     email: str | None = None,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
 ) -> list[Meeting]:
 
     query = (
@@ -125,6 +133,7 @@ def get_user_meetings(
         query = query.filter(
             (Meeting.organizer_id == user_id)
             | (MeetingParticipant.email == email)
+            | (MeetingParticipant.user_id == user_id)
         )
     elif email:
         query = query.filter(
@@ -134,6 +143,24 @@ def get_user_meetings(
         query = query.filter(
             (Meeting.organizer_id == user_id)
             | (MeetingParticipant.user_id == user_id)
+        )
+
+    if (start_at is None) != (end_at is None):
+        raise ValueError("Both start_at and end_at are required for a range query.")
+    if start_at is not None and end_at is not None:
+        range_start = (
+            start_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if start_at.tzinfo is not None
+            else start_at
+        )
+        range_end = (
+            end_at.astimezone(timezone.utc).replace(tzinfo=None)
+            if end_at.tzinfo is not None
+            else end_at
+        )
+        query = query.filter(
+            Meeting.start_at < range_end,
+            Meeting.end_at > range_start,
         )
 
     meetings = query.distinct().all()
@@ -169,6 +196,12 @@ def is_meeting_expired(
             end_at = end_at.replace(tzinfo=timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=timezone.utc)
+
+        start_at = meeting.start_at
+        if start_at.tzinfo is None:
+            start_at = start_at.replace(tzinfo=timezone.utc)
+        if now < start_at:
+            return False
         return now > end_at
 
     now = reference_time or datetime.now(timezone.utc)
@@ -1172,6 +1205,12 @@ def complete_meeting_if_empty(db: Session, meeting_id: str) -> bool:
         return False
 
     now = datetime.now(timezone.utc)
+    start_at = meeting.start_at
+    if start_at.tzinfo is None:
+        start_at = start_at.replace(tzinfo=timezone.utc)
+    if now < start_at:
+        return False
+
     expired = is_meeting_expired(meeting, reference_time=now)
 
     total_logged = (

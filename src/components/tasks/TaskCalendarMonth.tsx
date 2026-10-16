@@ -2,15 +2,30 @@ import { useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, X } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import type { TaskRecord } from '../../api/tasks'
+import type { MeetingCalendarEvent } from '../../types/meeting'
 
 interface TaskCalendarMonthProps {
   tasks: TaskRecord[]
+  meetings?: MeetingCalendarEvent[]
+  timeZone?: string
+  meetingsLoading?: boolean
+  meetingsError?: string
+  onVisibleMonthChange?: (year: number, month: number) => void
 }
 
 interface CalendarDay {
   date: Date
   inCurrentMonth: boolean
 }
+
+type CalendarEntry =
+  | { kind: 'task'; task: TaskRecord; startAt: Date }
+  | {
+      kind: 'meeting'
+      meeting: MeetingCalendarEvent
+      startAt: Date
+      endAt: Date
+    }
 
 const WEEKDAYS = [
   'Sunday',
@@ -31,6 +46,17 @@ function dateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function dateKeyInTimeZone(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]))
+  return `${values.year}-${values.month}-${values.day}`
 }
 
 function parseDueDate(value: unknown): Date | null {
@@ -76,17 +102,19 @@ function formatDayLabel(date: Date): string {
   }).format(date)
 }
 
-function formatDueTime(date: Date): string {
+function formatDueTime(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {
     hour: 'numeric',
     minute: '2-digit',
+    timeZone,
   }).format(date)
 }
 
-function formatDueDateTime(date: Date): string {
+function formatDueDateTime(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat('en-US', {
     dateStyle: 'full',
     timeStyle: 'short',
+    timeZone,
   }).format(date)
 }
 
@@ -96,55 +124,99 @@ function formatSourceTimestamp(seconds: number): string {
   return `${minutes}:${remainingSeconds.toFixed(2).padStart(5, '0')}`
 }
 
-export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
+export function TaskCalendarMonth({
+  tasks,
+  meetings = [],
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+  meetingsLoading = false,
+  meetingsError = '',
+  onVisibleMonthChange,
+}: TaskCalendarMonthProps) {
   const [visibleMonth, setVisibleMonth] = useState(() => startOfMonth(new Date()))
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
-  const today = new Date()
-  const todayKey = dateKey(today)
+  const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null)
+  const todayKey = dateKeyInTimeZone(new Date(), timeZone)
 
   const calendarDays = useMemo(
     () => buildCalendarDays(visibleMonth),
     [visibleMonth],
   )
-  const tasksByDay = useMemo(() => {
-    const grouped = new Map<string, Array<{ task: TaskRecord; dueAt: Date }>>()
+  const calendarEntries = useMemo(() => {
+    const grouped = new Map<string, CalendarEntry[]>()
     const undated: TaskRecord[] = []
 
     for (const task of tasks) {
-      const dueAt = parseDueDate(task.due_at)
-      if (!dueAt) {
+      const startAt = parseDueDate(task.due_at)
+      if (!startAt) {
         undated.push(task)
         continue
       }
-      const key = dateKey(dueAt)
-      const dayTasks = grouped.get(key) ?? []
-      dayTasks.push({ task, dueAt })
-      grouped.set(key, dayTasks)
+      const key = dateKeyInTimeZone(startAt, timeZone)
+      const entries = grouped.get(key) ?? []
+      entries.push({ kind: 'task', task, startAt })
+      grouped.set(key, entries)
     }
 
-    return { grouped, undated }
-  }, [tasks])
+    const uniqueMeetings = new Map(meetings.map((meeting) => [meeting.id, meeting]))
+    for (const meeting of uniqueMeetings.values()) {
+      const startAt = parseDueDate(meeting.start_at)
+      const endAt = parseDueDate(meeting.end_at)
+      if (!startAt || !endAt) continue
+      const key = dateKeyInTimeZone(startAt, timeZone)
+      const entries = grouped.get(key) ?? []
+      entries.push({ kind: 'meeting', meeting, startAt, endAt })
+      grouped.set(key, entries)
+    }
+
+    for (const entries of grouped.values()) {
+      entries.sort((left, right) => left.startAt.getTime() - right.startAt.getTime())
+    }
+
+    return { grouped, undated, uniqueMeetings: [...uniqueMeetings.values()] }
+  }, [meetings, tasks, timeZone])
 
   const selectedTask = tasks.find((task) => task.id === selectedTaskId)
+  const selectedMeeting = calendarEntries.uniqueMeetings.find(
+    (meeting) => meeting.id === selectedMeetingId,
+  )
   const selectedDueAt = selectedTask ? parseDueDate(selectedTask.due_at) : null
   const monthLabel = formatMonth(visibleMonth)
-  const localTimeZone =
-    Intl.DateTimeFormat().resolvedOptions().timeZone || 'your local time zone'
 
   function changeMonth(amount: number) {
-    setVisibleMonth((current) =>
-      new Date(current.getFullYear(), current.getMonth() + amount, 1),
+    const nextMonth = new Date(
+      visibleMonth.getFullYear(),
+      visibleMonth.getMonth() + amount,
+      1,
     )
+    setVisibleMonth(nextMonth)
     setSelectedTaskId(null)
+    setSelectedMeetingId(null)
+    onVisibleMonthChange?.(nextMonth.getFullYear(), nextMonth.getMonth() + 1)
   }
 
   function showToday() {
-    setVisibleMonth(startOfMonth(new Date()))
+    const currentMonth = startOfMonth(new Date())
+    setVisibleMonth(currentMonth)
     setSelectedTaskId(null)
+    setSelectedMeetingId(null)
+    onVisibleMonthChange?.(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth() + 1,
+    )
+  }
+
+  function selectTask(taskId: string) {
+    setSelectedMeetingId(null)
+    setSelectedTaskId(taskId)
+  }
+
+  function selectMeeting(meetingId: string) {
+    setSelectedTaskId(null)
+    setSelectedMeetingId(meetingId)
   }
 
   return (
-    <section className="task-calendar" aria-label="Monthly task calendar">
+    <section className="task-calendar" aria-label="Monthly task and meeting calendar">
       <div className="task-calendar-toolbar">
         <h3 aria-live="polite">{monthLabel}</h3>
         <nav className="task-calendar-navigation" aria-label="Calendar month controls">
@@ -172,15 +244,27 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
         </nav>
       </div>
       <p className="task-calendar-timezone">
-        Due times are shown in {localTimeZone}.
+        Times are shown in {timeZone}.
       </p>
-      {tasks.length === 0 && (
-        <p className="task-calendar-empty">No tasks scheduled for this calendar.</p>
+      {meetingsLoading && (
+        <p className="task-calendar-empty" role="status">Loading scheduled meetings…</p>
+      )}
+      {meetingsError && (
+        <p className="task-calendar-error" role="alert">
+          Scheduled meetings could not be loaded: {meetingsError}
+        </p>
+      )}
+      {tasks.length === 0 &&
+        calendarEntries.uniqueMeetings.length === 0 &&
+        !meetingsLoading && (
+          <p className="task-calendar-empty">
+            No tasks or meetings scheduled for this calendar.
+          </p>
       )}
 
       <div className="task-calendar-grid-wrap">
         <table className="task-calendar-grid">
-          <caption className="visually-hidden">{monthLabel} task calendar</caption>
+          <caption className="visually-hidden">{monthLabel} task calendar with meetings</caption>
           <thead>
             <tr>
               {WEEKDAYS.map((weekday) => (
@@ -197,7 +281,7 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
                     .slice(weekIndex * 7, weekIndex * 7 + 7)
                     .map(({ date, inCurrentMonth }) => {
                       const key = dateKey(date)
-                      const dayTasks = tasksByDay.grouped.get(key) ?? []
+                      const entries = calendarEntries.grouped.get(key) ?? []
                       const isToday = key === todayKey
 
                       return (
@@ -218,20 +302,38 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
                             {date.getDate()}
                           </time>
                           <ul className="task-calendar-day-tasks">
-                            {dayTasks.map(({ task, dueAt }) => (
-                              <li key={task.id}>
+                            {entries.map((entry) => entry.kind === 'task' ? (
+                              <li key={`task-${entry.task.id}`}>
                                 <button
                                   type="button"
                                   className="task-calendar-task"
-                                  aria-label={`${task.title}, ${formatDueTime(dueAt)}, ${task.priority} priority, ${task.status}`}
-                                  onClick={() => setSelectedTaskId(task.id)}
+                                  aria-label={`${entry.task.title}, ${formatDueTime(entry.startAt, timeZone)}, ${entry.task.priority} priority, ${entry.task.status}`}
+                                  onClick={() => selectTask(entry.task.id)}
                                 >
-                                  <span className="task-calendar-task-title">{task.title}</span>
+                                  <span className="task-calendar-task-title">{entry.task.title}</span>
                                   <span className="task-calendar-task-meta">
-                                    {formatDueTime(dueAt)} · {task.priority} · {task.status}
+                                    {formatDueTime(entry.startAt, timeZone)} · {entry.task.priority} · {entry.task.status}
                                   </span>
                                   <span className="task-calendar-task-assignee">
-                                    {task.assignee_name}
+                                    {entry.task.assignee_name}
+                                  </span>
+                                </button>
+                              </li>
+                            ) : (
+                              <li key={`meeting-${entry.meeting.id}`}>
+                                <button
+                                  type="button"
+                                  className="task-calendar-task task-calendar-meeting"
+                                  aria-label={`Meeting: ${entry.meeting.title}, ${formatDueTime(entry.startAt, timeZone)} to ${formatDueTime(entry.endAt, timeZone)}`}
+                                  onClick={() => selectMeeting(entry.meeting.id)}
+                                >
+                                  <span className="task-calendar-meeting-kind">Meeting</span>
+                                  <span className="task-calendar-task-title">{entry.meeting.title}</span>
+                                  <span className="task-calendar-task-meta">
+                                    {formatDueTime(entry.startAt, timeZone)}–{formatDueTime(entry.endAt, timeZone)}
+                                  </span>
+                                  <span className="task-calendar-task-assignee">
+                                    {entry.meeting.attendees.map((attendee) => attendee.name).join(', ')}
                                   </span>
                                 </button>
                               </li>
@@ -246,6 +348,48 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
           </tbody>
         </table>
       </div>
+
+      {selectedMeeting && (
+        <section
+          className="task-calendar-details task-calendar-meeting-details"
+          aria-labelledby="task-calendar-meeting-details-title"
+          aria-live="polite"
+        >
+          <div className="task-calendar-details-heading">
+            <h3 id="task-calendar-meeting-details-title">{selectedMeeting.title}</h3>
+            <button
+              className="task-calendar-close"
+              type="button"
+              aria-label="Close meeting details"
+              onClick={() => setSelectedMeetingId(null)}
+            >
+              <X size={18} aria-hidden="true" />
+            </button>
+          </div>
+          <dl className="task-calendar-details-list">
+            <div>
+              <dt>Date and time</dt>
+              <dd>
+                {formatDueDateTime(parseDueDate(selectedMeeting.start_at)!, timeZone)}
+                {' – '}
+                {formatDueTime(parseDueDate(selectedMeeting.end_at)!, timeZone)}
+              </dd>
+            </div>
+            <div><dt>Status</dt><dd>{selectedMeeting.status}</dd></div>
+            <div>
+              <dt>Attendees</dt>
+              <dd>
+                {selectedMeeting.attendees.map((attendee) => attendee.name).join(', ') || 'None listed'}
+              </dd>
+            </div>
+          </dl>
+          {selectedMeeting.join_url && (
+            <a className="task-calendar-meeting-join" href={selectedMeeting.join_url}>
+              Join Meeting
+            </a>
+          )}
+        </section>
+      )}
 
       {selectedTask && (
         <section
@@ -268,7 +412,7 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
             <div>
               <dt>Due</dt>
               <dd>
-                {selectedDueAt ? formatDueDateTime(selectedDueAt) : 'No due date'}
+                {selectedDueAt ? formatDueDateTime(selectedDueAt, timeZone) : 'No due date'}
               </dd>
             </div>
             <div><dt>Status</dt><dd>{selectedTask.status}</dd></div>
@@ -315,17 +459,17 @@ export function TaskCalendarMonth({ tasks }: TaskCalendarMonthProps) {
         </section>
       )}
 
-      {tasksByDay.undated.length > 0 && (
+      {calendarEntries.undated.length > 0 && (
         <section className="task-calendar-undated" aria-label="Tasks without due dates">
           <h3>Tasks without a due date</h3>
           <ul>
-            {tasksByDay.undated.map((task) => (
+            {calendarEntries.undated.map((task) => (
               <li key={task.id}>
                 <button
                   type="button"
                   className="task-calendar-task"
                   aria-label={`${task.title}, no due date`}
-                  onClick={() => setSelectedTaskId(task.id)}
+                  onClick={() => selectTask(task.id)}
                 >
                   <span className="task-calendar-task-title">{task.title}</span>
                   <span className="task-calendar-task-meta">

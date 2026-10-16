@@ -137,6 +137,12 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .task-calendar-day-tasks { display: grid; gap: 5px; max-height: 88px; overflow-y: auto; margin: 5px 0 0; padding: 0; list-style: none; }
 .task-calendar-task { display: grid; width: 100%; gap: 2px; padding: 5px 6px; border: 1px solid #d7e3f1; border-radius: 6px; background: #f7faff; color: #243750; text-align: left; cursor: pointer; font: inherit; font-size: 11px; }
 .task-calendar-task:hover, .task-calendar-task:focus-visible { border-color: #7da6d3; background: #edf4ff; }
+.task-calendar-meeting { border-color: #b8a7e8; background: #f5f1ff; color: #3c286c; }
+.task-calendar-meeting:hover, .task-calendar-meeting:focus-visible { border-color: #8061c7; background: #eee7ff; }
+.task-calendar-meeting-kind { color: #6645a5; font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.task-calendar-meeting-details { border-color: #b8a7e8; }
+.task-calendar-meeting-join { justify-self: start; color: #51348e; font-size: 13px; font-weight: 750; }
+.task-calendar-error { margin: 0; padding: 10px 12px; border-radius: 8px; background: #fff1f1; color: #a83232; font-size: 12px; }
 .task-calendar-task-title { overflow: hidden; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .task-calendar-task-meta, .task-calendar-task-assignee { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .task-calendar-details { display: grid; gap: 12px; padding: 16px; background: #fff; border: 1px solid var(--border); border-radius: 12px; }
@@ -1011,3 +1017,129 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .email-delivery-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .email-delivery-list li { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .email-delivery-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+/* Scheduled Meeting Card (Story 5.1) */
+.scheduled-meeting-card {
+  display: grid;
+  gap: 12px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  margin-top: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.scheduled-meeting-card.conflict {
+  background: #fffbf5;
+  border-color: #f7d299;
+}
+.scheduled-meeting-card.error {
+  background: #fff7f7;
+  border-color: #f1c9c9;
+}
+.scheduled-meeting-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.scheduled-meeting-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1a2a44;
+}
+.scheduled-meeting-provider-badge {
+  font-size: 11px;
+  background: #edf2f7;
+  color: #4a5568;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+.scheduled-meeting-meta {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: #44556e;
+}
+.scheduled-meeting-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.scheduled-meeting-join {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: #f4f8fd;
+  border-radius: 8px;
+  border: 1px solid #d0e1f7;
+}
+.scheduled-meeting-join a {
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 13px;
+  color: #174d8e;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.scheduled-meeting-join a:hover {
+  text-decoration: underline;
+}
+.scheduled-meeting-attendees {
+  display: grid;
+  gap: 6px;
+}
+.scheduled-meeting-attendees-header {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.scheduled-meeting-attendee-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.scheduled-meeting-attendee-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #f1f4f9;
+  border: 1px solid #dce3ee;
+  border-radius: 16px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #2b394f;
+}
+.scheduled-meeting-attendee-chip .chip-team {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+.scheduled-meeting-invites-sent {
+  font-size: 12px;
+  color: var(--success);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.scheduled-meeting-conflict-item {
+  padding: 8px 12px;
+  background: #ffffff;
+  border: 1px solid #f2dbb3;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.scheduled-meeting-conflict-item strong {
+  color: #92400e;
+}

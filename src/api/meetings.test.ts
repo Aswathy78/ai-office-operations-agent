@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   createMeeting,
+  getCalendarMeetings,
   extractMeetingActionItems,
   getMeetingActionItems,
   getActiveEmployees,
@@ -135,6 +136,7 @@ describe('meeting creation API', () => {
       start_at: '2026-10-13T10:00:00Z',
       end_at: '2026-10-13T14:00:00Z',
       organizer_id: 'manager 1',
+      timezone: 'Asia/Kolkata',
     })
 
     await createMeeting(
@@ -179,6 +181,46 @@ describe('meeting creation API', () => {
       'http://127.0.0.1:8000/api/v1/meetings/?organizer_id=manager-1',
       expect.objectContaining({ body: JSON.stringify(data) }),
     )
+  })
+})
+
+describe('meeting calendar API', () => {
+  it('requests month-scoped meetings for the supplied employee and returns the configured timezone', async () => {
+    const responseBody = {
+      timezone: 'Asia/Kolkata',
+      meetings: [
+        {
+          id: 'meeting-calendar-1',
+          title: 'Planning',
+          start_at: '2026-10-22T04:30:00Z',
+          end_at: '2026-10-22T05:00:00Z',
+          join_url: 'https://office.example.test/meetings/meeting-calendar-1',
+          status: 'scheduled',
+          organizer_id: 'employee-1',
+          attendees: [
+            {
+              employee_id: 'employee-2',
+              name: 'Ava Patel',
+              email: 'ava@example.test',
+            },
+          ],
+        },
+      ],
+    }
+    const fetchMock = stubFetch(responseBody)
+
+    const result = await getCalendarMeetings(
+      'employee/1',
+      'maya+work@example.test',
+      2026,
+      10,
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/calendar?user_id=employee%2F1&email=maya%2Bwork%40example.test&year=2026&month=10',
+    )
+    expect(result.timezone).toBe('Asia/Kolkata')
+    expect(result.meetings[0].attendees[0].name).toBe('Ava Patel')
   })
 })
 

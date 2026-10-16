@@ -2,8 +2,9 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
+import { getCalendarMeetings } from '../api/meetings'
 import { getDashboardTasks, getMyTasks, setTaskStatus, taskCalendarUrl, type TaskRecord } from '../api/tasks'
 import { demoUsers } from '../mocks/mockUser'
 import { TaskWorkspacePage } from './TaskWorkspacePage'
@@ -21,6 +22,11 @@ vi.mock('../api/emailDrafts', () => ({
   getEmailDeliveryIssues: vi.fn().mockResolvedValue([]),
 }))
 
+vi.mock('../api/meetings', () => ({
+  getActiveEmployees: vi.fn().mockResolvedValue([]),
+  getCalendarMeetings: vi.fn(),
+}))
+
 vi.mock('../api/tasks', () => ({
   getMyTasks: vi.fn(),
   getDashboardTasks: vi.fn(),
@@ -28,6 +34,13 @@ vi.mock('../api/tasks', () => ({
   setTaskStatus: vi.fn(),
   taskCalendarUrl: vi.fn(),
 }))
+
+beforeEach(() => {
+  vi.mocked(getCalendarMeetings).mockResolvedValue({
+    timezone: 'UTC',
+    meetings: [],
+  })
+})
 
 afterEach(() => {
   cleanup()
@@ -60,9 +73,19 @@ describe('TaskWorkspacePage employee identity', () => {
     expect(screen.getByRole('link', { name: 'Add deadlines to calendar' }))
       .toHaveAttribute('href', '/api/v1/tasks/calendar.ics')
     expect(getMyTasks).toHaveBeenCalledWith(demoUsers.employee.email)
+    const now = new Date()
+    expect(getCalendarMeetings).toHaveBeenCalledWith(
+      demoUsers.employee.id,
+      demoUsers.employee.email,
+      now.getFullYear(),
+      now.getMonth() + 1,
+    )
 
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
-    await waitFor(() => expect(getMyTasks).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(getMyTasks).toHaveBeenCalledTimes(2)
+      expect(getCalendarMeetings).toHaveBeenCalledTimes(2)
+    })
   })
 
   it('shows a task on its due date after Calendar Refresh fetches it', async () => {
@@ -117,6 +140,115 @@ describe('TaskWorkspacePage employee identity', () => {
     expect(within(dueDay).getByRole('button', {
       name: /Newly confirmed calendar task/,
     })).toBeInTheDocument()
+  })
+
+  it('displays backend meetings with task deadlines and reloads meetings on Refresh', async () => {
+    authValue.user = demoUsers.employee
+    const now = new Date()
+    const meetingStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      10,
+      10,
+      0,
+      0,
+    ).toISOString()
+    vi.mocked(getMyTasks).mockResolvedValue([
+      {
+        id: 'task-mixed-calendar',
+        title: 'Existing task deadline',
+        assignee_id: demoUsers.employee.id,
+        assignee_name: demoUsers.employee.name,
+        creator_id: 'manager-1',
+        source: 'meeting_action_item',
+        source_action_item_id: 'action-1',
+        meeting_id: 'source-meeting',
+        meeting_title: 'Source meeting',
+        transcript_id: 'transcript-1',
+        source_segment_index: 1,
+        source_timestamp_seconds: 4,
+        due_at: meetingStart,
+        priority: 'medium',
+        status: 'pending',
+        assignment_email_status: 'sent',
+        assignment_email_error: null,
+        created_at: new Date().toISOString(),
+      },
+    ])
+    vi.mocked(getCalendarMeetings).mockResolvedValue({
+      timezone: 'UTC',
+      meetings: [
+        {
+          id: 'scheduled-meeting',
+          title: 'Monthly planning',
+          start_at: meetingStart,
+          end_at: new Date(new Date(meetingStart).getTime() + 45 * 60_000).toISOString(),
+          join_url: 'http://localhost:5173/meetings/scheduled-meeting',
+          status: 'scheduled',
+          organizer_id: demoUsers.employee.id,
+          attendees: [
+            {
+              employee_id: 'attendee-1',
+              name: 'Ava Patel',
+              email: 'ava@example.test',
+            },
+          ],
+        },
+      ],
+    })
+    const user = userEvent.setup()
+
+    render(
+      <MemoryRouter>
+        <TaskWorkspacePage view="calendar" />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('button', {
+      name: /Meeting: Monthly planning/,
+    })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Existing task deadline/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Meeting: Monthly planning/ }))
+    expect(screen.getByRole('region', { name: 'Monthly planning' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Join Meeting' })).toHaveAttribute(
+      'href',
+      'http://localhost:5173/meetings/scheduled-meeting',
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(getCalendarMeetings).toHaveBeenCalledTimes(2))
+  })
+
+  it('fetches a new month of meetings when the calendar month changes', async () => {
+    authValue.user = demoUsers.employee
+    vi.mocked(getMyTasks).mockResolvedValue([])
+    const user = userEvent.setup()
+    const currentMonth = new Date()
+    const nextMonth = new Date(
+      currentMonth.getFullYear(),
+      currentMonth.getMonth() + 1,
+      1,
+    )
+
+    render(
+      <MemoryRouter>
+        <TaskWorkspacePage view="calendar" />
+      </MemoryRouter>,
+    )
+
+    expect(await screen.findByRole('table', { name: /task calendar with meetings/i }))
+      .toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Next Month' }))
+
+    await waitFor(() => {
+      expect(getCalendarMeetings).toHaveBeenLastCalledWith(
+        demoUsers.employee.id,
+        demoUsers.employee.email,
+        nextMonth.getFullYear(),
+        nextMonth.getMonth() + 1,
+      )
+    })
   })
 
   it('selects and focuses the task requested by the task deep link', async () => {

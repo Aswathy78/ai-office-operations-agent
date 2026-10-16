@@ -103,6 +103,8 @@ export function GuestJoinPage() {
     let active = true
     let retryTimer: ReturnType<typeof setTimeout> | undefined
     let retryDelay = 700
+    let retryCount = 0
+    const MAX_RETRIES = 5
     let socket: WebSocket | undefined
 
     const connect = () => {
@@ -113,6 +115,7 @@ export function GuestJoinPage() {
       socket = new WebSocket(guestLobbyWebSocketUrl(meetingId, state.request.id))
       socket.onopen = () => {
         retryDelay = 700
+        retryCount = 0
         setState((current) => current.status === 'waiting'
           ? { ...current, connection: 'connected', socketError: undefined }
           : current)
@@ -150,6 +153,14 @@ export function GuestJoinPage() {
         if (!active) return
         if (event.code === 1008) {
           setState({ status: 'error', message: 'This guest request is no longer valid for this meeting.' })
+          return
+        }
+        retryCount += 1
+        if (retryCount > MAX_RETRIES) {
+          setState({
+            status: 'error',
+            message: 'Unable to establish a connection to the meeting lobby. Please check your link or re-enter the lobby.',
+          })
           return
         }
         setState((current) => current.status === 'waiting'
