@@ -56,7 +56,11 @@ from app.meeting.schemas import (
     MeetingMinutesRecipientResponse,
     MeetingMinutesResponse,
     MeetingMinutesUpdateRequest,
+    ConflictDetail,
+    NaturalLanguageScheduleRequest,
+    NaturalLanguageScheduleResponse,
 )
+from app.meeting.scheduling_service import schedule_meeting_from_natural_language
 from app.meeting.service import (
     TERMINAL_STATUSES,
     _try_complete_meeting,
@@ -198,6 +202,69 @@ def get_active_employees(db: Session = Depends(get_db)):
         )
         for employee in employees
     ]
+
+
+@router.post(
+    "/schedule/natural-language",
+    response_model=NaturalLanguageScheduleResponse,
+    summary="Schedule a meeting using natural language (Story 5.1)",
+)
+def schedule_meeting_nl_endpoint(
+    payload: NaturalLanguageScheduleRequest,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    effective_organizer_id = payload.organizer_id or organizer_id or x_user_id or DEMO_ORGANIZER_ID
+    result = schedule_meeting_from_natural_language(
+        db=db,
+        prompt=payload.prompt,
+        organizer_id=effective_organizer_id,
+    )
+
+    meeting_resp = None
+    if result.meeting:
+        meeting_resp = MeetingResponse(
+            id=result.meeting.id,
+            title=result.meeting.title,
+            agenda=result.meeting.description,
+            start_at=result.meeting.start_at,
+            end_at=result.meeting.end_at,
+            join_url=result.meeting.join_url or "",
+            status=result.meeting.status,
+            organizer_id=result.meeting.organizer_id,
+        )
+
+    conflicts = [
+        ConflictDetail(
+            attendee_email=c.attendee_email,
+            conflicting_event_title=c.conflicting_event_title,
+            conflicting_start_at=c.conflicting_start_at,
+            conflicting_end_at=c.conflicting_end_at,
+            attendee_name=c.attendee_name,
+        )
+        for c in result.conflicts
+    ]
+
+    attendees = [
+        EmployeeResponse(
+            id=a["id"],
+            name=a["name"],
+            email=a["email"],
+            team=a.get("team"),
+        )
+        for a in result.resolved_attendees
+    ]
+
+    return NaturalLanguageScheduleResponse(
+        status=result.status,
+        meeting=meeting_resp,
+        clarifying_question=result.clarifying_question,
+        conflicts=conflicts,
+        message=result.message,
+        resolved_attendees=attendees,
+        invitations_sent=result.invitations_sent,
+    )
 
 
 @router.get("/{meeting_id}/validate", response_model=MeetingValidationResponse)

@@ -285,7 +285,7 @@ describe('TranscriptPanel', () => {
     expect(within(history).getByText('Welcome everyone.')).toBeInTheDocument()
     expect(within(history).getByText('Alicia')).toBeInTheDocument()
     expect(within(history).getByText('organizer-1')).toBeInTheDocument()
-    expect(within(history).getByText(/5 Oct 2026/)).toBeInTheDocument()
+    expect(within(history).getByText(/Oct 5, 2026/)).toBeInTheDocument()
     expect(getMeetingTranscriptCorrections).toHaveBeenCalledWith('meeting-1', 'organizer-1')
 
     await user.click(screen.getByRole('button', { name: 'Transcript' }))

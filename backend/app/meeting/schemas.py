@@ -545,4 +545,27 @@ class MeetingMinutesDeliveryResponse(BaseModel):
     recipients: list[MeetingMinutesRecipientResponse] = Field(default_factory=list)
 
 
+class NaturalLanguageScheduleRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    organizer_id: str | None = None
+
+
+class ConflictDetail(BaseModel):
+    attendee_email: str
+    conflicting_event_title: str
+    conflicting_start_at: datetime
+    conflicting_end_at: datetime
+    attendee_name: str | None = None
+
+
+class NaturalLanguageScheduleResponse(BaseModel):
+    status: Literal["scheduled", "needs_clarification", "conflict", "error"]
+    meeting: MeetingResponse | None = None
+    clarifying_question: str | None = None
+    conflicts: list[ConflictDetail] = Field(default_factory=list)
+    message: str | None = None
+    resolved_attendees: list[EmployeeResponse] = Field(default_factory=list)
+    invitations_sent: list[str] = Field(default_factory=list)
+
+
 TaskResponse.model_rebuild()

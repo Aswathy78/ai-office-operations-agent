@@ -441,3 +441,43 @@ export interface MeetingMinutesUpdateRequest {
   content_action_items?: MeetingMinutesContentActionItem[] | null
 }
 
+// ── Story 5.1: Natural-Language Meeting Scheduling ────────────────────────────
+
+/** Summary of the meeting created by the scheduling service */
+export interface ScheduledMeetingDetail {
+  id: string
+  title: string
+  start_at: string
+  end_at: string
+  join_url: string
+  status: string
+  organizer_id: string | null
+  agenda: string | null
+}
+
+/** One free/busy conflict returned when a scheduling attempt finds a clash */
+export interface ConflictDetail {
+  attendee_email: string
+  conflicting_event_title: string
+  conflicting_start_at: string
+  conflicting_end_at: string
+  attendee_name: string | null
+}
+
+/**
+ * Discriminated result from POST /api/v1/meetings/schedule/natural-language
+ *
+ * - `scheduled`           – meeting created; `meeting` is populated
+ * - `needs_clarification` – one question returned; re-prompt the user
+ * - `conflict`            – free/busy clash; `conflicts` is populated
+ * - `error`               – backend error; `message` explains
+ */
+export interface ScheduleResult {
+  status: 'scheduled' | 'needs_clarification' | 'conflict' | 'error'
+  meeting: ScheduledMeetingDetail | null
+  clarifying_question: string | null
+  conflicts: ConflictDetail[]
+  message: string | null
+  resolved_attendees: Employee[]
+  invitations_sent: string[]
+}
