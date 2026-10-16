@@ -2588,6 +2588,29 @@ Tests: `backend/tests/test_task_reassignment.py`,
 `src/components/tasks/TaskManagePanel.test.tsx`,
 `src/pages/ApprovalsPage.test.tsx`.
 
+---
+
+## Meeting Scheduling — User Story 5.1
+
+The AI Office Operations Agent supports natural-language meeting scheduling, allowing employees to schedule meetings through conversational instructions.
+
+### Features
+
+- **Natural-Language Scheduling:** Understands meeting requests containing dates, times, and meeting details.
+- **Date and Time Resolution:** Resolves relative dates such as "tomorrow" and interprets meeting times using the organisation's timezone.
+- **Attendee Resolution:** Resolves meeting participants from the organisation's directory and directory groups.
+- **Availability Checking:** Checks attendee availability before scheduling a meeting.
+- **Calendar Event Creation:** Creates calendar events with meeting details and a meeting join link.
+- **Meeting Invitations:** Sends invitations to the resolved attendees.
+- **Clarification Handling:** Asks a clarifying question when required attendee information is missing.
+- **Event Verification:** Verifies event creation through the calendar provider before reporting the scheduling operation as completed.
+
+### Testing
+
+The implementation includes backend scheduling and calendar API tests and frontend tests for the meeting-scheduling functionality.
+
+The frontend production build was also verified successfully.
+
 
 # 📌 Current Project Status
 
