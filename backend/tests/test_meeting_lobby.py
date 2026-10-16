@@ -352,6 +352,60 @@ class TestOrganizerDecision:
                 pass
         assert exc_info.value.code == 1008
 
+    def test_lobby_websocket_allows_reconnection_for_active_guest(self, client):
+        meeting = _future_meeting(client)
+        meeting_id = meeting["id"]
+        request = client.post(
+            f"/api/v1/meetings/{meeting_id}/lobby",
+            json={"guest_name": "Tariq"},
+        ).json()
+
+        url = f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+
+        with client.websocket_connect(url) as ws1:
+            welcome1 = ws1.receive_json()
+            assert welcome1["type"] == "lobby_welcome"
+
+            # Reconnecting with the same guest_request_id should succeed and take over
+            with client.websocket_connect(url) as ws2:
+                welcome2 = ws2.receive_json()
+                assert welcome2["type"] == "lobby_welcome"
+
+                # Previous connection should have been closed cleanly
+                with pytest.raises(WebSocketDisconnect) as exc_info:
+                    ws1.receive_json()
+                assert exc_info.value.code == 1000
+
+                # Organizer decision reaches the active reconnected socket
+                client.post(
+                    f"/api/v1/meetings/{meeting_id}/lobby/{request['id']}/decision",
+                    json={"decision": "admit"},
+                )
+                event = ws2.receive_json()
+                assert event["type"] == "guest_admitted"
+                assert event["guest_request_id"] == request["id"]
+
+    def test_lobby_websocket_rejects_expired_meeting(self, client, db_session):
+        meeting = _future_meeting(client)
+        meeting_id = meeting["id"]
+        request = client.post(
+            f"/api/v1/meetings/{meeting_id}/lobby",
+            json={"guest_name": "Late Guest"},
+        ).json()
+
+        # Age the meeting past its end time
+        db_session.query(Meeting).filter_by(id=meeting_id).update({
+            Meeting.end_at: datetime.now(timezone.utc) - timedelta(hours=1)
+        })
+        db_session.commit()
+
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            with client.websocket_connect(
+                f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+            ):
+                pass
+        assert exc_info.value.code == 1008
+
     @pytest.mark.parametrize(
         ("decision", "expected_event"),
         [("admit", "guest_admitted"), ("reject", "guest_rejected")],

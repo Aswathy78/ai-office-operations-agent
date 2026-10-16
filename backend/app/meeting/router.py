@@ -3,12 +3,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.meeting.models import (
     Employee,
     Meeting,
+    MeetingParticipant,
     MeetingActionItem,
     MeetingActionItemExtraction,
     MeetingAttendanceLog,
@@ -33,6 +35,9 @@ from app.meeting.schemas import (
     GuestJoinRequest,
     GuestRequestResponse,
     MeetingCreate,
+    MeetingCalendarAttendeeResponse,
+    MeetingCalendarEventResponse,
+    MeetingCalendarResponse,
     ActionItemOwnerConfirmationRequest,
     EmployeeResponse,
     MeetingActionItemResponse,
@@ -60,7 +65,10 @@ from app.meeting.schemas import (
     NaturalLanguageScheduleRequest,
     NaturalLanguageScheduleResponse,
 )
-from app.meeting.scheduling_service import schedule_meeting_from_natural_language
+from app.meeting.scheduling_service import (
+    get_organization_timezone,
+    schedule_meeting_from_natural_language,
+)
 from app.meeting.service import (
     TERMINAL_STATUSES,
     _try_complete_meeting,
@@ -152,12 +160,109 @@ def create_new_meeting(
         id=created.id,
         title=created.title,
         agenda=created.agenda,
-        start_at=created.start_at,
-        end_at=created.end_at,
+        start_at=_as_utc(created.start_at),
+        end_at=_as_utc(created.end_at),
         join_url=created.join_url,
         status=created.status,
         organizer_id=created.organizer_id,
+        timezone=str(get_organization_timezone()),
     )
+
+@router.get("/calendar", response_model=MeetingCalendarResponse)
+def get_calendar_meetings(
+    year: int = Query(..., ge=2000, le=2200),
+    month: int = Query(..., ge=1, le=12),
+    user_id: str = Query(..., min_length=1),
+    email: str = Query(..., min_length=3),
+    db: Session = Depends(get_db),
+):
+    calendar_timezone = get_organization_timezone()
+    start_local = datetime(year, month, 1, tzinfo=calendar_timezone)
+    next_month_year = year + (1 if month == 12 else 0)
+    next_month = 1 if month == 12 else month + 1
+    end_local = datetime(next_month_year, next_month, 1, tzinfo=calendar_timezone)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+
+    meetings = get_user_meetings(
+        db=db,
+        user_id=user_id,
+        email=email,
+        start_at=start_utc,
+        end_at=end_utc,
+    )
+    meeting_ids = [meeting.id for meeting in meetings]
+    participants = (
+        db.query(MeetingParticipant)
+        .filter(MeetingParticipant.meeting_id.in_(meeting_ids))
+        .all()
+        if meeting_ids
+        else []
+    )
+    participant_ids = {
+        participant.user_id
+        for participant in participants
+        if participant.user_id
+    }
+    participant_emails = {
+        participant.email.lower()
+        for participant in participants
+        if participant.email
+    }
+    employee_filters = []
+    if participant_ids:
+        employee_filters.append(Employee.id.in_(participant_ids))
+    if participant_emails:
+        employee_filters.append(Employee.email.in_(participant_emails))
+    employees = (
+        db.query(Employee).filter(or_(*employee_filters)).all()
+        if employee_filters
+        else []
+    )
+    employees_by_id = {employee.id: employee for employee in employees}
+    employees_by_email = {employee.email.lower(): employee for employee in employees}
+    attendees_by_meeting: dict[str, dict[str, MeetingCalendarAttendeeResponse]] = {}
+    for participant in participants:
+        email_key = participant.email.lower() if participant.email else None
+        employee = (
+            employees_by_id.get(participant.user_id)
+            if participant.user_id
+            else employees_by_email.get(email_key) if email_key else None
+        )
+        attendee_email = employee.email if employee else participant.email
+        if not attendee_email:
+            continue
+        attendee = MeetingCalendarAttendeeResponse(
+            employee_id=employee.id if employee else participant.user_id,
+            name=employee.name if employee else attendee_email,
+            email=attendee_email,
+        )
+        attendees_by_meeting.setdefault(participant.meeting_id, {})[
+            attendee_email.lower()
+        ] = attendee
+
+    def as_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    return MeetingCalendarResponse(
+        timezone=str(calendar_timezone),
+        meetings=[
+            MeetingCalendarEventResponse(
+                id=meeting.id,
+                title=meeting.title,
+                start_at=as_utc(meeting.start_at),
+                end_at=as_utc(meeting.end_at),
+                join_url=meeting.join_url,
+                status=meeting.status,
+                organizer_id=meeting.organizer_id,
+                attendees=list(attendees_by_meeting.get(meeting.id, {}).values()),
+            )
+            for meeting in meetings
+        ],
+    )
+
 
 @router.get("/", response_model=list[MeetingResponse])
 def get_meetings(
@@ -175,11 +280,12 @@ def get_meetings(
             id=m.id,
             title=m.title,
             agenda=m.agenda,
-            start_at=m.start_at,
-            end_at=m.end_at,
+            start_at=_as_utc(m.start_at),
+            end_at=_as_utc(m.end_at),
             join_url=m.join_url,
             status=m.status,
             organizer_id=m.organizer_id,
+            timezone=str(get_organization_timezone()),
         )
         for m in meetings
     ]
@@ -228,11 +334,12 @@ def schedule_meeting_nl_endpoint(
             id=result.meeting.id,
             title=result.meeting.title,
             agenda=result.meeting.description,
-            start_at=result.meeting.start_at,
-            end_at=result.meeting.end_at,
+            start_at=_as_utc(result.meeting.start_at),
+            end_at=_as_utc(result.meeting.end_at),
             join_url=result.meeting.join_url or "",
             status=result.meeting.status,
             organizer_id=result.meeting.organizer_id,
+            timezone=str(get_organization_timezone()),
         )
 
     conflicts = [
@@ -259,11 +366,14 @@ def schedule_meeting_nl_endpoint(
     return NaturalLanguageScheduleResponse(
         status=result.status,
         meeting=meeting_resp,
+        timezone=str(get_organization_timezone()),
         clarifying_question=result.clarifying_question,
         conflicts=conflicts,
         message=result.message,
         resolved_attendees=attendees,
         invitations_sent=result.invitations_sent,
+        invitation_failures=result.invitation_failures,
+        calendar_provider=result.meeting.provider_name if result.meeting else "local",
     )
 
 
@@ -362,11 +472,12 @@ async def end_meeting_for_everyone(
         id=meeting.id,
         title=meeting.title,
         agenda=meeting.agenda,
-        start_at=meeting.start_at,
-        end_at=meeting.end_at,
+        start_at=_as_utc(meeting.start_at),
+        end_at=_as_utc(meeting.end_at),
         join_url=meeting.join_url,
         status=meeting.status,
         organizer_id=meeting.organizer_id,
+        timezone=str(get_organization_timezone()),
     )
 
 
@@ -1117,12 +1228,20 @@ async def lobby_websocket(
 
     # Use a lobby-namespaced room key so lobby connections are isolated
     lobby_room_id = f"lobby:{meeting_id}"
+    # If this guest request already has an active lobby connection (e.g. from page refresh,
+    # network reconnect, or React StrictMode re-mount), cleanly disconnect/replace the
+    # previous stale connection so the valid guest can reconnect without getting rejected.
     if signaling_manager.is_participant_in_meeting(lobby_room_id, guest_request_id):
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Guest request already has an active lobby connection",
-        )
-        return
+        existing_ws = signaling_manager.rooms.get(lobby_room_id, {}).get(guest_request_id)
+        if existing_ws:
+            try:
+                await existing_ws.close(
+                    code=status.WS_1000_NORMAL_CLOSURE,
+                    reason="Replaced by new lobby connection",
+                )
+            except Exception:
+                pass
+        signaling_manager.disconnect(lobby_room_id, guest_request_id)
 
     connection_id = await signaling_manager.connect(
         meeting_id=lobby_room_id,

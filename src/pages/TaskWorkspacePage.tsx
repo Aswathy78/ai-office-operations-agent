@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { CalendarDays, CheckSquare, RefreshCw } from 'lucide-react'
-import { getActiveEmployees } from '../api/meetings'
+import { getActiveEmployees, getCalendarMeetings } from '../api/meetings'
 import {
   getDashboardTasks,
   getMyTasks,
@@ -16,6 +16,7 @@ import { TaskCalendarMonth } from '../components/tasks/TaskCalendarMonth'
 import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
 import { useAuth } from '../contexts/AuthContext'
 import type { Employee } from '../types/meeting'
+import type { MeetingCalendarEvent } from '../types/meeting'
 
 type TaskWorkspaceView = 'mine' | 'dashboard' | 'calendar'
 
@@ -35,6 +36,14 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
   const [searchParams] = useSearchParams()
   const { user } = useAuth()
   const [tasks, setTasks] = useState<TaskRecord[]>([])
+  const [calendarMeetings, setCalendarMeetings] = useState<MeetingCalendarEvent[]>([])
+  const [calendarTimeZone, setCalendarTimeZone] = useState('UTC')
+  const [calendarLoading, setCalendarLoading] = useState(false)
+  const [calendarError, setCalendarError] = useState('')
+  const [calendarMonth, setCalendarMonth] = useState(() => {
+    const now = new Date()
+    return { year: now.getFullYear(), month: now.getMonth() + 1 }
+  })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
@@ -59,6 +68,32 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
       .catch(() => { if (active) setEmployees([]) })
     return () => { active = false }
   }, [canManageTasks])
+
+  useEffect(() => {
+    if (view !== 'calendar' || !user) return
+    let active = true
+    setCalendarLoading(true)
+    setCalendarError('')
+    setCalendarMeetings([])
+    getCalendarMeetings(
+      user.id,
+      user.email,
+      calendarMonth.year,
+      calendarMonth.month,
+    ).then((result) => {
+      if (!active) return
+      setCalendarMeetings(result.meetings)
+      setCalendarTimeZone(result.timezone)
+    }).catch((reason: unknown) => {
+      if (!active) return
+      setCalendarError(
+        reason instanceof Error ? reason.message : 'Scheduled meetings could not be loaded.',
+      )
+    }).finally(() => {
+      if (active) setCalendarLoading(false)
+    })
+    return () => { active = false }
+  }, [calendarMonth, refreshKey, user, view])
 
   function replaceTask(updated: TaskRecord) {
     setTasks((current) => current.map((task) => (task.id === updated.id ? updated : task)))
@@ -194,7 +229,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
               {isDashboard
                 ? 'Tasks created from confirmed meeting action items.'
                 : isCalendar
-                  ? 'Deadlines from your assigned tasks, ready to add to a calendar.'
+                  ? 'Your task deadlines and scheduled meetings in one calendar.'
                   : 'Tasks assigned to your employee account.'}
             </p>
           </div>
@@ -232,7 +267,20 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
       {loading ? (
         <div className="meetings-loading" role="status">Loading tasks...</div>
       ) : isCalendar ? (
-        <TaskCalendarMonth tasks={tasks} />
+        <TaskCalendarMonth
+          tasks={tasks}
+          meetings={calendarMeetings}
+          timeZone={calendarTimeZone}
+          meetingsLoading={calendarLoading}
+          meetingsError={calendarError}
+          onVisibleMonthChange={(year, month) => {
+            setCalendarMonth((current) =>
+              current.year === year && current.month === month
+                ? current
+                : { year, month },
+            )
+          }}
+        />
       ) : tasks.length === 0 ? (
         <section className="meetings-empty">
           <div className="state-icon" aria-hidden="true">

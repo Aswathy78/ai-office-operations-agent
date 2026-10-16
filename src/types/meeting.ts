@@ -11,6 +11,7 @@ export interface Meeting {
   organizer?: string | null
   organizerId?: string | null
   lifecycle?: 'active' | 'upcoming' | 'completed'
+  timezone?: string
 }
 
 export interface MeetingListRecord {
@@ -22,6 +23,29 @@ export interface MeetingListRecord {
   join_url: string
   status: string
   organizer_id?: string | null
+  timezone: string
+}
+
+export interface MeetingCalendarAttendee {
+  employee_id: string | null
+  name: string
+  email: string
+}
+
+export interface MeetingCalendarEvent {
+  id: string
+  title: string
+  start_at: string
+  end_at: string
+  join_url: string
+  status: string
+  organizer_id: string | null
+  attendees: MeetingCalendarAttendee[]
+}
+
+export interface MeetingCalendarResponse {
+  timezone: string
+  meetings: MeetingCalendarEvent[]
 }
 
 export interface MeetingDetails {
@@ -453,6 +477,7 @@ export interface ScheduledMeetingDetail {
   status: string
   organizer_id: string | null
   agenda: string | null
+  timezone: string
 }
 
 /** One free/busy conflict returned when a scheduling attempt finds a clash */
@@ -467,17 +492,20 @@ export interface ConflictDetail {
 /**
  * Discriminated result from POST /api/v1/meetings/schedule/natural-language
  *
- * - `scheduled`           – meeting created; `meeting` is populated
+ * - `Completed`           – meeting and attendee invitations completed successfully
  * - `needs_clarification` – one question returned; re-prompt the user
  * - `conflict`            – free/busy clash; `conflicts` is populated
  * - `error`               – backend error; `message` explains
  */
 export interface ScheduleResult {
-  status: 'scheduled' | 'needs_clarification' | 'conflict' | 'error'
+  status: 'Completed' | 'needs_clarification' | 'conflict' | 'error'
   meeting: ScheduledMeetingDetail | null
   clarifying_question: string | null
   conflicts: ConflictDetail[]
   message: string | null
   resolved_attendees: Employee[]
   invitations_sent: string[]
+  invitation_failures: string[]
+  calendar_provider?: string
+  timezone: string
 }

@@ -9,11 +9,13 @@ CalendarProvider, and dispatches attendee invitations.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 import logging
 import os
 import re
+import smtplib
 from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -43,23 +45,27 @@ EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
 @dataclass
 class ScheduledMeetingResult:
-    status: Literal["scheduled", "needs_clarification", "conflict", "error"]
+    status: Literal["Completed", "needs_clarification", "conflict", "error"]
     meeting: CalendarEvent | None = None
     clarifying_question: str | None = None
     conflicts: list[FreeBusyConflict] = field(default_factory=list)
     message: str | None = None
     resolved_attendees: list[dict] = field(default_factory=list)
     invitations_sent: list[str] = field(default_factory=list)
+    invitation_failures: list[str] = field(default_factory=list)
 
 
-def get_organization_timezone() -> ZoneInfo:
+def get_organization_timezone() -> ZoneInfo | timezone:
     """Retrieve the configured organisation timezone, defaulting to UTC."""
     tz_name = os.getenv("ORGANIZATION_TIMEZONE", "UTC").strip()
     try:
         return ZoneInfo(tz_name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, Exception):
         logger.warning("Invalid ORGANIZATION_TIMEZONE '%s'; falling back to UTC.", tz_name)
-        return ZoneInfo("UTC")
+        try:
+            return ZoneInfo("UTC")
+        except Exception:
+            return timezone.utc
 
 
 def parse_duration_minutes(text: str) -> int:
@@ -109,6 +115,39 @@ def parse_meeting_date(text: str, reference_local: datetime) -> date | None:
     in_days_match = re.search(r"\bin\s+(\d+)\s+days?\b", lower)
     if in_days_match:
         return (reference_local + timedelta(days=int(in_days_match.group(1)))).date()
+
+    month_names = {
+        name.lower(): month
+        for month in range(1, 13)
+        for name in (calendar.month_name[month], calendar.month_abbr[month])
+    }
+    month_pattern = "|".join(
+        re.escape(name)
+        for name in sorted(month_names, key=len, reverse=True)
+    )
+    month_date_match = re.search(
+        rf"\b(?:(?P<day_first>\d{{1,2}})(?:st|nd|rd|th)?\s+"
+        rf"(?P<month_first>{month_pattern})\.?|"
+        rf"(?P<month_last>{month_pattern})\.?\s+"
+        rf"(?P<day_last>\d{{1,2}})(?:st|nd|rd|th)?)"
+        rf"(?:,?\s+(?P<year>\d{{4}}))?\b",
+        lower,
+    )
+    if month_date_match:
+        day = int(month_date_match.group("day_first") or month_date_match.group("day_last"))
+        month_name = month_date_match.group("month_first") or month_date_match.group("month_last")
+        month = month_names[month_name.rstrip(".")]
+        year = int(month_date_match.group("year") or reference_local.year)
+        try:
+            explicit_date = date(year, month, day)
+        except ValueError:
+            return None
+        if month_date_match.group("year") is None and explicit_date < reference_local.date():
+            try:
+                explicit_date = explicit_date.replace(year=year + 1)
+            except ValueError:
+                return None
+        return explicit_date
 
     # Weekday detection: 'on Monday', 'next Friday', 'this Wednesday'
     weekdays = {
@@ -227,35 +266,69 @@ def send_meeting_invitations(
     organizer_name: str,
     attendees: list[Employee],
     timezone_name: str,
-) -> list[str]:
+    raw_emails: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
     """Send email invitations to resolved meeting attendees."""
     sent: list[str] = []
+    failures: list[str] = []
     subject = f"Invitation: {meeting.title}"
-    start_str = meeting.start_at.strftime("%A, %B %d, %Y at %I:%M %p")
-    end_str = meeting.end_at.strftime("%I:%M %p")
+
+    # Convert naive UTC meeting start/end into the target organization timezone
+    if meeting.start_at.tzinfo is None:
+        start_utc = meeting.start_at.replace(tzinfo=timezone.utc)
+        end_utc = meeting.end_at.replace(tzinfo=timezone.utc)
+    else:
+        start_utc = meeting.start_at.astimezone(timezone.utc)
+        end_utc = meeting.end_at.astimezone(timezone.utc)
+
+    try:
+        org_tz = ZoneInfo(timezone_name)
+    except Exception:
+        org_tz = timezone.utc
+
+    start_local = start_utc.astimezone(org_tz)
+    end_local = end_utc.astimezone(org_tz)
+
+    start_str = start_local.strftime("%A, %B %d, %Y at %I:%M %p")
+    end_str = end_local.strftime("%I:%M %p")
+
+    # Collect recipient list (resolved employees and any direct raw emails)
+    recipient_map: dict[str, str] = {
+        att.email.lower(): f"{att.name} <{att.email}>" for att in attendees if att.email
+    }
+    if raw_emails:
+        for email in raw_emails:
+            e_lower = email.strip().lower()
+            if e_lower and e_lower not in recipient_map:
+                recipient_map[e_lower] = email.strip()
 
     body_lines = [
-        f"You have been invited to a meeting.",
-        f"",
+        "You have been invited to a meeting.",
+        "",
         f"Title: {meeting.title}",
         f"When: {start_str} - {end_str} ({timezone_name})",
         f"Organizer: {organizer_name}",
         f"Join URL: {meeting.join_url or 'N/A'}",
-        f"",
-        f"Attendees:",
+        "",
+        "Attendees:",
     ]
-    for att in attendees:
-        body_lines.append(f"- {att.name} <{att.email}>")
+    for display in recipient_map.values():
+        body_lines.append(f"- {display}")
     body = "\n".join(body_lines)
 
-    for att in attendees:
+    for email in recipient_map.keys():
         try:
-            deliver_email(att.email, subject, body)
-            sent.append(att.email)
-        except Exception as exc:
-            logger.info("Could not deliver invitation to %s: %s", att.email, str(exc))
+            deliver_email(email, subject, body)
+            sent.append(email)
+        except (OSError, smtplib.SMTPException, ValueError) as exc:
+            logger.warning(
+                "Meeting invitation delivery failed recipient=%s error_type=%s",
+                email,
+                type(exc).__name__,
+            )
+            failures.append(email)
 
-    return sent
+    return sent, failures
 
 
 def schedule_meeting_from_natural_language(
@@ -326,8 +399,23 @@ def schedule_meeting_from_natural_language(
         )
 
     # 4. Check Availability & Free-Busy (Acceptance Criteria 4 & 5)
-    provider = get_calendar_provider()
-    availability = provider.check_availability(db, all_attendee_emails, start_utc, end_utc)
+    try:
+        provider = get_calendar_provider()
+        availability = provider.check_availability(
+            db,
+            all_attendee_emails,
+            start_utc,
+            end_utc,
+        )
+    except Exception:
+        logger.exception("Failed to check availability with the calendar provider.")
+        return ScheduledMeetingResult(
+            status="error",
+            message=(
+                "The configured calendar provider is unavailable; "
+                "the meeting was not created."
+            ),
+        )
 
     if availability.has_conflicts:
         conflict_descriptions = [
@@ -370,11 +458,12 @@ def schedule_meeting_from_natural_language(
     # 6. Send Invitations (Acceptance Criterion 7)
     organizer_emp = db.query(Employee).filter(Employee.id == organizer_id).first()
     organizer_name = organizer_emp.name if organizer_emp else "Meeting Organizer"
-    invitations_sent = send_meeting_invitations(
+    invitations_sent, invitation_failures = send_meeting_invitations(
         meeting=event,
         organizer_name=organizer_name,
         attendees=attendees,
         timezone_name=str(org_tz),
+        raw_emails=raw_emails,
     )
 
     attendee_details = [
@@ -388,10 +477,25 @@ def schedule_meeting_from_natural_language(
         f"with {len(all_attendee_emails)} attendee(s). Join link: {event.join_url}"
     )
 
+    if invitation_failures:
+        failed_recipients = ", ".join(invitation_failures)
+        return ScheduledMeetingResult(
+            status="error",
+            meeting=event,
+            message=(
+                f"Meeting '{event.title}' was created, but invitations could not be "
+                f"delivered to: {failed_recipients}. Join link: {event.join_url}"
+            ),
+            resolved_attendees=attendee_details,
+            invitations_sent=invitations_sent,
+            invitation_failures=invitation_failures,
+        )
+
     return ScheduledMeetingResult(
-        status="scheduled",
+        status="Completed",
         meeting=event,
         message=confirmation_message,
         resolved_attendees=attendee_details,
         invitations_sent=invitations_sent,
+        invitation_failures=[],
     )

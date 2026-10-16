@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import type { TaskRecord } from '../../api/tasks'
+import type { MeetingCalendarEvent } from '../../types/meeting'
 import { TaskCalendarMonth } from './TaskCalendarMonth'
 
 function makeTask(
@@ -40,6 +41,27 @@ function localIso(year: number, month: number, day: number, hour = 16): string {
   return new Date(year, month, day, hour, 0, 0).toISOString()
 }
 
+function makeMeeting(
+  id: string,
+  title: string,
+  startAt: string,
+  overrides: Partial<MeetingCalendarEvent> = {},
+): MeetingCalendarEvent {
+  return {
+    id,
+    title,
+    start_at: startAt,
+    end_at: new Date(new Date(startAt).getTime() + 30 * 60_000).toISOString(),
+    join_url: `http://localhost:5173/meetings/${id}`,
+    status: 'scheduled',
+    organizer_id: 'employee-1',
+    attendees: [
+      { employee_id: 'employee-2', name: 'Ava Patel', email: 'ava@example.test' },
+    ],
+    ...overrides,
+  }
+}
+
 beforeEach(() => {
   vi.useFakeTimers()
   vi.setSystemTime(new Date(2026, 9, 14, 12, 0, 0))
@@ -55,7 +77,9 @@ describe('TaskCalendarMonth', () => {
     render(<TaskCalendarMonth tasks={[]} />)
 
     expect(screen.getByRole('heading', { name: 'October 2026' })).toBeInTheDocument()
-    const calendar = screen.getByRole('table', { name: 'October 2026 task calendar' })
+    const calendar = screen.getByRole('table', {
+      name: 'October 2026 task calendar with meetings',
+    })
     expect(within(calendar).getAllByRole('columnheader').map((header) => header.textContent))
       .toEqual(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'])
     expect(calendar.querySelector('time[aria-current="date"]')).toHaveAttribute(
@@ -161,5 +185,81 @@ describe('TaskCalendarMonth', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unscheduled work, no due date' }))
 
     expect(screen.getByText('No due date')).toBeInTheDocument()
+  })
+
+  it('shows meetings alongside tasks by configured timezone and opens join details', () => {
+    const task = makeTask('task-1', 'Project follow-up', localIso(2026, 9, 15, 16))
+    const meeting = makeMeeting(
+      'meeting-1',
+      'Sprint planning',
+      '2026-10-14T20:00:00Z',
+      { end_at: '2026-10-14T20:45:00Z' },
+    )
+    render(
+      <MemoryRouter>
+        <TaskCalendarMonth
+          tasks={[task]}
+          meetings={[meeting, meeting]}
+          timeZone="Asia/Kolkata"
+        />
+      </MemoryRouter>,
+    )
+
+    const meetingDay = screen.getByRole('cell', { name: 'Thursday, October 15, 2026' })
+    expect(within(meetingDay).getByRole('button', {
+      name: 'Meeting: Sprint planning, 1:30 AM to 2:15 AM',
+    })).toBeInTheDocument()
+    expect(within(meetingDay).getByText('Ava Patel')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /Meeting: Sprint planning/ })).toHaveLength(1)
+
+    fireEvent.click(within(meetingDay).getByRole('button', {
+      name: /Meeting: Sprint planning/,
+    }))
+    const details = screen.getByRole('region', { name: 'Sprint planning' })
+    expect(within(details).getByText(/October 15, 2026/)).toBeInTheDocument()
+    expect(within(details).getByText('Ava Patel')).toBeInTheDocument()
+    expect(within(details).getByRole('link', { name: 'Join Meeting' })).toHaveAttribute(
+      'href',
+      'http://localhost:5173/meetings/meeting-1',
+    )
+    expect(screen.getByRole('button', { name: /Project follow-up/ })).toBeInTheDocument()
+  })
+
+  it('places UTC meeting timestamps at the organization-local date and shows the 30-minute interval', () => {
+    const meeting = makeMeeting(
+      'meeting-local-date',
+      '10 AM planning',
+      '2026-10-18T04:30:00Z',
+      { end_at: '2026-10-18T05:00:00Z' },
+    )
+    render(
+      <TaskCalendarMonth
+        tasks={[]}
+        meetings={[meeting]}
+        timeZone="Asia/Kolkata"
+      />,
+    )
+
+    const meetingDay = screen.getByRole('cell', {
+      name: 'Sunday, October 18, 2026',
+    })
+    expect(within(meetingDay).getByRole('button', {
+      name: 'Meeting: 10 AM planning, 10:00 AM to 10:30 AM',
+    })).toBeInTheDocument()
+  })
+
+  it('reports meeting loading and error states without hiding task deadlines', () => {
+    const task = makeTask('task-1', 'Project follow-up', localIso(2026, 9, 15, 16))
+    render(
+      <TaskCalendarMonth
+        tasks={[task]}
+        meetingsLoading
+        meetingsError="Calendar service unavailable"
+      />,
+    )
+
+    expect(screen.getByRole('status')).toHaveTextContent('Loading scheduled meetings')
+    expect(screen.getByRole('alert')).toHaveTextContent('Calendar service unavailable')
+    expect(screen.getByText('Project follow-up')).toBeInTheDocument()
   })
 })

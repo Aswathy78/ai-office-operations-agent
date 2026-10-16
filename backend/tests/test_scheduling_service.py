@@ -7,8 +7,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.meeting.calendar_provider import LocalCalendarProvider
-from app.meeting.models import Base, Employee, Meeting
+from app.meeting.calendar_provider import FreeBusyResult, LocalCalendarProvider
+from app.meeting.models import (
+    Base,
+    Employee,
+    Meeting,
+    MeetingAttendanceLog,
+    MeetingParticipant,
+)
+from app.meeting.service import complete_meeting_if_empty
 from app.meeting.scheduling_service import (
     DEFAULT_DURATION_MINUTES,
     parse_duration_minutes,
@@ -34,6 +41,14 @@ def db_session():
         session.rollback()
         session.close()
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def prevent_real_invitation_delivery(monkeypatch):
+    monkeypatch.setattr(
+        "app.meeting.scheduling_service.deliver_email",
+        lambda recipient, subject, body: "test-message-id",
+    )
 
 
 @pytest.fixture()
@@ -65,13 +80,24 @@ def test_parse_time_of_day():
     assert parse_time_of_day("meeting tomorrow at 14:00") == (14, 0)
 
 
+def test_parse_explicit_month_day_date():
+    reference_local = datetime(2026, 10, 17, 8, 52, tzinfo=ZoneInfo("Asia/Kolkata"))
+
+    assert parse_meeting_date(
+        "Schedule a presentation meeting at 12pm with Daniel Brooks on 25 Oct",
+        reference_local,
+    ) == datetime(2026, 10, 25).date()
+    assert parse_meeting_date("Schedule it for Oct 25", reference_local) == datetime(2026, 10, 25).date()
+    assert parse_meeting_date("Schedule it for October 25, 2027", reference_local) == datetime(2027, 10, 25).date()
+
+
 def test_schedule_project_meeting_tomorrow_at_10am_with_dev_team(
     db_session: Session,
     dev_team_employees: list[Employee],
     monkeypatch,
 ):
     monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
-    kolkata_tz = ZoneInfo("Asia/Kolkata")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "https://meetings.example.test")
     ref_time = datetime(2026, 10, 16, 4, 30, 0, tzinfo=timezone.utc)  # 10:00 AM IST on Oct 16
 
     prompt = "Schedule a project meeting tomorrow at 10 AM with the development team"
@@ -82,11 +108,18 @@ def test_schedule_project_meeting_tomorrow_at_10am_with_dev_team(
         reference_time=ref_time,
     )
 
-    assert result.status == "scheduled"
+    assert result.status == "Completed"
     assert result.meeting is not None
     assert result.meeting.title == "Project Meeting"
-    assert result.meeting.join_url is not None
+    assert result.meeting.join_url.startswith("https://meetings.example.test/meetings/")
     assert f"/meetings/{result.meeting.id}" in result.meeting.join_url
+
+    assert result.meeting.start_at.replace(tzinfo=timezone.utc) == datetime(
+        2026, 10, 17, 4, 30, tzinfo=timezone.utc
+    )
+    assert result.meeting.end_at.replace(tzinfo=timezone.utc) == datetime(
+        2026, 10, 17, 5, 0, tzinfo=timezone.utc
+    )
 
     # Check duration: 30 minutes
     duration = result.meeting.end_at - result.meeting.start_at
@@ -101,6 +134,108 @@ def test_schedule_project_meeting_tomorrow_at_10am_with_dev_team(
     stored = provider.get_event(db_session, result.meeting.id)
     assert stored is not None
     assert stored.id == result.meeting.id
+    assert stored.start_at == datetime(2026, 10, 17, 4, 30)
+    assert stored.end_at == datetime(2026, 10, 17, 5, 0)
+
+
+def test_future_meeting_with_attendance_is_not_completed_or_truncated(
+    db_session: Session,
+    monkeypatch,
+):
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    start_at = now + timedelta(days=1)
+    end_at = start_at + timedelta(minutes=30)
+    meeting = Meeting(
+        id="future-attended-meeting",
+        organizer_id="emp-1",
+        title="Future meeting",
+        agenda=None,
+        start_at=start_at,
+        end_at=end_at,
+        join_url="http://localhost:5173/meetings/future-attended-meeting",
+        status="active",
+    )
+    db_session.add(meeting)
+    db_session.add(
+        MeetingAttendanceLog(
+            id="future-attendance",
+            meeting_id=meeting.id,
+            participant_name="Maya Thompson",
+            is_external_guest=False,
+            joined_at=now,
+            left_at=now,
+        )
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.meeting.service.signaling_manager.get_room_participants",
+        lambda meeting_id: [],
+    )
+
+    assert complete_meeting_if_empty(db_session, meeting.id) is False
+
+    db_session.refresh(meeting)
+    assert meeting.status == "active"
+    assert meeting.end_at == end_at
+
+
+def test_unsupported_calendar_provider_fails_without_falling_back_to_local(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("CALENDAR_PROVIDER", "google")
+    result = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a project meeting tomorrow at 10 AM with the development team",
+        organizer_id="emp-1",
+        reference_time=datetime(2026, 10, 16, 4, 30, tzinfo=timezone.utc),
+    )
+
+    assert result.status == "error"
+    assert result.meeting is None
+    assert result.message == (
+        "The configured calendar provider is unavailable; the meeting was not created."
+    )
+    assert db_session.query(Meeting).count() == 0
+
+
+def test_calendar_provider_creation_failure_is_not_reported_as_success(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    class FailingCalendarProvider:
+        def check_availability(self, db, attendee_emails, start_at, end_at):
+            return FreeBusyResult(has_conflicts=False)
+
+        def create_event(
+            self,
+            db,
+            title,
+            start_at,
+            end_at,
+            organizer_id,
+            attendee_emails,
+            agenda=None,
+        ):
+            raise RuntimeError("calendar provider unavailable")
+
+    monkeypatch.setattr(
+        "app.meeting.scheduling_service.get_calendar_provider",
+        lambda: FailingCalendarProvider(),
+    )
+    result = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a project meeting tomorrow at 10 AM with the development team",
+        organizer_id="emp-1",
+        reference_time=datetime(2026, 10, 16, 4, 30, tzinfo=timezone.utc),
+    )
+
+    assert result.status == "error"
+    assert result.meeting is None
+    assert result.message.startswith("Failed to create meeting:")
+    assert db_session.query(Meeting).count() == 0
 
 
 def test_missing_attendees_asks_clarifying_question(
@@ -149,6 +284,7 @@ def test_conflict_detection_prevents_double_booking(
     monkeypatch,
 ):
     monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:5173")
     kolkata_tz = ZoneInfo("Asia/Kolkata")
     ref_time = datetime(2026, 10, 16, 4, 30, 0, tzinfo=timezone.utc)
 
@@ -160,7 +296,7 @@ def test_conflict_detection_prevents_double_booking(
         organizer_id="emp-1",
         reference_time=ref_time,
     )
-    assert res1.status == "scheduled"
+    assert res1.status == "Completed"
 
     # Second meeting attempt: Try to book Ava Patel at the same time
     prompt2 = "Schedule a design sync tomorrow at 10:15 AM with Ava"
@@ -178,4 +314,180 @@ def test_conflict_detection_prevents_double_booking(
     assert "conflicts" in res2.message.lower()
 
     # Total meetings in DB should still be only 1
+    assert db_session.query(Meeting).count() == 1
+
+
+def test_october_25_request_does_not_conflict_with_october_18_meeting(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:5173")
+    existing_start = datetime(2026, 10, 18, 6, 30)
+    existing_meeting = Meeting(
+        id="october-18-project",
+        organizer_id="emp-6",
+        title="Project Meeting",
+        agenda=None,
+        start_at=existing_start,
+        end_at=existing_start + timedelta(minutes=30),
+        join_url="http://localhost:5173/meetings/october-18-project",
+        status="scheduled",
+    )
+    db_session.add(existing_meeting)
+    db_session.add(
+        MeetingParticipant(
+            id="october-18-daniel",
+            meeting_id=existing_meeting.id,
+            user_id="emp-4",
+            email="daniel.brooks@northstar.example",
+            role="participant",
+        )
+    )
+    db_session.commit()
+
+    result = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a presentation meeting at 12pm with Daniel Brooks on 25 Oct",
+        organizer_id="emp-1",
+        reference_time=datetime(2026, 10, 17, 3, 22, tzinfo=timezone.utc),
+    )
+
+    assert result.status == "Completed"
+    assert result.meeting is not None
+    assert result.meeting.title == "Presentation Meeting"
+    assert result.meeting.start_at == datetime(2026, 10, 25, 6, 30)
+    assert result.meeting.end_at == datetime(2026, 10, 25, 7, 0)
+    assert result.meeting.start_at.date() == datetime(2026, 10, 25).date()
+    assert result.meeting.end_at - result.meeting.start_at == timedelta(minutes=30)
+    assert result.meeting.attendee_emails == ["daniel.brooks@northstar.example"]
+
+
+def test_same_day_overlapping_interval_is_a_conflict(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:5173")
+    reference_time = datetime(2026, 10, 17, 3, 22, tzinfo=timezone.utc)
+
+    first = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a project meeting on 25 Oct at 12 PM with Daniel Brooks",
+        organizer_id="emp-1",
+        reference_time=reference_time,
+    )
+    overlapping = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a presentation meeting on 25 Oct at 12:15 PM with Daniel Brooks",
+        organizer_id="emp-6",
+        reference_time=reference_time,
+    )
+
+    assert first.status == "Completed"
+    assert first.meeting is not None
+    assert first.meeting.start_at == datetime(2026, 10, 25, 6, 30)
+    assert overlapping.status == "conflict"
+    assert overlapping.meeting is None
+    assert any(
+        conflict.conflicting_event_title == "Project Meeting"
+        and conflict.attendee_email == "daniel.brooks@northstar.example"
+        for conflict in overlapping.conflicts
+    )
+    assert db_session.query(Meeting).count() == 1
+
+
+def test_same_day_non_overlapping_intervals_are_not_a_conflict(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    monkeypatch.setenv("FRONTEND_BASE_URL", "http://localhost:5173")
+    reference_time = datetime(2026, 10, 17, 3, 22, tzinfo=timezone.utc)
+
+    first = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a project meeting on 25 Oct at 12 PM with Daniel Brooks",
+        organizer_id="emp-1",
+        reference_time=reference_time,
+    )
+    later = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a presentation meeting on 25 Oct at 1 PM with Daniel Brooks",
+        organizer_id="emp-6",
+        reference_time=reference_time,
+    )
+
+    assert first.status == "Completed"
+    assert later.status == "Completed"
+    assert later.meeting is not None
+    assert later.meeting.start_at == datetime(2026, 10, 25, 7, 30)
+    assert later.meeting.end_at == datetime(2026, 10, 25, 8, 0)
+    assert later.meeting.end_at - later.meeting.start_at == timedelta(minutes=30)
+    assert db_session.query(Meeting).count() == 2
+
+
+def test_send_meeting_invitations_formatting_and_delivery(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    sent_emails = []
+
+    def mock_deliver(recipient: str, subject: str, body: str):
+        sent_emails.append((recipient, subject, body))
+        return "msg-123"
+
+    monkeypatch.setattr("app.meeting.scheduling_service.deliver_email", mock_deliver)
+
+    ref_time = datetime(2026, 10, 16, 4, 30, 0, tzinfo=timezone.utc)
+    prompt = "Schedule a project meeting tomorrow at 10 AM with the development team"
+
+    result = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt=prompt,
+        organizer_id="emp-1",
+        reference_time=ref_time,
+    )
+
+    assert result.status == "Completed"
+    assert len(sent_emails) == 5
+    assert len(result.invitations_sent) == 5
+    assert result.invitation_failures == []
+
+    # Check recipient and invitation content format
+    recipient, subject, body = sent_emails[0]
+    assert subject == "Invitation: Project Meeting"
+    assert "10:00 AM - 10:30 AM (Asia/Kolkata)" in body
+    assert "Join URL: http://localhost:5173/meetings/" in body
+    assert "Maya Thompson" in body
+
+
+def test_invitation_delivery_failure_is_not_reported_as_completed(
+    db_session: Session,
+    dev_team_employees: list[Employee],
+    monkeypatch,
+):
+    def fail_delivery(recipient: str, subject: str, body: str):
+        raise ValueError("SMTP is not configured")
+
+    monkeypatch.setattr("app.meeting.scheduling_service.deliver_email", fail_delivery)
+    ref_time = datetime(2026, 10, 16, 4, 30, 0, tzinfo=timezone.utc)
+
+    result = schedule_meeting_from_natural_language(
+        db=db_session,
+        prompt="Schedule a project meeting tomorrow at 10 AM with the development team",
+        organizer_id="emp-1",
+        reference_time=ref_time,
+    )
+
+    assert result.status == "error"
+    assert result.meeting is not None
+    assert "invitations could not be delivered" in result.message
+    assert len(result.invitation_failures) == 5
+    assert result.invitations_sent == []
     assert db_session.query(Meeting).count() == 1

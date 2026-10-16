@@ -13,7 +13,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import logging
 import os
 from typing import Literal
 import uuid
@@ -23,9 +22,6 @@ from sqlalchemy.orm import Session
 from app.meeting.models import Employee, Meeting, MeetingParticipant
 from app.meeting.schemas import MeetingCreate, ParticipantCreate
 from app.meeting.service import create_meeting
-
-logger = logging.getLogger(__name__)
-
 
 def _to_naive_utc(dt: datetime) -> datetime:
     """Normalize datetime to naive UTC for consistent SQLite datetime comparison."""
@@ -296,10 +292,7 @@ def get_calendar_provider() -> CalendarProvider:
     if provider_type == "local":
         return LocalCalendarProvider()
 
-    # If external provider is requested without configured credentials, log warning and use local
-    logger.warning(
-        "Requested CALENDAR_PROVIDER='%s', but external integration is not configured. "
-        "Falling back to LocalCalendarProvider for local development.",
-        provider_type,
+    raise CalendarProviderError(
+        f"Calendar provider '{provider_type}' is not configured. "
+        "Only CALENDAR_PROVIDER=local is currently available."
     )
-    return LocalCalendarProvider()

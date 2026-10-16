@@ -12,6 +12,17 @@ function parseMeetingDate(value: string): Date {
   return new Date(hasTimezone ? value : `${value}Z`)
 }
 
+function dateKeyInTimeZone(value: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(value)
+  const values = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]))
+  return `${values.year}-${values.month}-${values.day}`
+}
+
 function lifecycleFor(meeting: MeetingListRecord, now: number): Meeting['lifecycle'] {
   const status = meeting.status.toLowerCase()
   const start = parseMeetingDate(meeting.start_at).getTime()
@@ -26,20 +37,21 @@ function lifecycleFor(meeting: MeetingListRecord, now: number): Meeting['lifecyc
   return 'upcoming'
 }
 
-function formatDateTime(value: string): string {
+function formatDateTime(value: string, timeZone: string): string {
   const date = parseMeetingDate(value)
   return Number.isNaN(date.getTime())
     ? 'Time unavailable'
-    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+    : new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'medium',
+        timeStyle: 'short',
+        timeZone,
+      }).format(date)
 }
 
-function isToday(value: string): boolean {
+function isToday(value: string, timeZone: string): boolean {
   const date = parseMeetingDate(value)
-  const now = new Date()
   return !Number.isNaN(date.getTime()) &&
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate()
+    dateKeyInTimeZone(date, timeZone) === dateKeyInTimeZone(new Date(), timeZone)
 }
 
 function toMeeting(record: MeetingListRecord, now: number): Meeting {
@@ -47,13 +59,14 @@ function toMeeting(record: MeetingListRecord, now: number): Meeting {
     id: record.id,
     title: record.title,
     agenda: record.agenda,
-    startTime: formatDateTime(record.start_at),
-    endTime: formatDateTime(record.end_at),
+    startTime: formatDateTime(record.start_at, record.timezone),
+    endTime: formatDateTime(record.end_at, record.timezone),
     startAt: record.start_at,
     status: record.status,
     joinUrl: record.join_url,
     organizerId: record.organizer_id,
     lifecycle: lifecycleFor(record, now),
+    timezone: record.timezone,
   }
 }
 
@@ -113,9 +126,9 @@ export function MeetingsPage() {
   }, [user, retryKey])
 
   const today = meetings.filter((meeting) => meeting.lifecycle !== 'completed' && (
-    isToday(meeting.startAt ?? meeting.startTime) || meeting.lifecycle === 'active'
+    isToday(meeting.startAt ?? meeting.startTime, meeting.timezone ?? 'UTC') || meeting.lifecycle === 'active'
   ))
-  const upcoming = meetings.filter((meeting) => meeting.lifecycle === 'upcoming' && !isToday(meeting.startAt ?? meeting.startTime))
+  const upcoming = meetings.filter((meeting) => meeting.lifecycle === 'upcoming' && !isToday(meeting.startAt ?? meeting.startTime, meeting.timezone ?? 'UTC'))
   const completed = meetings.filter((meeting) => meeting.lifecycle === 'completed')
 
   return (

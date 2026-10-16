@@ -9,6 +9,7 @@ import type {
   MeetingActionItems,
   MeetingDetails,
   MeetingListRecord,
+  MeetingCalendarResponse,
   MeetingReport,
   MeetingSummary,
   MeetingTranscript,
@@ -20,6 +21,9 @@ import type {
   MeetingMinutesDeliveryResponse,
   MeetingMinutesRecipient,
   MeetingMinutesUpdateRequest,
+  ScheduleResult,
+  ScheduledMeetingDetail,
+  ConflictDetail,
 } from '../types/meeting'
 
 export let API_BASE_URL =
@@ -86,6 +90,22 @@ export async function getMeetings(userId: string, userEmail: string): Promise<Me
   const query = new URLSearchParams({ user_id: userId, email: userEmail })
   return apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`)
     .then((response) => readResponse<MeetingListRecord[]>(response))
+}
+
+export function getCalendarMeetings(
+  userId: string,
+  userEmail: string,
+  year: number,
+  month: number,
+): Promise<MeetingCalendarResponse> {
+  const query = new URLSearchParams({
+    user_id: userId,
+    email: userEmail,
+    year: String(year),
+    month: String(month),
+  })
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/calendar?${query}`)
+    .then((response) => readResponse<MeetingCalendarResponse>(response))
 }
 
 export function requestGuestJoin(
@@ -493,7 +513,7 @@ export async function createMeeting(
     participants: { email?: string; user_id?: string }[]
   },
   organizerId: string,
-): Promise<{ id: string; title: string; join_url: string; status: string; start_at: string; end_at: string; organizer_id?: string | null }> {
+): Promise<{ id: string; title: string; join_url: string; status: string; start_at: string; end_at: string; organizer_id?: string | null; timezone: string }> {
   const query = new URLSearchParams({ organizer_id: organizerId })
   const response = await apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`, {
     method: 'POST',
@@ -646,3 +666,19 @@ export function refreshMeetingMinutes(
   ).then((response) => readResponse<MeetingMinutes>(response))
 }
 
+export function scheduleMeetingNL(
+  prompt: string,
+  actor: { id: string; role?: string },
+): Promise<ScheduleResult> {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/schedule/natural-language`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': actor.id,
+    },
+    body: JSON.stringify({
+      prompt,
+      organizer_id: actor.id,
+    }),
+  }).then((response) => readResponse<ScheduleResult>(response))
+}
