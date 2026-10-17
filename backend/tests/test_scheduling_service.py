@@ -18,6 +18,7 @@ from app.meeting.models import (
 from app.meeting.service import complete_meeting_if_empty
 from app.meeting.scheduling_service import (
     DEFAULT_DURATION_MINUTES,
+    find_alternative_slots,
     parse_duration_minutes,
     parse_meeting_date,
     parse_time_of_day,
@@ -428,6 +429,61 @@ def test_same_day_non_overlapping_intervals_are_not_a_conflict(
     assert later.meeting.end_at == datetime(2026, 10, 25, 8, 0)
     assert later.meeting.end_at - later.meeting.start_at == timedelta(minutes=30)
     assert db_session.query(Meeting).count() == 2
+
+
+def test_alternative_slots_respect_employee_timezone_and_working_hours(
+    db_session: Session,
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "UTC")
+    attendee = Employee(
+        id="timezone-attendee",
+        name="Timezone Attendee",
+        email="timezone@example.test",
+        timezone_name="America/Los_Angeles",
+        working_days=[0, 1, 2, 3, 4],
+        working_hours_start="09:00",
+        working_hours_end="17:00",
+        is_active=True,
+    )
+    db_session.add(attendee)
+    db_session.commit()
+
+    alternatives = find_alternative_slots(
+        db_session,
+        datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc),
+        30,
+        [attendee.email],
+        provider=LocalCalendarProvider(),
+        limit=1,
+    )
+
+    assert alternatives == [(
+        datetime(2026, 10, 19, 16, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, 16, 30, tzinfo=timezone.utc),
+    )]
+    local_start = alternatives[0][0].astimezone(ZoneInfo("America/Los_Angeles"))
+    local_end = alternatives[0][1].astimezone(ZoneInfo("America/Los_Angeles"))
+    assert local_start.weekday() in attendee.working_days
+    assert local_start.hour == 9
+    assert local_end.hour == 9 and local_end.minute == 30
+
+
+def test_unknown_attendee_alternatives_use_organization_working_hours(monkeypatch, db_session: Session):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "UTC")
+    alternatives = find_alternative_slots(
+        db_session,
+        datetime(2026, 10, 19, 0, 0, tzinfo=timezone.utc),
+        30,
+        ["external@example.test"],
+        provider=LocalCalendarProvider(),
+        limit=1,
+    )
+
+    assert alternatives == [(
+        datetime(2026, 10, 19, 9, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 19, 9, 30, tzinfo=timezone.utc),
+    )]
 
 
 def test_send_meeting_invitations_formatting_and_delivery(

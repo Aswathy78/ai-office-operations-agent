@@ -10,7 +10,7 @@ import {
   type DirectoryGroup,
   type EmailDraft,
 } from '../api/emailDrafts'
-import { scheduleMeetingNL } from '../api/meetings'
+import { confirmMeetingSlot, scheduleMeetingNL } from '../api/meetings'
 import { EmailDraftPreview, EmailDraftStatusPill } from '../components/email/EmailDraftPreview'
 import { ScheduledMeetingCard } from '../components/meetings/ScheduledMeetingCard'
 import { useAuth } from '../contexts/AuthContext'
@@ -50,6 +50,7 @@ type ChatMessage =
       text: string
       draftId?: string
       meetingResult?: ScheduleResult
+      meetingPrompt?: string
       tone?: 'error' | 'warning'
     }
 
@@ -199,6 +200,7 @@ export function ChatPage() {
               role: 'assistant',
               text: result.message || 'There is a scheduling conflict with one or more attendees.',
               meetingResult: result,
+              meetingPrompt: effectivePrompt,
               tone: 'warning',
             },
           ])
@@ -263,6 +265,39 @@ export function ChatPage() {
     ])
   }
 
+  async function chooseAlternative(prompt: string, startAt: string) {
+    if (!actor || pending) return
+    setPending(true)
+    try {
+      const result = await confirmMeetingSlot(prompt, startAt, actor)
+      setMessages((current) => [
+        ...current,
+        {
+          id: nextId(),
+          role: 'assistant',
+          text: result.message || (result.status === 'conflict'
+            ? 'That time is no longer available. Here are fresh alternatives.'
+            : 'Meeting scheduling updated.'),
+          meetingResult: result,
+          meetingPrompt: prompt,
+          tone: result.status === 'conflict' ? 'warning' : undefined,
+        },
+      ])
+    } catch (reason) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: nextId(),
+          role: 'assistant',
+          tone: 'error',
+          text: `I couldn't confirm that time: ${reason instanceof Error ? reason.message : 'unknown error'}`,
+        },
+      ])
+    } finally {
+      setPending(false)
+    }
+  }
+
   function onSubmit(event: FormEvent) {
     event.preventDefault()
     void submit(input)
@@ -296,7 +331,13 @@ export function ChatPage() {
                     <EmailDraftPreview draft={draft} actor={actor} groups={groups} onChange={storeDraft} />
                   )}
                   {message.role === 'assistant' && message.meetingResult && (
-                    <ScheduledMeetingCard result={message.meetingResult} />
+                    <ScheduledMeetingCard
+                      result={message.meetingResult}
+                      confirming={pending}
+                      onSelectAlternative={message.meetingPrompt
+                        ? (startAt) => void chooseAlternative(message.meetingPrompt!, startAt)
+                        : undefined}
+                    />
                   )}
                 </div>
               </li>

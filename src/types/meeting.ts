@@ -502,6 +502,7 @@ export interface ScheduleResult {
   meeting: ScheduledMeetingDetail | null
   clarifying_question: string | null
   conflicts: ConflictDetail[]
+  alternative_slots?: { start_at: string; end_at: string }[]
   message: string | null
   resolved_attendees: Employee[]
   invitations_sent: string[]

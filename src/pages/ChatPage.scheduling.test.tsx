@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatPage, isMeetingSchedulingIntent } from './ChatPage'
-import { scheduleMeetingNL } from '../api/meetings'
+import { confirmMeetingSlot, scheduleMeetingNL } from '../api/meetings'
 import { createEmailDraft, getDirectoryGroups, getMyEmailDrafts } from '../api/emailDrafts'
 import type { ScheduleResult } from '../types/meeting'
 
@@ -25,6 +25,7 @@ vi.mock('../contexts/AuthContext', () => ({
 }))
 
 vi.mock('../api/meetings', () => ({
+  confirmMeetingSlot: vi.fn(),
   scheduleMeetingNL: vi.fn(),
 }))
 
@@ -209,6 +210,16 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
             conflicting_start_at: '2026-10-17T04:30:00Z',
             conflicting_end_at: '2026-10-17T05:30:00Z',
           },
+          {
+            attendee_email: 'ava.patel@northstar.example',
+            attendee_name: 'Ava Patel',
+            conflicting_event_title: 'Design Review',
+            conflicting_start_at: '2026-10-17T04:30:00Z',
+            conflicting_end_at: '2026-10-17T05:00:00Z',
+          },
+        ],
+        alternative_slots: [
+          { start_at: '2026-10-17T05:30:00Z', end_at: '2026-10-17T06:00:00Z' },
         ],
         message: "Cannot schedule meeting due to conflicts: Marcus Chen is busy with 'Sprint Planning'. Please choose another time slot.",
         resolved_attendees: [],
@@ -228,7 +239,131 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
       expect(within(conflictCard).getByText('Availability Conflict Detected')).toBeInTheDocument()
       expect(within(conflictCard).getByText('Marcus Chen')).toBeInTheDocument()
       expect(within(conflictCard).getByText(/Sprint Planning/)).toBeInTheDocument()
+      expect(within(conflictCard).getByText(/marcus\.chen@northstar\.example/)).toBeInTheDocument()
+      expect(within(conflictCard).getByText(/ava\.patel@northstar\.example/)).toBeInTheDocument()
+      expect(within(conflictCard).getByText('Alternative slots')).toBeInTheDocument()
+      expect(within(conflictCard).getByRole('button', { name: 'Choose slot' })).toBeInTheDocument()
       expect(within(conflictCard).getByText('Not Scheduled')).toBeInTheDocument()
+    })
+
+    it('sends a user-selected alternative for confirmation and displays the created meeting', async () => {
+      const user = userEvent.setup()
+      const slot = { start_at: '2026-10-17T05:30:00Z', end_at: '2026-10-17T06:00:00Z' }
+      const conflictResult: ScheduleResult = {
+        status: 'conflict',
+        timezone: 'UTC',
+        meeting: null,
+        clarifying_question: null,
+        conflicts: [{
+          attendee_email: 'ava@example.test',
+          attendee_name: 'Ava Patel',
+          conflicting_event_title: 'Existing meeting',
+          conflicting_start_at: '2026-10-17T05:30:00Z',
+          conflicting_end_at: '2026-10-17T06:00:00Z',
+        }],
+        alternative_slots: [slot],
+        message: 'Conflict detected',
+        resolved_attendees: [],
+        invitations_sent: [],
+        invitation_failures: [],
+      }
+      const completedResult: ScheduleResult = {
+        ...conflictResult,
+        status: 'Completed',
+        meeting: {
+          id: 'confirmed-meeting',
+          title: 'Project Meeting',
+          start_at: slot.start_at,
+          end_at: slot.end_at,
+          join_url: 'http://localhost:5173/meetings/confirmed-meeting',
+          status: 'scheduled',
+          organizer_id: 'emp-1',
+          timezone: 'UTC',
+          agenda: null,
+        },
+        conflicts: [],
+        alternative_slots: [],
+        message: 'Meeting scheduled successfully.',
+      }
+      vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(conflictResult)
+      vi.mocked(confirmMeetingSlot).mockResolvedValueOnce(completedResult)
+
+      render(<ChatPage />)
+      const prompt = 'Schedule a project meeting tomorrow at 10 AM with Ava Patel'
+      await user.type(screen.getByLabelText('Message the AI Assistant'), prompt)
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+      const conflictCard = await screen.findByLabelText('Meeting scheduling conflict')
+      expect(within(conflictCard).getByText('Not Scheduled')).toBeInTheDocument()
+      expect(confirmMeetingSlot).not.toHaveBeenCalled()
+      await user.click(within(conflictCard).getByRole('button', { name: 'Choose slot' }))
+
+      await waitFor(() => {
+        expect(confirmMeetingSlot).toHaveBeenCalledWith(
+          prompt,
+          slot.start_at,
+          expect.objectContaining({ id: 'emp-1' }),
+        )
+      })
+      expect(await screen.findByText('Project Meeting')).toBeInTheDocument()
+      expect(screen.getByText('Meeting scheduled successfully.')).toBeInTheDocument()
+    })
+
+    it('shows fresh alternatives when the selected slot became unavailable', async () => {
+      const user = userEvent.setup()
+      const prompt = 'Schedule a project meeting tomorrow at 10 AM with Ava Patel'
+      const initialSlot = {
+        start_at: '2026-10-17T05:30:00Z',
+        end_at: '2026-10-17T06:00:00Z',
+      }
+      const refreshedSlot = {
+        start_at: '2026-10-17T06:00:00Z',
+        end_at: '2026-10-17T06:30:00Z',
+      }
+      const initialConflict: ScheduleResult = {
+        status: 'conflict',
+        timezone: 'UTC',
+        meeting: null,
+        clarifying_question: null,
+        conflicts: [{
+          attendee_email: 'ava@example.test',
+          attendee_name: 'Ava Patel',
+          conflicting_event_title: 'Existing meeting',
+          conflicting_start_at: initialSlot.start_at,
+          conflicting_end_at: initialSlot.end_at,
+        }],
+        alternative_slots: [initialSlot],
+        message: 'Conflict detected',
+        resolved_attendees: [],
+        invitations_sent: [],
+        invitation_failures: [],
+      }
+      const staleResult: ScheduleResult = {
+        ...initialConflict,
+        conflicts: [{
+          ...initialConflict.conflicts[0],
+          conflicting_event_title: 'Newly booked meeting',
+        }],
+        alternative_slots: [refreshedSlot],
+        message: 'That time is no longer available.',
+      }
+      vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(initialConflict)
+      vi.mocked(confirmMeetingSlot).mockResolvedValueOnce(staleResult)
+
+      render(<ChatPage />)
+      await user.type(screen.getByLabelText('Message the AI Assistant'), prompt)
+      await user.click(screen.getByRole('button', { name: 'Send message' }))
+      const conflictCard = await screen.findByLabelText('Meeting scheduling conflict')
+      await user.click(within(conflictCard).getByRole('button', { name: 'Choose slot' }))
+
+      const refreshedCard = await screen.findAllByLabelText('Meeting scheduling conflict')
+      expect(refreshedCard).toHaveLength(2)
+      expect(screen.getByText(/Newly booked meeting/)).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: 'Choose slot' })).toHaveLength(2)
+      expect(confirmMeetingSlot).toHaveBeenCalledWith(
+        prompt,
+        initialSlot.start_at,
+        expect.objectContaining({ id: 'emp-1' }),
+      )
     })
 
     it('preserves existing email drafting flow for non-scheduling prompts', async () => {

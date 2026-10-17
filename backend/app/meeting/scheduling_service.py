@@ -49,6 +49,7 @@ class ScheduledMeetingResult:
     meeting: CalendarEvent | None = None
     clarifying_question: str | None = None
     conflicts: list[FreeBusyConflict] = field(default_factory=list)
+    alternative_slots: list[tuple[datetime, datetime]] = field(default_factory=list)
     message: str | None = None
     resolved_attendees: list[dict] = field(default_factory=list)
     invitations_sent: list[str] = field(default_factory=list)
@@ -331,11 +332,115 @@ def send_meeting_invitations(
     return sent, failures
 
 
+def _employee_timezone(employee: Employee, organization_timezone: ZoneInfo | timezone):
+    if not employee.timezone_name:
+        return organization_timezone
+    try:
+        return ZoneInfo(employee.timezone_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        logger.warning(
+            "Invalid employee timezone '%s' for employee %s; using organization timezone.",
+            employee.timezone_name,
+            employee.id,
+        )
+        return organization_timezone
+
+
+def _fits_attendee_working_hours(
+    start_at: datetime,
+    end_at: datetime,
+    attendee_emails: list[str],
+    employees_by_email: dict[str, Employee],
+    organization_timezone: ZoneInfo | timezone,
+    default_for_unknown_attendees: bool = False,
+) -> bool:
+    for email in attendee_emails:
+        employee = employees_by_email.get(email.lower())
+        if employee is None:
+            if not default_for_unknown_attendees:
+                continue
+            attendee_timezone = organization_timezone
+            working_days = [0, 1, 2, 3, 4]
+            start_text = "09:00"
+            end_text = "17:00"
+        else:
+            attendee_timezone = _employee_timezone(employee, organization_timezone)
+            working_days = employee.working_days
+            start_text = employee.working_hours_start
+            end_text = employee.working_hours_end
+        local_start = start_at.astimezone(attendee_timezone)
+        local_end = end_at.astimezone(attendee_timezone)
+        if local_start.date() != local_end.date():
+            return False
+
+        try:
+            work_start = time.fromisoformat(start_text)
+            work_end = time.fromisoformat(end_text)
+        except ValueError:
+            logger.warning("Invalid working hours for attendee %s; using 09:00-17:00.", email)
+            work_start, work_end = time(9), time(17)
+        if (
+            local_start.weekday() not in working_days
+            or local_start.time().replace(tzinfo=None) < work_start
+            or local_end.time().replace(tzinfo=None) > work_end
+        ):
+            return False
+    return True
+
+
+def find_alternative_slots(
+    db: Session,
+    requested_start_at: datetime,
+    duration_minutes: int,
+    attendee_emails: list[str],
+    provider=None,
+    limit: int = 5,
+) -> list[tuple[datetime, datetime]]:
+    """Find the nearest future slots that fit all invitees and are conflict-free."""
+    if requested_start_at.tzinfo is None:
+        requested_start_at = requested_start_at.replace(tzinfo=timezone.utc)
+    else:
+        requested_start_at = requested_start_at.astimezone(timezone.utc)
+    provider = provider or get_calendar_provider()
+    organization_timezone = get_organization_timezone()
+    normalized_emails = list(dict.fromkeys(email.strip().lower() for email in attendee_emails if email.strip()))
+    employees_by_email = {
+        employee.email.lower(): employee
+        for employee in db.query(Employee).all()
+        if employee.email and employee.email.lower() in normalized_emails
+    }
+    duration = timedelta(minutes=duration_minutes)
+    slots: list[tuple[datetime, datetime]] = []
+
+    # Search forward on a 30-minute grid, bounded to two weeks.
+    for step in range(1, 14 * 48 + 1):
+        slot_start = requested_start_at + timedelta(minutes=30 * step)
+        slot_end = slot_start + duration
+        if not _fits_attendee_working_hours(
+            slot_start,
+            slot_end,
+            normalized_emails,
+            employees_by_email,
+            organization_timezone,
+            default_for_unknown_attendees=True,
+        ):
+            continue
+        availability = provider.check_availability(
+            db, normalized_emails, slot_start, slot_end
+        )
+        if not availability.has_conflicts:
+            slots.append((slot_start, slot_end))
+            if len(slots) >= limit:
+                break
+    return slots
+
+
 def schedule_meeting_from_natural_language(
     db: Session,
     prompt: str,
     organizer_id: str,
     reference_time: datetime | None = None,
+    selected_start_at: datetime | None = None,
 ) -> ScheduledMeetingResult:
     """Core entrypoint for Story 5.1: Natural-Language Meeting Scheduling."""
     prompt = prompt.strip()
@@ -351,27 +456,34 @@ def schedule_meeting_from_natural_language(
     ref_local = ref_utc.astimezone(org_tz)
 
     # 2. Parse Date, Time, Duration, and Title
-    target_date = parse_meeting_date(prompt, ref_local)
-    time_of_day = parse_time_of_day(prompt)
+    if selected_start_at is None:
+        target_date = parse_meeting_date(prompt, ref_local)
+        time_of_day = parse_time_of_day(prompt)
 
-    if target_date is None:
-        # Default to tomorrow if not stated, or ask if neither date nor time could be found
+        if target_date is None:
+            if time_of_day is None:
+                return ScheduledMeetingResult(
+                    status="needs_clarification",
+                    clarifying_question="When would you like to schedule the meeting (date and time)?",
+                )
+            target_date = (ref_local + timedelta(days=1)).date()
+
         if time_of_day is None:
             return ScheduledMeetingResult(
                 status="needs_clarification",
-                clarifying_question="When would you like to schedule the meeting (date and time)?",
+                clarifying_question=f"What time on {target_date.strftime('%A, %B %d')} should the meeting start?",
             )
-        target_date = (ref_local + timedelta(days=1)).date()
 
-    if time_of_day is None:
-        return ScheduledMeetingResult(
-            status="needs_clarification",
-            clarifying_question=f"What time on {target_date.strftime('%A, %B %d')} should the meeting start?",
-        )
-
-    hour, minute = time_of_day
-    start_local = datetime.combine(target_date, time(hour, minute), tzinfo=org_tz)
-    start_utc = start_local.astimezone(timezone.utc)
+        hour, minute = time_of_day
+        start_local = datetime.combine(target_date, time(hour, minute), tzinfo=org_tz)
+        start_utc = start_local.astimezone(timezone.utc)
+    else:
+        start_utc = selected_start_at
+        if start_utc.tzinfo is None:
+            start_utc = start_utc.replace(tzinfo=timezone.utc)
+        else:
+            start_utc = start_utc.astimezone(timezone.utc)
+        start_local = start_utc.astimezone(org_tz)
 
     duration_minutes = parse_duration_minutes(prompt)
     end_utc = start_utc + timedelta(minutes=duration_minutes)
@@ -398,6 +510,45 @@ def schedule_meeting_from_natural_language(
             clarifying_question="Who should be invited to this meeting? You can invite individual employees or a team such as the development team.",
         )
 
+    if selected_start_at is not None:
+        employees_by_email = {
+            employee.email.lower(): employee
+            for employee in db.query(Employee).all()
+            if employee.email and employee.email.lower() in all_attendee_emails
+        }
+        if not _fits_attendee_working_hours(
+            start_utc,
+            end_utc,
+            all_attendee_emails,
+            employees_by_email,
+            org_tz,
+            default_for_unknown_attendees=True,
+        ):
+            alternatives = find_alternative_slots(
+                db,
+                start_utc,
+                duration_minutes,
+                all_attendee_emails,
+            )
+            invalid_slot_conflicts = [
+                FreeBusyConflict(
+                    attendee_email=email,
+                    attendee_name=(
+                        employees_by_email[email].name if email in employees_by_email else None
+                    ),
+                    conflicting_event_title="Outside working hours",
+                    conflicting_start_at=start_utc,
+                    conflicting_end_at=end_utc,
+                )
+                for email in all_attendee_emails
+            ]
+            return ScheduledMeetingResult(
+                status="conflict",
+                conflicts=invalid_slot_conflicts,
+                alternative_slots=alternatives,
+                message="The selected slot is outside one or more attendees' working hours. Please choose another slot.",
+            )
+
     # 4. Check Availability & Free-Busy (Acceptance Criteria 4 & 5)
     try:
         provider = get_calendar_provider()
@@ -422,9 +573,17 @@ def schedule_meeting_from_natural_language(
             f"{c.attendee_name or c.attendee_email} is busy with '{c.conflicting_event_title}'"
             for c in availability.conflicts
         ]
+        alternatives = find_alternative_slots(
+            db,
+            start_utc,
+            duration_minutes,
+            all_attendee_emails,
+            provider=provider,
+        )
         return ScheduledMeetingResult(
             status="conflict",
             conflicts=availability.conflicts,
+            alternative_slots=alternatives,
             message=(
                 f"Cannot schedule meeting due to conflicts: {', '.join(conflict_descriptions)}. "
                 "Please choose another time slot."
@@ -443,9 +602,17 @@ def schedule_meeting_from_natural_language(
             agenda=f"Scheduled via AI Assistant: {prompt}",
         )
     except CalendarConflictError as exc:
+        alternatives = find_alternative_slots(
+            db,
+            start_utc,
+            duration_minutes,
+            all_attendee_emails,
+            provider=provider,
+        )
         return ScheduledMeetingResult(
             status="conflict",
             conflicts=exc.conflicts,
+            alternative_slots=alternatives,
             message=str(exc),
         )
     except Exception as exc:

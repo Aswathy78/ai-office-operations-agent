@@ -196,6 +196,144 @@ def test_api_schedule_conflict_detected(client: TestClient, seeded_directory):
     assert "conflicts" in data["message"].lower()
 
 
+def _next_weekday_at_ten_utc() -> datetime:
+    target = datetime.now(timezone.utc).date() + timedelta(days=1)
+    while target.weekday() >= 5:
+        target += timedelta(days=1)
+    return datetime.combine(target, time(10, 0), tzinfo=timezone.utc)
+
+
+def _team_schedule_prompt(start_at: datetime) -> str:
+    date_text = start_at.strftime("%d %b %Y")
+    return f"Schedule a project meeting with Ava Patel and Marcus Chen on {date_text} at 10 AM"
+
+
+def test_conflict_returns_all_attendees_alternatives_and_requires_confirmation(
+    client: TestClient,
+    seeded_directory,
+):
+    prompt = _team_schedule_prompt(_next_weekday_at_ten_utc())
+    initial = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={"prompt": prompt},
+        headers={"X-User-Id": "emp-1"},
+    )
+    assert initial.status_code == 200
+    assert initial.json()["status"] == "Completed"
+    assert initial.json()["meeting"] is not None
+
+    conflict = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={"prompt": prompt},
+        headers={"X-User-Id": "emp-1"},
+    ).json()
+    assert conflict["status"] == "conflict"
+    assert conflict["meeting"] is None
+    assert {item["attendee_email"] for item in conflict["conflicts"]} == {
+        "ava.patel@northstar.example",
+        "marcus.chen@northstar.example",
+    }
+    assert {item["attendee_name"] for item in conflict["conflicts"]} == {
+        "Ava Patel",
+        "Marcus Chen",
+    }
+    assert conflict["alternative_slots"]
+    assert len(client.get("/api/v1/meetings/?user_id=emp-1").json()) == 1
+
+    selected = conflict["alternative_slots"][0]["start_at"]
+    confirmed = client.post(
+        "/api/v1/meetings/schedule/confirm",
+        json={"prompt": prompt, "start_at": selected},
+        headers={"X-User-Id": "emp-1"},
+    ).json()
+    assert confirmed["status"] == "Completed"
+    assert confirmed["meeting"] is not None
+
+
+def test_confirmation_rechecks_availability_and_returns_fresh_alternatives(
+    client: TestClient,
+    seeded_directory,
+):
+    start_at = _next_weekday_at_ten_utc()
+    prompt = _team_schedule_prompt(start_at)
+    client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={"prompt": prompt},
+        headers={"X-User-Id": "emp-1"},
+    )
+    conflict = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={"prompt": prompt},
+        headers={"X-User-Id": "emp-1"},
+    ).json()
+    selected = conflict["alternative_slots"][0]
+
+    manual = client.post(
+        "/api/v1/meetings/?organizer_id=emp-1",
+        json={
+            "title": "Another meeting",
+            "meeting_type": "scheduled",
+            "start_at": selected["start_at"],
+            "end_at": selected["end_at"],
+            "participants": [
+                {"user_id": "emp-2", "email": "ava.patel@northstar.example"},
+                {"user_id": "emp-3", "email": "marcus.chen@northstar.example"},
+            ],
+        },
+    )
+    assert manual.status_code == 200
+
+    before_confirmation = client.get("/api/v1/meetings/?user_id=emp-1").json()
+    stale = client.post(
+        "/api/v1/meetings/schedule/confirm",
+        json={"prompt": prompt, "start_at": selected["start_at"]},
+        headers={"X-User-Id": "emp-1"},
+    ).json()
+    assert stale["status"] == "conflict"
+    assert stale["meeting"] is None
+    assert stale["conflicts"]
+    assert stale["alternative_slots"]
+    assert len(client.get("/api/v1/meetings/?user_id=emp-1").json()) == len(before_confirmation)
+
+
+def test_manual_scheduled_meeting_rejects_double_booking(
+    client: TestClient,
+    seeded_directory,
+):
+    start_at = _next_weekday_at_ten_utc()
+    payload = {
+        "title": "Manual meeting",
+        "meeting_type": "scheduled",
+        "start_at": start_at.isoformat(),
+        "end_at": (start_at + timedelta(minutes=30)).isoformat(),
+        "participants": [{"user_id": "emp-2", "email": "ava.patel@northstar.example"}],
+    }
+    first = client.post("/api/v1/meetings/?organizer_id=emp-1", json=payload)
+    assert first.status_code == 200
+    duplicate = client.post("/api/v1/meetings/?organizer_id=emp-1", json=payload)
+    assert duplicate.status_code == 409
+    assert "ava.patel@northstar.example" in str(duplicate.json()["detail"])
+    assert len(client.get("/api/v1/meetings/?user_id=emp-1").json()) == 1
+
+
+def test_manual_conflict_detection_resolves_participant_by_user_id(
+    client: TestClient,
+    seeded_directory,
+):
+    start_at = _next_weekday_at_ten_utc()
+    payload = {
+        "title": "ID-only attendee meeting",
+        "meeting_type": "scheduled",
+        "start_at": start_at.isoformat(),
+        "end_at": (start_at + timedelta(minutes=30)).isoformat(),
+        "participants": [{"user_id": "emp-2"}],
+    }
+    assert client.post("/api/v1/meetings/?organizer_id=emp-1", json=payload).status_code == 200
+    duplicate = client.post("/api/v1/meetings/?organizer_id=emp-1", json=payload)
+    assert duplicate.status_code == 409
+    assert "ava.patel@northstar.example" in str(duplicate.json()["detail"])
+
+
 def test_api_does_not_report_completed_when_invitation_delivery_fails(
     client: TestClient,
     seeded_directory,

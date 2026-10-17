@@ -586,6 +586,12 @@ class NaturalLanguageScheduleRequest(BaseModel):
     organizer_id: str | None = None
 
 
+class ScheduleConfirmationRequest(BaseModel):
+    prompt: str = Field(..., min_length=1)
+    start_at: datetime
+    organizer_id: str | None = None
+
+
 class ConflictDetail(BaseModel):
     attendee_email: str
     conflicting_event_title: str
@@ -594,12 +600,18 @@ class ConflictDetail(BaseModel):
     attendee_name: str | None = None
 
 
+class AlternativeSlotDetail(BaseModel):
+    start_at: datetime
+    end_at: datetime
+
+
 class NaturalLanguageScheduleResponse(BaseModel):
     status: Literal["Completed", "needs_clarification", "conflict", "error"]
     meeting: MeetingResponse | None = None
     timezone: str
     clarifying_question: str | None = None
     conflicts: list[ConflictDetail] = Field(default_factory=list)
+    alternative_slots: list[AlternativeSlotDetail] = Field(default_factory=list)
     message: str | None = None
     resolved_attendees: list[EmployeeResponse] = Field(default_factory=list)
     invitations_sent: list[str] = Field(default_factory=list)
