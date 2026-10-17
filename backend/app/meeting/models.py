@@ -256,6 +256,18 @@ class Employee(Base):
         nullable=False,
         default=True,
     )
+    timezone_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    working_days: Mapped[list[int]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=lambda: [0, 1, 2, 3, 4],
+    )
+    working_hours_start: Mapped[str] = mapped_column(
+        String(5), nullable=False, default="09:00"
+    )
+    working_hours_end: Mapped[str] = mapped_column(
+        String(5), nullable=False, default="17:00"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

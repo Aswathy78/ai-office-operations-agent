@@ -71,10 +71,28 @@ export class MeetingApiError extends Error {
 async function readResponse<T>(response: Response): Promise<T> {
   const body: unknown = await response.json().catch(() => null)
   if (!response.ok) {
-    const detail =
-      typeof body === 'object' && body !== null && 'detail' in body &&
-      typeof body.detail === 'string'
+    const rawDetail =
+      typeof body === 'object' && body !== null && 'detail' in body
         ? body.detail
+        : null
+    const detail = typeof rawDetail === 'string'
+      ? rawDetail
+      : typeof rawDetail === 'object' && rawDetail !== null
+        ? [
+            'message' in rawDetail && typeof rawDetail.message === 'string' ? rawDetail.message : null,
+            'conflicts' in rawDetail && Array.isArray(rawDetail.conflicts)
+              ? rawDetail.conflicts.map((conflict) => {
+                  if (typeof conflict !== 'object' || conflict === null) return null
+                  const name = 'attendee_name' in conflict && typeof conflict.attendee_name === 'string'
+                    ? conflict.attendee_name
+                    : null
+                  const email = 'attendee_email' in conflict && typeof conflict.attendee_email === 'string'
+                    ? conflict.attendee_email
+                    : null
+                  return [name, email].filter(Boolean).join(' — ')
+                }).filter(Boolean).join(', ')
+              : null,
+          ].filter(Boolean).join(' ')
         : `Request failed (${response.status})`
     throw new MeetingApiError(detail, response.status)
   }
@@ -678,6 +696,25 @@ export function scheduleMeetingNL(
     },
     body: JSON.stringify({
       prompt,
+      organizer_id: actor.id,
+    }),
+  }).then((response) => readResponse<ScheduleResult>(response))
+}
+
+export function confirmMeetingSlot(
+  prompt: string,
+  startAt: string,
+  actor: { id: string; role?: string },
+): Promise<ScheduleResult> {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/schedule/confirm`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-User-Id': actor.id,
+    },
+    body: JSON.stringify({
+      prompt,
+      start_at: startAt,
       organizer_id: actor.id,
     }),
   }).then((response) => readResponse<ScheduleResult>(response))

@@ -139,9 +139,11 @@ class LocalCalendarProvider(CalendarProvider):
             return FreeBusyResult(has_conflicts=False, conflicts=[])
 
         # Map emails to employee records where available
-        employees_by_email: dict[str, Employee] = {
-            emp.email.lower(): emp
-            for emp in db.query(Employee).filter(Employee.email.in_(normalized_emails)).all()
+        employees_by_email = {
+            email.lower(): (name, employee_id)
+            for employee_id, name, email in db.query(
+                Employee.id, Employee.name, Employee.email
+            ).filter(Employee.email.in_(normalized_emails)).all()
         }
 
         # Find overlapping scheduled or in-progress meetings
@@ -163,6 +165,15 @@ class LocalCalendarProvider(CalendarProvider):
                 .all()
             )
             meeting_emails = {p.email.lower() for p in participants if p.email}
+            participant_user_ids = [p.user_id for p in participants if p.user_id]
+            if participant_user_ids:
+                meeting_emails.update(
+                    employee.email.lower()
+                    for employee in db.query(Employee)
+                    .filter(Employee.id.in_(participant_user_ids))
+                    .all()
+                    if employee.email
+                )
             # Also check if organizer matches an employee with a checked email
             organizer_emp = db.query(Employee).filter(Employee.id == meeting.organizer_id).first()
             if organizer_emp:
@@ -170,11 +181,11 @@ class LocalCalendarProvider(CalendarProvider):
 
             for email in normalized_emails:
                 if email in meeting_emails:
-                    emp = employees_by_email.get(email)
+                    employee_details = employees_by_email.get(email)
                     conflicts.append(
                         FreeBusyConflict(
                             attendee_email=email,
-                            attendee_name=emp.name if emp else None,
+                            attendee_name=employee_details[0] if employee_details else None,
                             conflicting_event_title=meeting.title,
                             conflicting_start_at=meeting.start_at,
                             conflicting_end_at=meeting.end_at,

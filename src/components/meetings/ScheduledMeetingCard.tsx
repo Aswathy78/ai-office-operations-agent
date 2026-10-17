@@ -3,6 +3,8 @@ import type { ScheduleResult } from '../../types/meeting'
 
 interface Props {
   result: ScheduleResult
+  onSelectAlternative?: (startAt: string) => void
+  confirming?: boolean
 }
 
 /**
@@ -54,7 +56,8 @@ function formatMeetingDateTimeRange(
   }
 }
 
-export function ScheduledMeetingCard({ result }: Props) {
+export function ScheduledMeetingCard({ result, onSelectAlternative, confirming = false }: Props) {
+  const alternativeSlots = result.alternative_slots ?? []
   if (result.status === 'Completed' && result.meeting) {
     const meeting = result.meeting
     const timeDisplay = formatMeetingDateTimeRange(
@@ -198,7 +201,7 @@ export function ScheduledMeetingCard({ result }: Props) {
         <div style={{ display: 'grid', gap: '8px' }}>
           {result.conflicts.map((conflict, index) => (
             <div key={index} className="scheduled-meeting-conflict-item">
-              <strong>{conflict.attendee_name || conflict.attendee_email}</strong> is busy with “
+              <strong>{conflict.attendee_name || conflict.attendee_email}</strong> — {conflict.attendee_email} is busy with “
               {conflict.conflicting_event_title}”
               <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }}>
                 {formatMeetingDateTimeRange(
@@ -211,9 +214,31 @@ export function ScheduledMeetingCard({ result }: Props) {
           ))}
         </div>
 
-        <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }}>
-          Please suggest another time or date to avoid these conflicts.
-        </div>
+        {alternativeSlots.length > 0 && (
+          <div className="scheduled-meeting-alternatives" aria-label="Alternative meeting slots">
+            <strong>Alternative slots</strong>
+            {alternativeSlots.map((slot) => (
+              <div key={slot.start_at} className="scheduled-meeting-alternative-item">
+                <span>{formatMeetingDateTimeRange(slot.start_at, slot.end_at, result.timezone)}</span>
+                {onSelectAlternative && (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    disabled={confirming}
+                    onClick={() => onSelectAlternative(slot.start_at)}
+                  >
+                    {confirming ? 'Checking…' : 'Choose slot'}
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+        {alternativeSlots.length === 0 && (
+          <div style={{ fontSize: '12px', color: 'var(--muted)', marginTop: '2px' }}>
+            No suitable alternatives were found. Please try another date or time.
+          </div>
+        )}
       </div>
     )
   }

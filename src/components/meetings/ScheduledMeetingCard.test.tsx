@@ -114,7 +114,7 @@ describe('ScheduledMeetingCard — UTC timestamp parsing', () => {
       screen.getByLabelText('Scheduled meeting details')
         .querySelector('.scheduled-meeting-meta-item span'),
     ).toHaveTextContent(expected)
-    expect(expected).toMatch(/10:00\s*AM.*10:30\s*AM/)
+    expect(expected).toMatch(/10:00\s*AM.*10:30\s*AM/i)
   })
 
   it('naive string and local-time string produce DIFFERENT times (validates fix is meaningful)', () => {

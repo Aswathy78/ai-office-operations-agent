@@ -62,13 +62,18 @@ from app.meeting.schemas import (
     MeetingMinutesResponse,
     MeetingMinutesUpdateRequest,
     ConflictDetail,
+    AlternativeSlotDetail,
     NaturalLanguageScheduleRequest,
+    ScheduleConfirmationRequest,
     NaturalLanguageScheduleResponse,
 )
 from app.meeting.scheduling_service import (
+    _fits_attendee_working_hours,
+    find_alternative_slots,
     get_organization_timezone,
     schedule_meeting_from_natural_language,
 )
+from app.meeting.calendar_provider import get_calendar_provider
 from app.meeting.service import (
     TERMINAL_STATUSES,
     _try_complete_meeting,
@@ -151,6 +156,110 @@ def create_new_meeting(
     db: Session = Depends(get_db),
     organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
 ):
+    if meeting.meeting_type == "scheduled":
+        attendee_emails = list(dict.fromkeys(
+            participant.email.strip().lower()
+            for participant in meeting.participants
+            if participant.email and participant.email.strip()
+        ))
+        for participant in meeting.participants:
+            if participant.user_id:
+                employee = db.query(Employee).filter(Employee.id == participant.user_id).first()
+                if employee and employee.email:
+                    attendee_emails.append(employee.email.lower())
+        attendee_emails = list(dict.fromkeys(attendee_emails))
+        if attendee_emails:
+            provider = get_calendar_provider()
+            organization_timezone = get_organization_timezone()
+            employee_ids = [
+                participant.user_id
+                for participant in meeting.participants
+                if participant.user_id
+            ]
+            if attendee_emails:
+                employee_ids.extend(
+                    employee_id
+                    for (employee_id,) in db.query(Employee.id)
+                    .filter(Employee.email.in_(attendee_emails))
+                    .all()
+                )
+            employee_ids = list(dict.fromkeys(employee_ids))
+            employees_by_email = {
+                employee.email.lower(): employee
+                for employee in (
+                    db.query(Employee).filter(Employee.id.in_(employee_ids)).all()
+                    if employee_ids
+                    else []
+                )
+                if employee.email and employee.email.lower() in attendee_emails
+            }
+            start_utc = meeting.start_at.replace(tzinfo=timezone.utc)
+            end_utc = meeting.end_at.replace(tzinfo=timezone.utc)
+            if not _fits_attendee_working_hours(
+                start_utc,
+                end_utc,
+                attendee_emails,
+                employees_by_email,
+                organization_timezone,
+            ):
+                alternatives = find_alternative_slots(
+                    db,
+                    start_utc,
+                    int((end_utc - start_utc).total_seconds() // 60),
+                    attendee_emails,
+                    provider=provider,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "The selected meeting time is outside attendee working hours.",
+                        "conflicts": [
+                            {
+                                "attendee_email": email,
+                                "attendee_name": employees_by_email[email].name if email in employees_by_email else None,
+                                "conflicting_event_title": "Outside working hours",
+                                "conflicting_start_at": start_utc.isoformat(),
+                                "conflicting_end_at": end_utc.isoformat(),
+                            }
+                            for email in attendee_emails
+                        ],
+                        "alternative_slots": [
+                            {"start_at": start.isoformat(), "end_at": end.isoformat()}
+                            for start, end in alternatives
+                        ],
+                    },
+                )
+            availability = provider.check_availability(
+                db, attendee_emails, start_utc, end_utc
+            )
+            if availability.has_conflicts:
+                alternatives = find_alternative_slots(
+                    db,
+                    meeting.start_at,
+                    int((meeting.end_at - meeting.start_at).total_seconds() // 60),
+                    attendee_emails,
+                    provider=provider,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "The selected meeting time conflicts with attendee availability.",
+                        "conflicts": [
+                            ConflictDetail(
+                                attendee_email=conflict.attendee_email,
+                                attendee_name=conflict.attendee_name,
+                                conflicting_event_title=conflict.conflicting_event_title,
+                                conflicting_start_at=conflict.conflicting_start_at,
+                                conflicting_end_at=conflict.conflicting_end_at,
+                            ).model_dump(mode="json")
+                            for conflict in availability.conflicts
+                        ],
+                        "alternative_slots": [
+                            {"start_at": start.isoformat(), "end_at": end.isoformat()}
+                            for start, end in alternatives
+                        ],
+                    },
+                )
     created = create_meeting(
         db=db,
         meeting_data=meeting,
@@ -352,6 +461,10 @@ def schedule_meeting_nl_endpoint(
         )
         for c in result.conflicts
     ]
+    alternative_slots = [
+        AlternativeSlotDetail(start_at=start, end_at=end)
+        for start, end in result.alternative_slots
+    ]
 
     attendees = [
         EmployeeResponse(
@@ -369,8 +482,75 @@ def schedule_meeting_nl_endpoint(
         timezone=str(get_organization_timezone()),
         clarifying_question=result.clarifying_question,
         conflicts=conflicts,
+        alternative_slots=alternative_slots,
         message=result.message,
         resolved_attendees=attendees,
+        invitations_sent=result.invitations_sent,
+        invitation_failures=result.invitation_failures,
+        calendar_provider=result.meeting.provider_name if result.meeting else "local",
+    )
+
+
+@router.post(
+    "/schedule/confirm",
+    response_model=NaturalLanguageScheduleResponse,
+    summary="Confirm a proposed meeting time after rechecking availability",
+)
+def confirm_meeting_slot_endpoint(
+    payload: ScheduleConfirmationRequest,
+    organizer_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    effective_organizer_id = payload.organizer_id or organizer_id or x_user_id or DEMO_ORGANIZER_ID
+    result = schedule_meeting_from_natural_language(
+        db=db,
+        prompt=payload.prompt,
+        organizer_id=effective_organizer_id,
+        selected_start_at=payload.start_at,
+    )
+    meeting_resp = None
+    if result.meeting:
+        meeting_resp = MeetingResponse(
+            id=result.meeting.id,
+            title=result.meeting.title,
+            agenda=result.meeting.description,
+            start_at=_as_utc(result.meeting.start_at),
+            end_at=_as_utc(result.meeting.end_at),
+            join_url=result.meeting.join_url or "",
+            status=result.meeting.status,
+            organizer_id=result.meeting.organizer_id,
+            timezone=str(get_organization_timezone()),
+        )
+    return NaturalLanguageScheduleResponse(
+        status=result.status,
+        meeting=meeting_resp,
+        timezone=str(get_organization_timezone()),
+        clarifying_question=result.clarifying_question,
+        conflicts=[
+            ConflictDetail(
+                attendee_email=conflict.attendee_email,
+                attendee_name=conflict.attendee_name,
+                conflicting_event_title=conflict.conflicting_event_title,
+                conflicting_start_at=conflict.conflicting_start_at,
+                conflicting_end_at=conflict.conflicting_end_at,
+            )
+            for conflict in result.conflicts
+        ],
+        alternative_slots=[
+            AlternativeSlotDetail(start_at=start, end_at=end)
+            for start, end in result.alternative_slots
+        ],
+        message=result.message,
+        resolved_attendees=[
+            EmployeeResponse(
+                id=attendee["id"],
+                name=attendee["name"],
+                email=attendee["email"],
+                team=attendee.get("team"),
+            )
+            for attendee in result.resolved_attendees
+        ],
         invitations_sent=result.invitations_sent,
         invitation_failures=result.invitation_failures,
         calendar_provider=result.meeting.provider_name if result.meeting else "local",

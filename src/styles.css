@@ -1143,3 +1143,24 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .scheduled-meeting-conflict-item strong {
   color: #92400e;
 }
+.scheduled-meeting-alternatives {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+}
+.scheduled-meeting-alternative-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+@media (max-width: 520px) {
+  .scheduled-meeting-alternative-item {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
