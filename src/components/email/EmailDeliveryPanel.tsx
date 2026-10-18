@@ -68,6 +68,22 @@ export function EmailDeliveryPanel({ actor }: { actor: TaskActor }) {
                 </span>
               </div>
               {draft.last_error && <p className="email-status-error">{draft.last_error}</p>}
+              {draft.bounces.length > 0 && (
+                <p className="task-manage-hint">
+                  Bounces: {draft.bounces.map((b) => `${b.recipient} (${b.type})`).join(', ')}
+                </p>
+              )}
+              {draft.status === 'failed' && (
+                <p className="task-manage-hint">
+                  {draft.escalated_at
+                    ? `Escalated ${formatTime(draft.escalated_at)} · ` +
+                      draft.notifications
+                        .filter((n) => n.channel === 'email')
+                        .map((n) => `${n.audience} ${n.status === 'sent' ? 'notified' : n.status}`)
+                        .join(', ')
+                    : 'Not yet escalated'}
+                </p>
+              )}
             </li>
           ))}
         </ul>

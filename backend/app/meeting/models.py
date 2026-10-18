@@ -1213,6 +1213,16 @@ class EmailDraft(Base):
     queued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     discarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Story 4.6: [{"recipient", "type": "hard" | "soft", "source": "smtp" | "dsn" | "ses",
+    #              "code", "diagnostic", "message_id", "recorded_at"}]
+    bounces: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # When the requester and admins were last told the e-mail failed.
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failure_notifications: Mapped[list["EmailFailureNotification"]] = relationship(
+        order_by="EmailFailureNotification.created_at",
+        lazy="selectin",
+        viewonly=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -1329,6 +1339,57 @@ class MeetingDelegate(Base):
         ForeignKey("meetings.id", ondelete="CASCADE"),
         nullable=True,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+EMAIL_NOTIFICATION_STATUSES = ("pending", "sent", "failed", "recorded")
+
+
+class EmailFailureNotification(Base):
+    """Someone told that an e-mail failed (Story 4.6 / FR-23).
+
+    One row per audience member per failure. ``channel`` "email" rows are sent
+    through the mail providers and retried if that fails; the "in_app" admin row
+    is always written, so a failure is never lost even when mail is down.
+    """
+
+    __tablename__ = "email_failure_notifications"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in EMAIL_NOTIFICATION_STATUSES)})",
+            name="ck_email_failure_notifications_status",
+        ),
+        CheckConstraint("audience IN ('requester', 'admin')", name="ck_email_failure_notifications_audience"),
+        CheckConstraint("channel IN ('email', 'in_app')", name="ck_email_failure_notifications_channel"),
+        UniqueConstraint("idempotency_key", name="uq_email_failure_notifications_idempotency_key"),
+        Index("ix_email_failure_notifications_draft", "draft_id", "created_at"),
+        Index("ix_email_failure_notifications_status_next", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("email_drafts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # Sequence of the EmailDraftEvent that moved the e-mail to Failed.
+    failure_event_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    audience: Mapped[str] = mapped_column(String(20), nullable=False)
+    channel: Mapped[str] = mapped_column(String(20), nullable=False)
+    recipient_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    subject: Mapped[str] = mapped_column(Text, nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 
 from main import app
 from app import email_delivery_service as delivery
-from app import email_dispatcher, email_draft_service, task_service
+from app import email_dispatcher, email_draft_service, email_providers, task_service
 from app.db.database import get_db
 from app.meeting.models import (
     EMAIL_DRAFT_STATUSES,
@@ -68,8 +68,6 @@ def _settings(monkeypatch, db_session):
     monkeypatch.setattr(email_draft_service, "generate_with_llm",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
     monkeypatch.setenv("ORGANIZATION_EMAIL_DOMAINS", "northstar.example")
-    monkeypatch.setenv("EMAIL_MAX_ATTEMPTS", "3")
-    monkeypatch.setenv("EMAIL_RETRY_BACKOFF_SECONDS", "30")
     for name, email in (("Rahul", "rahul@northstar.example"), ("Ava Patel", None), ("Marcus Chen", None)):
         db_session.add(Employee(
             id=str(uuid.uuid4()), name=name, team="Engineering", is_active=True,
@@ -78,15 +76,23 @@ def _settings(monkeypatch, db_session):
     db_session.commit()
 
 
+REQUESTER = "rahul@northstar.example"
+
+
 class FakeProvider:
-    """Stands in for task_service.deliver_email; scripted failures per recipient."""
+    """Stands in for email_providers.send_email; scripted failures per recipient."""
 
     def __init__(self, monkeypatch, failures: dict[str, list[Exception]] | None = None):
         self.failures = {k: list(v) for k, v in (failures or {}).items()}
         self.calls: list[str] = []
         self.observed_status: list[str] = []
         self.session_factory = None
-        monkeypatch.setattr(task_service, "deliver_email", self)
+        monkeypatch.setattr(email_providers, "send_email", self)
+
+    @property
+    def deliveries(self) -> list[str]:
+        """Calls for the e-mail itself (failure notifications to the requester excluded)."""
+        return [c for c in self.calls if c != REQUESTER]
 
     def __call__(self, recipient, subject, body):
         self.calls.append(recipient)
@@ -97,7 +103,7 @@ class FakeProvider:
         queue = self.failures.get(recipient)
         if queue:
             raise queue.pop(0)
-        return f"<{len(self.calls)}@provider.example>"
+        return email_providers.DeliveryReceipt(f"<{len(self.calls)}@provider.example>", "gmail")
 
 
 def _create(client, prompt="Email Ava and Marcus about the review meeting", actor=EMPLOYEE):
@@ -148,6 +154,7 @@ def test_only_lifecycle_transitions_are_allowed(db_session, source, target):
         ("draft", "approval"), ("draft", "queued"), ("approval", "draft"),
         ("queued", "sending"), ("queued", "draft"), ("sending", "sent"),
         ("sending", "failed"), ("sending", "retry"), ("retry", "sending"), ("failed", "retry"),
+        ("sent", "failed"),  # hard bounce reported after acceptance (Story 4.6)
     }
     if (source, target) in allowed:
         delivery.transition(db_session, draft, target, actor_id="tester")
@@ -316,21 +323,22 @@ def test_temporary_failure_goes_to_retry_with_backoff_then_sends(client, db_sess
 
 def test_retries_stop_after_max_attempts(client, db_session, monkeypatch):
     provider = FakeProvider(monkeypatch, {
-        "ava.patel@northstar.example": [OSError("timed out")] * 5,
+        "ava.patel@northstar.example": [OSError("timed out")] * 9,
     })
     draft = _create(client, "Email Ava about the review meeting")
     _send(client, draft["id"])
     now = datetime.now(timezone.utc)
-    for _ in range(5):
+    for _ in range(8):
         _dispatch(db_session, now=now)
         now += LATER
 
     failed = _get(client, draft["id"])
     assert failed["status"] == "failed"
-    assert failed["attempt_count"] == 3
-    assert len(provider.calls) == 3
-    assert [t for _, t in _history(client, draft["id"])][-6:] == [
-        "sending", "retry", "sending", "retry", "sending", "failed",
+    assert failed["attempt_count"] == 5  # FR-23: up to 5 attempts
+    assert len(provider.deliveries) == 5
+    assert [t for _, t in _history(client, draft["id"])][-10:] == [
+        "sending", "retry", "sending", "retry", "sending", "retry",
+        "sending", "retry", "sending", "failed",
     ]
 
 
@@ -369,7 +377,7 @@ def test_manual_retry_resends_only_undelivered_recipients(client, db_session, mo
     _dispatch(db_session)
 
     assert _get(client, draft["id"])["status"] == "sent"
-    assert provider.calls == [
+    assert provider.deliveries == [
         "ava.patel@northstar.example", "marcus.chen@northstar.example", "marcus.chen@northstar.example",
     ]
     assert [t for _, t in _history(client, draft["id"])][-4:] == ["failed", "retry", "sending", "sent"]
@@ -409,7 +417,7 @@ def test_interrupted_sending_is_recovered_as_failed(client, db_session, monkeypa
     recovered = _get(client, draft["id"])
     assert recovered["status"] == "failed"
     assert "interrupted" in recovered["last_error"]
-    assert provider.calls == []  # never re-sent blindly
+    assert provider.deliveries == []  # never re-sent blindly
 
 
 def test_only_one_dispatcher_can_claim_an_email(client, db_session, session_factory, monkeypatch):

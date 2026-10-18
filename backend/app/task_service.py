@@ -1,7 +1,5 @@
 """Task creation and assignment-email delivery for confirmed action items."""
 
-from email.message import EmailMessage
-from email.utils import make_msgid
 from datetime import datetime, timezone
 import logging
 import os
@@ -142,48 +140,15 @@ def send_email(recipient: str, subject: str, body: str) -> None:
 
 
 def deliver_email(recipient: str, subject: str, body: str) -> str:
-    """Hand one plain-text e-mail to the SMTP provider and return its Message-ID.
+    """Hand one plain-text e-mail to the mail provider and return its Message-ID.
 
-    Returns only once the provider has accepted the message for the recipient;
-    any refusal raises ``smtplib.SMTPRecipientsRefused`` instead.
+    Returns only once a provider has accepted the message for the recipient
+    (falling back to ``FALLBACK_SMTP_*`` when the primary is unavailable); any
+    refusal raises instead. See ``app.email_providers``.
     """
-    host = os.getenv("SMTP_HOST", "").strip()
-    sender = os.getenv("SMTP_FROM_EMAIL", "").strip()
-    if not host or not sender:
-        raise ValueError("SMTP_HOST and SMTP_FROM_EMAIL must be configured.")
+    from app import email_providers
 
-    try:
-        port = int(os.getenv("SMTP_PORT", "587"))
-    except ValueError as exc:
-        raise ValueError("SMTP_PORT must be an integer.") from exc
-
-    username = os.getenv("SMTP_USERNAME", "")
-    password = os.getenv("SMTP_PASSWORD", "")
-    if bool(username) != bool(password):
-        raise ValueError("Configure both SMTP_USERNAME and SMTP_PASSWORD.")
-
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = sender
-    message["To"] = recipient
-    message_id = make_msgid(domain=sender.rsplit("@", 1)[-1] or None)
-    message["Message-ID"] = message_id
-    message.set_content(body)
-
-    with smtplib.SMTP(host, port, timeout=10) as smtp:
-        if os.getenv("SMTP_USE_STARTTLS", "true").strip().lower() not in {
-            "0",
-            "false",
-            "no",
-        }:
-            smtp.starttls()
-        if username:
-            smtp.login(username, password)
-        refused = smtp.send_message(message)
-    if refused:
-        # The server answered but did not accept this recipient.
-        raise smtplib.SMTPRecipientsRefused(refused)
-    return message_id
+    return email_providers.send_email(recipient, subject, body).message_id
 
 
 def assignment_notification_key(task: Task) -> str:

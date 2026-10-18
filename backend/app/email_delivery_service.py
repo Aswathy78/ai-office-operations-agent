@@ -8,6 +8,14 @@ Every e-mail drafted from chat has exactly one status from this lifecycle::
     sending ──provider accepted every recipient──> sent
     sending ──temporary failure, attempts left──> retry ──backoff elapsed──> sending
     sending ──permanent failure or attempts used up──> failed ──user retries──> retry
+    sent ──hard bounce reported later──> failed
+
+Story 4.6 / FR-23 additions: transient errors are retried after 1, 5 and 15
+minutes (then every 15) for up to 5 attempts; the mail provider falls back to
+``FALLBACK_SMTP_*`` (e.g. SES) when the primary is unavailable; 5xx rejections
+and later bounce reports are recorded in ``EmailDraft.bounces``; and every move
+to ``failed`` notifies the requester and the administrators
+(``app.email_escalation_service``). A failed e-mail is never shown as sent.
 
 ``sent`` is only set after the SMTP provider has accepted the message for every
 recipient (``task_service.deliver_email`` returned a Message-ID). Each
@@ -32,7 +40,7 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app import task_service
+from app import email_providers
 from app.meeting.models import (
     EMAIL_DRAFT_STATUS_APPROVAL,
     EMAIL_DRAFT_STATUS_DRAFT,
@@ -60,7 +68,8 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     }),
     EMAIL_DRAFT_STATUS_RETRY: frozenset({EMAIL_DRAFT_STATUS_SENDING}),
     EMAIL_DRAFT_STATUS_FAILED: frozenset({EMAIL_DRAFT_STATUS_RETRY}),
-    EMAIL_DRAFT_STATUS_SENT: frozenset(),
+    # Only a hard bounce reported after acceptance moves a sent e-mail (to failed).
+    EMAIL_DRAFT_STATUS_SENT: frozenset({EMAIL_DRAFT_STATUS_FAILED}),
 }
 
 # Statuses that will change without the sender doing anything; the UI polls these.
@@ -94,20 +103,30 @@ def _as_utc(value: datetime | None) -> datetime | None:
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_MAX_ATTEMPTS = 5
+DEFAULT_BACKOFF_MINUTES = (1, 5, 15)
+
+
 def max_attempts() -> int:
     try:
-        return max(1, int(os.getenv("EMAIL_MAX_ATTEMPTS", "3")))
+        return max(1, int(os.getenv("EMAIL_MAX_ATTEMPTS", str(DEFAULT_MAX_ATTEMPTS))))
     except ValueError:
-        return 3
+        return DEFAULT_MAX_ATTEMPTS
+
+
+def backoff_schedule_minutes() -> tuple[float, ...]:
+    raw = os.getenv("EMAIL_RETRY_BACKOFF_MINUTES", "")
+    try:
+        schedule = tuple(float(part) for part in raw.split(",") if part.strip())
+    except ValueError:
+        schedule = ()
+    return tuple(m for m in schedule if m > 0) or DEFAULT_BACKOFF_MINUTES
 
 
 def retry_backoff_seconds(attempt: int) -> int:
-    """Delay before attempt ``attempt + 1``: base, 2x base, 4x base, ..."""
-    try:
-        base = max(1, int(os.getenv("EMAIL_RETRY_BACKOFF_SECONDS", "30")))
-    except ValueError:
-        base = 30
-    return base * 2 ** max(0, attempt - 1)
+    """Delay after failed attempt ``attempt``: 1, 5, 15 minutes, then 15 for every later retry."""
+    schedule = backoff_schedule_minutes()
+    return int(schedule[min(max(attempt, 1), len(schedule)) - 1] * 60)
 
 
 def stuck_sending_seconds() -> int:
@@ -265,6 +284,7 @@ class DispatchSummary:
     retry: int = 0
     failed: int = 0
     recovered: int = 0
+    notifications_retried: int = 0
     draft_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -274,6 +294,7 @@ class DispatchSummary:
             "retry": self.retry,
             "failed": self.failed,
             "recovered": self.recovered,
+            "notifications_retried": self.notifications_retried,
             "draft_ids": list(self.draft_ids),
         }
 
@@ -332,6 +353,58 @@ def _describe(error: Exception) -> str:
     return str(error) or type(error).__name__
 
 
+def _human_delay(seconds: int) -> str:
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{seconds}s"
+
+
+def _add_bounce(
+    draft: EmailDraft,
+    *,
+    recipient: str,
+    bounce_type: str,
+    source: str,
+    code: int | None,
+    diagnostic: str | None,
+    message_id: str | None,
+) -> dict:
+    entry = {
+        "recipient": recipient,
+        "type": bounce_type,
+        "source": source,
+        "code": code,
+        "diagnostic": (diagnostic or "")[:500] or None,
+        "message_id": message_id,
+        "recorded_at": _now().isoformat(),
+    }
+    draft.bounces = [*(draft.bounces or []), entry]
+    return entry
+
+
+def escalate(db: Session, draft: EmailDraft) -> None:
+    """Tell the requester and administrators that ``draft`` failed (never raises)."""
+    from app.email_escalation_service import notify_failure
+
+    try:
+        notify_failure(db, draft)
+    except Exception:  # noqa: BLE001 - the failure itself is already recorded
+        db.rollback()
+        logger.exception("Could not record failure notifications draft_id=%s", draft.id)
+
+
+def _retry_notifications(db: Session, now: datetime) -> int:
+    from app.email_escalation_service import retry_due_notifications
+
+    try:
+        return retry_due_notifications(db, now)
+    except Exception:  # noqa: BLE001
+        db.rollback()
+        logger.exception("Retrying failure notifications failed")
+        return 0
+
+
 def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
     """Send to every recipient not yet accepted; returns the resulting status.
 
@@ -349,7 +422,7 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
         if address.casefold() in accepted:
             continue
         try:
-            message_id = task_service.deliver_email(address, draft.subject, draft.body)
+            receipt = email_providers.send_email(address, draft.subject, draft.body)
         except (OSError, smtplib.SMTPException, ValueError) as exc:
             errors.append(exc)
             logger.warning("E-mail delivery failed draft_id=%s recipient=%s: %s",
@@ -357,12 +430,18 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
             results.append({
                 "email": address, "status": "failed", "error": _describe(exc)[:500],
                 "message_id": None, "accepted_at": None, "attempt": draft.attempt_count,
+                "provider": None, "fallback_used": False,
             })
+            code = email_providers.smtp_code(exc)
+            if code is not None and code >= 500:
+                _add_bounce(draft, recipient=address, bounce_type="hard", source="smtp",
+                            code=code, diagnostic=_describe(exc), message_id=None)
         else:
             results.append({
                 "email": address, "status": "sent", "error": None,
-                "message_id": message_id, "accepted_at": _now().isoformat(),
-                "attempt": draft.attempt_count,
+                "message_id": receipt.message_id, "accepted_at": _now().isoformat(),
+                "attempt": draft.attempt_count, "provider": receipt.provider,
+                "fallback_used": receipt.fallback_used,
             })
         # Persist each acceptance immediately so a crash never causes a re-send.
         draft.delivery_results = [dict(r) for r in results]
@@ -392,7 +471,7 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
             draft.next_attempt_at = max(finished, _as_utc(now)) + timedelta(seconds=delay)
             transition(db, draft, EMAIL_DRAFT_STATUS_RETRY, actor_id=SYSTEM_ACTOR,
                        detail=f"Attempt {draft.attempt_count} of {max_attempts()} failed "
-                              f"({failed_count} recipient(s)); retrying in {delay}s. "
+                              f"({failed_count} recipient(s)); retrying in {_human_delay(delay)}. "
                               f"{_describe(errors[-1])}"[:1000],
                        now=finished)
         else:
@@ -404,6 +483,8 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
                               f"{_describe(errors[-1])}"[:1000],
                        now=finished)
     db.commit()
+    if draft.status == EMAIL_DRAFT_STATUS_FAILED:
+        escalate(db, draft)
     return draft.status
 
 
@@ -425,6 +506,8 @@ def recover_stuck_sending(db: Session, now: datetime | None = None) -> int:
                    detail="Interrupted while sending.", now=now)
     if stuck:
         db.commit()
+        for draft in stuck:
+            escalate(db, draft)
     return len(stuck)
 
 
@@ -451,12 +534,18 @@ def process_due_emails(db: Session, now: datetime | None = None, limit: int = 20
         except Exception as exc:  # noqa: BLE001 - never leave an e-mail stuck in Sending
             db.rollback()
             draft = db.get(EmailDraft, draft_id)
+            db.refresh(draft)
             logger.exception("E-mail dispatch crashed draft_id=%s", draft_id)
+            if not can_transition(draft.status, EMAIL_DRAFT_STATUS_FAILED):
+                # Someone else already moved it (or the claim was lost); leave it as is.
+                logger.warning("Not marking draft_id=%s failed from status %s", draft_id, draft.status)
+                continue
             draft.last_error = f"Unexpected error while sending: {exc}"[:1000]
             draft.next_attempt_at = None
             transition(db, draft, EMAIL_DRAFT_STATUS_FAILED, actor_id=SYSTEM_ACTOR,
                        detail="Unexpected error while sending.")
             db.commit()
+            escalate(db, draft)
             outcome = EMAIL_DRAFT_STATUS_FAILED
         if outcome == EMAIL_DRAFT_STATUS_SENT:
             summary.sent += 1
@@ -464,6 +553,7 @@ def process_due_emails(db: Session, now: datetime | None = None, limit: int = 20
             summary.retry += 1
         else:
             summary.failed += 1
+    summary.notifications_retried = _retry_notifications(db, now)
     return summary
 
 

@@ -16,7 +16,34 @@ def _no_background_reminder_scheduler(monkeypatch):
     monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
 
 
-_MACHINE_SPECIFIC_ENV = ("WHISPER_DEVICE", "WHISPER_COMPUTE_TYPE")
+class _NoRealSmtp:
+    """Stands in for smtplib.SMTP so no test can ever reach a real mail server."""
+
+    def __init__(self, *args, **kwargs):
+        raise ConnectionRefusedError(
+            "Real SMTP is disabled in tests; patch app.email_providers.send_email or smtplib.SMTP."
+        )
+
+
+@pytest.fixture(autouse=True)
+def _block_real_smtp(monkeypatch):
+    # backend/.env holds the real Gmail SMTP settings and the app's startup loads it;
+    # a test that forgets to fake the provider must fail, not send real e-mail.
+    import smtplib
+
+    monkeypatch.setattr(smtplib, "SMTP", _NoRealSmtp)
+
+
+_MACHINE_SPECIFIC_ENV = (
+    "WHISPER_DEVICE",
+    "WHISPER_COMPUTE_TYPE",
+    # Delivery settings a developer may set locally; tests use the documented defaults.
+    "FALLBACK_SMTP_HOST",
+    "SYSTEM_ADMIN_EMAILS",
+    "EMAIL_BOUNCE_WEBHOOK_TOKEN",
+    "EMAIL_MAX_ATTEMPTS",
+    "EMAIL_RETRY_BACKOFF_MINUTES",
+)
 
 
 @pytest.fixture(autouse=True)

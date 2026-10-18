@@ -13,7 +13,14 @@ import {
   type EmailDraftStatus,
 } from '../../api/emailDrafts'
 import type { TaskActor } from '../../api/tasks'
-import { EmailHistory, EmailLifecycleTracker, EmailStatusDetail, EmailStatusPill } from './EmailLifecycle'
+import {
+  EmailBounces,
+  EmailFailureNotices,
+  EmailHistory,
+  EmailLifecycleTracker,
+  EmailStatusDetail,
+  EmailStatusPill,
+} from './EmailLifecycle'
 
 /** Content can change only before delivery starts; editing during Approval withdraws the request. */
 const EDITABLE: EmailDraftStatus[] = ['draft', 'approval']
@@ -59,7 +66,8 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
     (!draft.approval_required || approved)
   const canRetry = !readOnly && draft.status === 'failed'
   const canCancel = !readOnly && draft.status === 'queued'
-  const failedResults = draft.delivery_results.filter((result) => result.status === 'failed')
+  const failedResults = draft.delivery_results.filter((result) => result.status !== 'sent')
+  const fallbackResults = draft.delivery_results.filter((result) => result.status === 'sent' && result.fallback_used)
 
   async function run(action: () => Promise<EmailDraft>) {
     setBusy(true)
@@ -245,9 +253,19 @@ export function EmailDraftPreview({ draft, actor, groups = [], readOnly = false,
 
       {failedResults.length > 0 && (
         <p className="task-manage-feedback error">
-          Not delivered to: {failedResults.map((result) => `${result.email} (${result.error ?? 'error'})`).join(', ')}
+          Not delivered to: {failedResults
+            .map((result) => `${result.email} (${result.status === 'bounced' ? 'bounced: ' : ''}${result.error ?? 'error'})`)
+            .join(', ')}
         </p>
       )}
+      {fallbackResults.length > 0 && (
+        <p className="task-manage-hint">
+          Sent through the backup mail provider ({fallbackResults[0].provider}) for{' '}
+          {fallbackResults.map((result) => result.email).join(', ')} because the main provider was unavailable.
+        </p>
+      )}
+      <EmailBounces draft={draft} />
+      <EmailFailureNotices draft={draft} />
       {error && <p className="task-manage-feedback error" role="alert">{error}</p>}
 
       {!readOnly && (editable || canRetry || canCancel) && (

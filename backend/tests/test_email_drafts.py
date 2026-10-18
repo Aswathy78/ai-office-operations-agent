@@ -12,6 +12,7 @@ from main import app
 from app import email_draft_service
 from app.db.database import get_db
 from app.email_delivery_service import process_due_emails
+from app.email_providers import DeliveryReceipt
 from app.email_draft_service import scan_sensitive
 from app.meeting.models import Base, Employee
 
@@ -67,9 +68,9 @@ def sent_emails(monkeypatch):
 
     def accept(recipient, subject, body):
         sent.append((recipient, subject, body))
-        return f"<{len(sent)}@test.example>"
+        return DeliveryReceipt(f"<{len(sent)}@test.example>", "gmail")
 
-    monkeypatch.setattr("app.task_service.deliver_email", accept)
+    monkeypatch.setattr("app.email_providers.send_email", accept)
     return sent
 
 
@@ -305,9 +306,9 @@ def test_failed_delivery_can_be_retried_without_resending(client, db_session, di
         attempts.append(recipient)
         if recipient.startswith("marcus") and attempts.count(recipient) == 1:
             raise OSError("SMTP down")
-        return f"<{len(attempts)}@test.example>"
+        return DeliveryReceipt(f"<{len(attempts)}@test.example>", "gmail")
 
-    monkeypatch.setattr("app.task_service.deliver_email", flaky)
+    monkeypatch.setattr("app.email_providers.send_email", flaky)
     draft = _create(client, "Email Ava and Marcus about the review meeting")
 
     client.post(f"/api/v1/email-drafts/{draft['id']}/send", params=EMPLOYEE, json={"confirm": True})

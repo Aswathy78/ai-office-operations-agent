@@ -418,6 +418,9 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         last_error: null,
         acknowledged_sensitive: false,
         discarded_at: null,
+        bounces: [],
+        escalated_at: null,
+        notifications: [],
         created_at: '2026-10-16T12:00:00Z',
         updated_at: '2026-10-16T12:00:00Z',
       })

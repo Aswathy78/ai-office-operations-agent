@@ -1164,3 +1164,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
     flex-direction: column;
   }
 }
+
+/* Failed e-mail escalation (Story 4.6 / FR-23) */
+.email-escalation { display: grid; gap: 4px; padding: 10px 12px; border-radius: 8px; background: #f6f1ff; color: #4b2b85; font-size: 12px; }
+.email-escalation ul { margin: 0; padding-left: 18px; }
+.email-notice.failed { color: var(--danger); }

@@ -285,7 +285,10 @@ describe('TranscriptPanel', () => {
     expect(within(history).getByText('Welcome everyone.')).toBeInTheDocument()
     expect(within(history).getByText('Alicia')).toBeInTheDocument()
     expect(within(history).getByText('organizer-1')).toBeInTheDocument()
-    expect(within(history).getByText(/Oct 5, 2026/)).toBeInTheDocument()
+    // Format the expected time the same way the panel does, so the test passes in any locale/timezone.
+    const editedAt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+      .format(new Date(correction.created_at))
+    expect(within(history).getByText(editedAt)).toBeInTheDocument()
     expect(getMeetingTranscriptCorrections).toHaveBeenCalledWith('meeting-1', 'organizer-1')
 
     await user.click(screen.getByRole('button', { name: 'Transcript' }))

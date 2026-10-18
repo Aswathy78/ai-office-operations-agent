@@ -5,7 +5,7 @@ with the delivery lifecycle Draft / Approval / Queued / Sending / Sent / Failed 
 from datetime import datetime
 from typing import Callable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -31,8 +31,17 @@ from app.email_draft_service import (
     submit_for_approval,
     update_draft,
 )
+import hmac
+import os
+
 from app.email_delivery_service import InvalidEmailTransition, max_attempts
-from app.meeting.models import EmailDraft, EmailDraftEvent
+from app.email_escalation_service import (
+    SubscriptionConfirmation,
+    list_notifications,
+    parse_bounce_payload,
+    record_bounce,
+)
+from app.meeting.models import EmailDraft, EmailDraftEvent, EmailFailureNotification
 from app.meeting.schemas import TaskActorRole
 
 router = APIRouter(prefix="/api/v1/email-drafts", tags=["E-mail drafts"])
@@ -63,12 +72,48 @@ EmailLifecycleStatus = Literal["draft", "approval", "queued", "sending", "sent",
 
 class DeliveryResult(BaseModel):
     email: str
-    # "sent" only once the mail provider accepted the message for this recipient.
-    status: Literal["sent", "failed"]
+    # "sent" only once the mail provider accepted the message for this recipient;
+    # "bounced" when a hard bounce was reported for it afterwards.
+    status: Literal["sent", "failed", "bounced"]
     error: str | None = None
     message_id: str | None = None
     accepted_at: datetime | None = None
     attempt: int | None = None
+    provider: str | None = None
+    fallback_used: bool = False
+
+
+class BounceRecord(BaseModel):
+    recipient: str
+    type: Literal["hard", "soft"]
+    source: str
+    code: int | None = None
+    diagnostic: str | None = None
+    message_id: str | None = None
+    recorded_at: datetime
+
+
+class FailureNotificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    failure_event_sequence: int
+    audience: Literal["requester", "admin"]
+    channel: Literal["email", "in_app"]
+    recipient_email: str | None
+    status: Literal["pending", "sent", "failed", "recorded"]
+    attempts: int
+    next_attempt_at: datetime | None
+    provider: str | None
+    error: str | None
+    sent_at: datetime | None
+    created_at: datetime
+
+
+class BounceReportResponse(BaseModel):
+    recorded: int
+    unmatched: list[str]
+    draft_ids: list[str]
 
 
 class EmailDraftEventResponse(BaseModel):
@@ -119,6 +164,9 @@ class EmailDraftResponse(BaseModel):
     last_error: str | None
     acknowledged_sensitive: bool
     discarded_at: datetime | None
+    bounces: list[BounceRecord]
+    escalated_at: datetime | None
+    notifications: list[FailureNotificationResponse]
     created_at: datetime
     updated_at: datetime
 
@@ -162,6 +210,9 @@ def _response(draft: EmailDraft) -> EmailDraftResponse:
         recipient_count=len(draft.recipients),
         approval_threshold=approval_recipient_threshold(),
         max_attempts=max_attempts(),
+        notifications=[
+            FailureNotificationResponse.model_validate(n) for n in draft.failure_notifications
+        ],
     )
 
 
@@ -225,6 +276,51 @@ def get_email_delivery_issues(actor: EmailActor = Depends(_actor), db: Session =
     except EmailDraftDenied as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     return [_response(draft) for draft in drafts]
+
+
+@router.post("/bounces", response_model=BounceReportResponse)
+def report_email_bounce(
+    payload: dict = Body(...),
+    x_bounce_webhook_token: str | None = Header(default=None),
+    actor_id: str | None = Query(default=None),
+    actor_role: TaskActorRole | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Record bounce reports (generic JSON, or Amazon SES notifications via SNS).
+
+    Called by the mail provider's webhook with ``X-Bounce-Webhook-Token`` set to
+    ``EMAIL_BOUNCE_WEBHOOK_TOKEN``, or by an admin.
+    """
+    expected = os.getenv("EMAIL_BOUNCE_WEBHOOK_TOKEN", "")
+    token_ok = bool(expected) and bool(x_bounce_webhook_token) and hmac.compare_digest(
+        expected, x_bounce_webhook_token
+    )
+    if not token_ok and actor_role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "A valid bounce webhook token or an admin is required.")
+    try:
+        reports = parse_bounce_payload(payload)
+    except SubscriptionConfirmation as confirmation:
+        # Never auto-confirm: an admin confirms the subscription in the AWS console.
+        raise HTTPException(
+            status.HTTP_202_ACCEPTED,
+            f"SNS subscription confirmation received; confirm it at {confirmation.subscribe_url}",
+        ) from None
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+    recorded, unmatched, draft_ids = 0, [], []
+    for report in reports:
+        try:
+            draft = record_bounce(db, **report) if report.get("message_id") else None
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+        if draft is None:
+            unmatched.append(report.get("message_id") or "(no message id)")
+        else:
+            recorded += 1
+            if draft.id not in draft_ids:
+                draft_ids.append(draft.id)
+    return BounceReportResponse(recorded=recorded, unmatched=unmatched, draft_ids=draft_ids)
 
 
 @router.get("/{draft_id}", response_model=EmailDraftResponse)
@@ -306,3 +402,18 @@ def get_email_draft_events(draft_id: str, actor: EmailActor = Depends(_actor), d
     except EmailDraftDenied as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     return [EmailDraftEventResponse.model_validate(event) for event in events]
+
+
+@router.get("/{draft_id}/notifications", response_model=list[FailureNotificationResponse])
+def get_email_failure_notifications(
+    draft_id: str, actor: EmailActor = Depends(_actor), db: Session = Depends(get_db),
+):
+    """Who was told that this e-mail failed, and whether that message got through."""
+    try:
+        get_draft(db, draft_id, actor)
+    except EmailDraftNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except EmailDraftDenied as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
+    notifications: list[EmailFailureNotification] = list_notifications(db, draft_id)
+    return [FailureNotificationResponse.model_validate(n) for n in notifications]

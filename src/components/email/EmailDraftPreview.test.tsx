@@ -144,7 +144,7 @@ describe('EmailDraftPreview delivery lifecycle (FR-22)', () => {
     vi.mocked(retryEmailDraft).mockResolvedValue({ ...failed, status: 'retry' })
     render(<EmailDraftPreview draft={failed} actor={actor} />)
 
-    expect(screen.getByText(/Delivered to 1 of 2 recipients/)).toBeInTheDocument()
+    expect(screen.getByText(/delivered to 1 of 2 recipients/i)).toBeInTheDocument()
     expect(screen.getAllByText(/550 No such user/).length).toBeGreaterThan(0)
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(retryEmailDraft).toHaveBeenCalledWith('draft-1', actor)
@@ -176,5 +176,71 @@ describe('EmailDraftPreview delivery lifecycle (FR-22)', () => {
     )
     expect(screen.getByRole('button', { name: /send e-mail/i })).toBeEnabled()
     expect(screen.queryByRole('button', { name: 'Request approval' })).not.toBeInTheDocument()
+  })
+})
+
+describe('EmailDraftPreview failure escalation (FR-23)', () => {
+  const failedAfterBounce: EmailDraft = {
+    ...baseDraft,
+    status: 'failed',
+    attempt_count: 1,
+    sent_at: '2026-10-19T09:00:00Z',
+    escalated_at: '2026-10-19T09:05:00Z',
+    last_error: '1 of 2 recipient(s) bounced. marcus.chen@northstar.example: 550 5.1.1 Mailbox does not exist',
+    delivery_results: [
+      { email: 'ava.patel@northstar.example', status: 'sent', error: null, message_id: '<1@x>', provider: 'gmail' },
+      { email: 'marcus.chen@northstar.example', status: 'bounced', error: '550 5.1.1 Mailbox does not exist', message_id: '<2@x>' },
+    ],
+    bounces: [{
+      recipient: 'marcus.chen@northstar.example', type: 'hard', source: 'dsn', code: 550,
+      diagnostic: '550 5.1.1 Mailbox does not exist', message_id: '<2@x>', recorded_at: '2026-10-19T09:04:00Z',
+    }],
+    notifications: [
+      { id: 'n1', failure_event_sequence: 5, audience: 'requester', channel: 'email', recipient_email: 'rahul@northstar.example',
+        status: 'sent', attempts: 1, next_attempt_at: null, provider: 'gmail', error: null, sent_at: '2026-10-19T09:05:00Z', created_at: '2026-10-19T09:05:00Z' },
+      { id: 'n2', failure_event_sequence: 5, audience: 'admin', channel: 'email', recipient_email: 'it-admin@northstar.example',
+        status: 'failed', attempts: 1, next_attempt_at: '2026-10-19T09:06:00Z', provider: null, error: 'OSError: mail is down', sent_at: null, created_at: '2026-10-19T09:05:00Z' },
+      { id: 'n3', failure_event_sequence: 5, audience: 'admin', channel: 'in_app', recipient_email: null,
+        status: 'recorded', attempts: 0, next_attempt_at: null, provider: null, error: null, sent_at: null, created_at: '2026-10-19T09:05:00Z' },
+    ],
+  }
+
+  it('shows a bounced e-mail as Failed — never Sent — with the bounce and who was notified', () => {
+    render(<EmailDraftPreview draft={failedAfterBounce} actor={actor} />)
+
+    const pill = document.querySelector('.email-status[data-status]')
+    expect(pill).toHaveAttribute('data-status', 'failed')
+    expect(pill).toHaveTextContent('Failed')
+    expect(screen.queryByText(/Accepted by the mail provider for all/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Failed after 1 attempt: delivered to 1 of 2 recipients\. You and the administrator have been notified\./)).toBeInTheDocument()
+
+    const bounces = screen.getByRole('region', { name: 'Bounces' })
+    expect(bounces).toHaveTextContent('hard')
+    expect(bounces).toHaveTextContent('marcus.chen@northstar.example')
+    expect(bounces).toHaveTextContent('550')
+
+    const notices = screen.getByRole('region', { name: 'Failure notifications' })
+    expect(notices).toHaveTextContent('Requester <rahul@northstar.example>: notified')
+    expect(notices).toHaveTextContent('Administrator <it-admin@northstar.example>: notification failed — will retry')
+    expect(notices).toHaveTextContent('Administrator (in-app): shown on admin dashboard')
+    expect(screen.getByText(/bounced: 550 5\.1\.1 Mailbox does not exist/)).toBeInTheDocument()
+  })
+
+  it('says when the backup provider delivered the e-mail', () => {
+    render(
+      <EmailDraftPreview
+        draft={{
+          ...baseDraft,
+          status: 'sent',
+          sent_at: '2026-10-19T09:00:00Z',
+          delivery_results: baseDraft.recipients.map((r, i) => ({
+            email: r.email, status: 'sent' as const, error: null, message_id: `<${i}@x>`, provider: 'ses', fallback_used: true,
+          })),
+        }}
+        actor={actor}
+      />,
+    )
+    expect(screen.getByText(/using the backup mail provider/)).toBeInTheDocument()
+    expect(screen.getByText(/Sent through the backup mail provider \(ses\)/)).toBeInTheDocument()
   })
 })

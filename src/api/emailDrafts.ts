@@ -37,12 +37,44 @@ export function isInFlight(draft: Pick<EmailDraft, 'status'>): boolean {
 
 export interface EmailDeliveryResult {
   email: string
-  /** "sent" only once the mail provider accepted the message for this recipient. */
-  status: 'sent' | 'failed'
+  /**
+   * "sent" only once the mail provider accepted the message for this recipient;
+   * "bounced" when a hard bounce was reported for it afterwards.
+   */
+  status: 'sent' | 'failed' | 'bounced'
   error: string | null
   message_id?: string | null
   accepted_at?: string | null
   attempt?: number | null
+  /** Which provider accepted it, e.g. "gmail", or "ses" when the fallback was used. */
+  provider?: string | null
+  fallback_used?: boolean
+}
+
+export interface EmailBounce {
+  recipient: string
+  type: 'hard' | 'soft'
+  source: string
+  code: number | null
+  diagnostic: string | null
+  message_id: string | null
+  recorded_at: string
+}
+
+/** Someone told that the e-mail failed (FR-23). */
+export interface EmailFailureNotice {
+  id: string
+  failure_event_sequence: number
+  audience: 'requester' | 'admin'
+  channel: 'email' | 'in_app'
+  recipient_email: string | null
+  status: 'pending' | 'sent' | 'failed' | 'recorded'
+  attempts: number
+  next_attempt_at: string | null
+  provider: string | null
+  error: string | null
+  sent_at: string | null
+  created_at: string
 }
 
 export interface EmailDraftEvent {
@@ -104,6 +136,9 @@ export interface EmailDraft {
   last_error: string | null
   acknowledged_sensitive: boolean
   discarded_at: string | null
+  bounces: EmailBounce[]
+  escalated_at: string | null
+  notifications: EmailFailureNotice[]
   created_at: string
   updated_at: string
 }
