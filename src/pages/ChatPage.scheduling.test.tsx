@@ -59,6 +59,15 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
       expect(isMeetingSchedulingIntent('Schedule demo with the sales team')).toBe(true)
     })
 
+    it('detects meeting rescheduling intent correctly', () => {
+      expect(isMeetingSchedulingIntent("Move tomorrow's meeting to 3 PM")).toBe(true)
+      expect(isMeetingSchedulingIntent('Reschedule my project meeting to 4 PM')).toBe(true)
+      expect(isMeetingSchedulingIntent('Shift the meeting to Friday at 10 AM')).toBe(true)
+      expect(isMeetingSchedulingIntent("Push tomorrow's sync to 2 PM")).toBe(true)
+      expect(isMeetingSchedulingIntent('Postpone the standup to next Monday')).toBe(true)
+      expect(isMeetingSchedulingIntent("Change the time of tomorrow's meeting to 3 PM")).toBe(true)
+    })
+
     it('preserves email drafting intent', () => {
       expect(isMeetingSchedulingIntent("Email the development team a reminder about tomorrow's sprint demo at 10am")).toBe(false)
       expect(isMeetingSchedulingIntent('Send an email to Ava about the deadline')).toBe(false)
@@ -103,12 +112,13 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
           'rahul@northstar.example',
         ],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
       vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(mockResult)
 
       render(<ChatPage />)
 
-      const textarea = screen.getByLabelText('Message the AI Assistant')
+      const textarea = screen.getByLabelText('Message Corporate Chatbox')
       await user.type(textarea, 'Schedule a project meeting tomorrow at 10 AM with the development team')
       await user.click(screen.getByRole('button', { name: 'Send message' }))
 
@@ -141,6 +151,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         resolved_attendees: [],
         invitations_sent: [],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
       const successResult: ScheduleResult = {
         status: 'Completed',
@@ -164,6 +175,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         ],
         invitations_sent: ['ava.patel@northstar.example'],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
 
       vi.mocked(scheduleMeetingNL)
@@ -172,7 +184,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
 
       render(<ChatPage />)
 
-      const textarea = screen.getByLabelText('Message the AI Assistant')
+      const textarea = screen.getByLabelText('Message Corporate Chatbox')
       await user.type(textarea, 'Schedule a project meeting tomorrow at 10 AM')
       await user.click(screen.getByRole('button', { name: 'Send message' }))
 
@@ -225,12 +237,13 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         resolved_attendees: [],
         invitations_sent: [],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
       vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(conflictResult)
 
       render(<ChatPage />)
 
-      const textarea = screen.getByLabelText('Message the AI Assistant')
+      const textarea = screen.getByLabelText('Message Corporate Chatbox')
       await user.type(textarea, 'Schedule a meeting tomorrow at 10 AM with Marcus Chen')
       await user.click(screen.getByRole('button', { name: 'Send message' }))
 
@@ -266,6 +279,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         resolved_attendees: [],
         invitations_sent: [],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
       const completedResult: ScheduleResult = {
         ...conflictResult,
@@ -290,7 +304,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
 
       render(<ChatPage />)
       const prompt = 'Schedule a project meeting tomorrow at 10 AM with Ava Patel'
-      await user.type(screen.getByLabelText('Message the AI Assistant'), prompt)
+      await user.type(screen.getByLabelText('Message Corporate Chatbox'), prompt)
       await user.click(screen.getByRole('button', { name: 'Send message' }))
       const conflictCard = await screen.findByLabelText('Meeting scheduling conflict')
       expect(within(conflictCard).getByText('Not Scheduled')).toBeInTheDocument()
@@ -336,6 +350,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
         resolved_attendees: [],
         invitations_sent: [],
         invitation_failures: [],
+        reschedule_request_id: null,
       }
       const staleResult: ScheduleResult = {
         ...initialConflict,
@@ -350,7 +365,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
       vi.mocked(confirmMeetingSlot).mockResolvedValueOnce(staleResult)
 
       render(<ChatPage />)
-      await user.type(screen.getByLabelText('Message the AI Assistant'), prompt)
+      await user.type(screen.getByLabelText('Message Corporate Chatbox'), prompt)
       await user.click(screen.getByRole('button', { name: 'Send message' }))
       const conflictCard = await screen.findByLabelText('Meeting scheduling conflict')
       await user.click(within(conflictCard).getByRole('button', { name: 'Choose slot' }))
@@ -409,7 +424,7 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
 
       render(<ChatPage />)
 
-      const textarea = screen.getByLabelText('Message the AI Assistant')
+      const textarea = screen.getByLabelText('Message Corporate Chatbox')
       await user.type(textarea, "Email the development team a reminder about tomorrow's sprint demo at 10am")
       await user.click(screen.getByRole('button', { name: 'Send message' }))
 
@@ -418,5 +433,172 @@ describe('User Story 5.1 — Natural-Language Meeting Scheduling in Chat', () =>
       })
       expect(scheduleMeetingNL).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe('User Story 5.3 — Meeting Rescheduling by Chat', () => {
+  beforeEach(() => {
+    vi.mocked(getDirectoryGroups).mockResolvedValue([{ name: 'Engineering', count: 5 }])
+    vi.mocked(getMyEmailDrafts).mockResolvedValue([])
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  const baseResult: ScheduleResult = {
+    status: 'Completed',
+    timezone: 'Asia/Kolkata',
+    meeting: null,
+    clarifying_question: null,
+    conflicts: [],
+    alternative_slots: [],
+    message: null,
+    resolved_attendees: [],
+    invitations_sent: [],
+    invitation_failures: [],
+    reschedule_request_id: null,
+  }
+
+  it('routes a "Move" command to scheduleMeetingNL (not createEmailDraft)', async () => {
+    const user = userEvent.setup()
+    const pendingResult: ScheduleResult = {
+      ...baseResult,
+      status: 'pending_approval',
+      message: 'Your reschedule request has been submitted and is awaiting organizer approval.',
+      reschedule_request_id: 'req-abc123',
+    }
+    vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(pendingResult)
+
+    render(<ChatPage />)
+    const textarea = screen.getByLabelText('Message Corporate Chatbox')
+    await user.type(textarea, "Move tomorrow's meeting to 3 PM")
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    expect(scheduleMeetingNL).toHaveBeenCalledWith(
+      "Move tomorrow's meeting to 3 PM",
+      expect.objectContaining({ id: 'emp-1' }),
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/reschedule request has been submitted/i)).toBeInTheDocument()
+    })
+  })
+
+  it('displays pending_approval message without a success meeting card', async () => {
+    const user = userEvent.setup()
+    const pendingResult: ScheduleResult = {
+      ...baseResult,
+      status: 'pending_approval',
+      message: 'Reschedule pending organizer approval. (Request ID: req-xyz)',
+      reschedule_request_id: 'req-xyz',
+    }
+    vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(pendingResult)
+
+    render(<ChatPage />)
+    await user.type(screen.getByLabelText('Message Corporate Chatbox'), 'Shift the meeting to Friday at 10 AM')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Reschedule pending organizer approval/i)).toBeInTheDocument()
+    })
+    // No success card (no Completed status)
+    expect(screen.queryByLabelText('Scheduled meeting details')).not.toBeInTheDocument()
+    // Specifically no ScheduledMeetingCard
+    expect(screen.queryByText('Join Meeting Link')).not.toBeInTheDocument()
+  })
+
+  it('shows clarifying question when multiple meetings match the reschedule prompt', async () => {
+    const user = userEvent.setup()
+    const clarResult: ScheduleResult = {
+      ...baseResult,
+      status: 'needs_clarification',
+      clarifying_question: 'Which meeting did you want to reschedule — "Sprint Planning" at 10 AM or "Design Review" at 2 PM?',
+    }
+    vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(clarResult)
+
+    render(<ChatPage />)
+    await user.type(screen.getByLabelText('Message Corporate Chatbox'), 'Move my meeting tomorrow to 3 PM')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Which meeting did you want to reschedule/i)).toBeInTheDocument()
+    })
+    expect(scheduleMeetingNL).toHaveBeenCalledTimes(1)
+  })
+
+  it('displays conflict information for a reschedule time-slot conflict', async () => {
+    const user = userEvent.setup()
+    const conflictResult: ScheduleResult = {
+      ...baseResult,
+      status: 'conflict',
+      message: 'The new time conflicts with an existing meeting for some attendees.',
+      conflicts: [
+        {
+          attendee_email: 'ava.patel@northstar.example',
+          attendee_name: 'Ava Patel',
+          conflicting_event_title: 'Design Review',
+          conflicting_start_at: '2026-10-18T08:30:00Z',
+          conflicting_end_at: '2026-10-18T09:00:00Z',
+        },
+      ],
+    }
+    vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(conflictResult)
+
+    render(<ChatPage />)
+    await user.type(screen.getByLabelText('Message Corporate Chatbox'), 'Reschedule sprint planning to 2 PM')
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    const conflictCard = await screen.findByLabelText('Meeting scheduling conflict')
+    expect(conflictCard).toBeInTheDocument()
+    expect(screen.getByText(/conflicts with an existing meeting/i)).toBeInTheDocument()
+  })
+
+  it('handles API failure gracefully for reschedule commands', async () => {
+    const user = userEvent.setup()
+    vi.mocked(scheduleMeetingNL).mockRejectedValueOnce(new Error('Network error'))
+
+    render(<ChatPage />)
+    await user.type(screen.getByLabelText('Message Corporate Chatbox'), "Move tomorrow's standup to 4 PM")
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(screen.getByText(/Network error/i)).toBeInTheDocument()
+    })
+  })
+
+  it('preserves normal scheduling behavior for non-reschedule prompts', async () => {
+    const user = userEvent.setup()
+    const completedResult: ScheduleResult = {
+      ...baseResult,
+      status: 'Completed',
+      meeting: {
+        id: 'meet-1',
+        title: 'New Meeting',
+        start_at: '2026-10-20T04:30:00Z',
+        end_at: '2026-10-20T05:00:00Z',
+        join_url: 'http://localhost:5173/meetings/meet-1',
+        status: 'scheduled',
+        organizer_id: 'emp-1',
+        timezone: 'Asia/Kolkata',
+        agenda: null,
+      },
+      message: 'Scheduled "New Meeting" successfully.',
+      resolved_attendees: [{ id: 'emp-2', name: 'Ava Patel', email: 'ava@example.com', team: null }],
+      invitations_sent: ['ava@example.com'],
+    }
+    vi.mocked(scheduleMeetingNL).mockResolvedValueOnce(completedResult)
+
+    render(<ChatPage />)
+    await user.type(
+      screen.getByLabelText('Message Corporate Chatbox'),
+      'Schedule a meeting with Ava tomorrow at 10 AM',
+    )
+    await user.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('New Meeting')).toBeInTheDocument()
+    })
+    expect(scheduleMeetingNL).toHaveBeenCalledTimes(1)
   })
 })

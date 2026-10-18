@@ -24,6 +24,11 @@ vi.mock('../api/tasks', () => ({
   getReassignmentRequests: vi.fn(),
 }))
 
+vi.mock('../api/meetings', () => ({
+  getRescheduleRequests: vi.fn().mockResolvedValue([]),
+  decideRescheduleRequest: vi.fn(),
+}))
+
 vi.mock('../api/emailDrafts', () => ({
   EMAIL_STATUS_POLL_MS: 2000,
   decideEmailDraft: vi.fn(),
@@ -90,5 +95,72 @@ describe('ApprovalsPage', () => {
 
     expect(await screen.findByText('Awaiting HR / Operations or Admin approval.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  })
+})
+
+describe('ApprovalsPage — Meeting Reschedule Approvals Section', () => {
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  const pendingReschedule = {
+    id: 'reschedule-1',
+    meeting_id: 'meeting-1',
+    meeting_title: 'Sprint Planning',
+    requested_by: 'emp-3',
+    requested_by_name: 'Marcus Chen',
+    new_start_at: '2026-10-20T08:30:00Z',
+    new_end_at: '2026-10-20T09:00:00Z',
+    reason: 'Conflicting deadline',
+    status: 'pending' as const,
+    decided_by: null,
+    decided_at: null,
+    decision_note: null,
+    created_at: '2026-10-18T10:00:00Z',
+    attendee_count: 5,
+  }
+
+  it('displays pending reschedule request and allows organizer to approve', async () => {
+    const { getRescheduleRequests, decideRescheduleRequest } = await import('../api/meetings')
+    authValue.user = demoUsers.hr_operations
+    vi.mocked(getRescheduleRequests).mockResolvedValue([pendingReschedule])
+    vi.mocked(getReassignmentRequests).mockResolvedValue([])
+    vi.mocked(decideRescheduleRequest).mockResolvedValue({
+      request: { ...pendingReschedule, status: 'approved', decided_by: 'emp-org', decided_at: '2026-10-18T11:00:00Z' },
+      meeting: null,
+      message: 'Sprint Planning rescheduled successfully.',
+    })
+
+    const user = userEvent.setup()
+    render(<ApprovalsPage />)
+
+    expect(await screen.findByText('Sprint Planning')).toBeInTheDocument()
+    expect(screen.getByText(/Marcus Chen/)).toBeInTheDocument()
+    expect(screen.getByText(/5 attendees/i)).toBeInTheDocument()
+
+    const approveBtn = screen.getByRole('button', { name: /approve/i })
+    await user.click(approveBtn)
+
+    expect(decideRescheduleRequest).toHaveBeenCalledWith(
+      'reschedule-1',
+      'approve',
+      '',
+      expect.objectContaining({ id: demoUsers.hr_operations.id }),
+    )
+    expect(await screen.findByText(/Sprint Planning rescheduled successfully/i)).toBeInTheDocument()
+  })
+
+  it('shows empty state when there are no reschedule requests', async () => {
+    const { getRescheduleRequests } = await import('../api/meetings')
+    authValue.user = demoUsers.hr_operations
+    vi.mocked(getRescheduleRequests).mockResolvedValue([])
+    vi.mocked(getReassignmentRequests).mockResolvedValue([])
+
+    render(<ApprovalsPage />)
+
+    expect(
+      await screen.findByText(/no pending reschedule requests/i),
+    ).toBeInTheDocument()
   })
 })

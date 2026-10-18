@@ -20,6 +20,8 @@ from app.meeting.models import (
     MeetingRecordingConsent,
     MeetingTranscript,
     MeetingTranscriptCorrection,
+    MeetingDelegate,
+    MeetingRescheduleRequest,
     GUEST_STATUS_PENDING,
     GUEST_STATUS_ADMITTED,
     GUEST_STATUS_REJECTED,
@@ -1474,3 +1476,81 @@ def get_meeting_transcript_corrections(
         MeetingTranscriptCorrection.segment_index,
         MeetingTranscriptCorrection.id,
     ).all()
+
+
+def is_authorized_rescheduler(db: Session, meeting: Meeting, user_id: str) -> bool:
+    """Check if user_id is the meeting organizer or an authorized delegate (Story 5.3)."""
+    if not user_id:
+        return False
+    if meeting.organizer_id == user_id:
+        return True
+
+    # Check explicit meeting delegate table (organizer-wide or meeting-specific)
+    delegate_entry = (
+        db.query(MeetingDelegate)
+        .filter(
+            MeetingDelegate.organizer_id == meeting.organizer_id,
+            MeetingDelegate.delegate_id == user_id,
+            (MeetingDelegate.meeting_id == meeting.id) | (MeetingDelegate.meeting_id.is_(None)),
+        )
+        .first()
+    )
+    if delegate_entry is not None:
+        return True
+
+    # Check meeting participant with role 'delegate'
+    participant_delegate = (
+        db.query(MeetingParticipant)
+        .filter(
+            MeetingParticipant.meeting_id == meeting.id,
+            MeetingParticipant.user_id == user_id,
+            MeetingParticipant.role == "delegate",
+        )
+        .first()
+    )
+    return participant_delegate is not None
+
+
+def add_meeting_delegate(
+    db: Session,
+    organizer_id: str,
+    delegate_id: str,
+    meeting_id: str | None = None,
+) -> MeetingDelegate:
+    """Explicitly authorize an employee as a delegate for meeting management (Story 5.3)."""
+    existing = (
+        db.query(MeetingDelegate)
+        .filter(
+            MeetingDelegate.organizer_id == organizer_id,
+            MeetingDelegate.delegate_id == delegate_id,
+            MeetingDelegate.meeting_id == meeting_id,
+        )
+        .first()
+    )
+    if existing is not None:
+        return existing
+
+    record = MeetingDelegate(
+        id=str(uuid.uuid4()),
+        organizer_id=organizer_id,
+        delegate_id=delegate_id,
+        meeting_id=meeting_id,
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def get_meeting_delegates(
+    db: Session,
+    organizer_id: str,
+    meeting_id: str | None = None,
+) -> list[MeetingDelegate]:
+    """List authorized delegates for an organizer or meeting."""
+    query = db.query(MeetingDelegate).filter(MeetingDelegate.organizer_id == organizer_id)
+    if meeting_id is not None:
+        query = query.filter(
+            (MeetingDelegate.meeting_id == meeting_id) | (MeetingDelegate.meeting_id.is_(None))
+        )
+    return query.all()

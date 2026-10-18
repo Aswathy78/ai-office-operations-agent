@@ -16,6 +16,8 @@ from app.meeting.models import (
     MeetingAttendanceLog,
     MeetingSummary,
     Task,
+    MeetingRescheduleRequest,
+    MeetingDelegate,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_APPROVAL_REQUIRED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_CONFIRMED,
     MEETING_ACTION_ITEM_OWNERSHIP_STATUS_PROPOSED,
@@ -66,17 +68,26 @@ from app.meeting.schemas import (
     NaturalLanguageScheduleRequest,
     ScheduleConfirmationRequest,
     NaturalLanguageScheduleResponse,
+    MeetingRescheduleRequestResponse,
+    RescheduleDecisionRequest,
+    RescheduleDecisionResponse,
+    MeetingDelegateCreateRequest,
+    MeetingDelegateResponse,
 )
 from app.meeting.scheduling_service import (
     _fits_attendee_working_hours,
     find_alternative_slots,
     get_organization_timezone,
     schedule_meeting_from_natural_language,
+    reschedule_meeting_from_natural_language,
+    decide_reschedule_request,
 )
 from app.meeting.calendar_provider import get_calendar_provider
 from app.meeting.service import (
     TERMINAL_STATUSES,
     _try_complete_meeting,
+    add_meeting_delegate,
+    get_meeting_delegates,
     create_meeting,
     decide_guest_request,
     delete_meeting,
@@ -488,6 +499,7 @@ def schedule_meeting_nl_endpoint(
         invitations_sent=result.invitations_sent,
         invitation_failures=result.invitation_failures,
         calendar_provider=result.meeting.provider_name if result.meeting else "local",
+        reschedule_request_id=result.reschedule_request_id,
     )
 
 
@@ -554,7 +566,275 @@ def confirm_meeting_slot_endpoint(
         invitations_sent=result.invitations_sent,
         invitation_failures=result.invitation_failures,
         calendar_provider=result.meeting.provider_name if result.meeting else "local",
+        reschedule_request_id=result.reschedule_request_id,
     )
+
+
+@router.post(
+    "/reschedule/natural-language",
+    response_model=NaturalLanguageScheduleResponse,
+    summary="Reschedule a meeting using natural language (Story 5.3)",
+)
+def reschedule_meeting_nl_endpoint(
+    payload: NaturalLanguageScheduleRequest,
+    requester_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    db: Session = Depends(get_db),
+):
+    effective_requester_id = payload.organizer_id or requester_id or x_user_id or DEMO_ORGANIZER_ID
+    result = reschedule_meeting_from_natural_language(
+        db=db,
+        prompt=payload.prompt,
+        requester_id=effective_requester_id,
+    )
+
+    meeting_resp = None
+    if result.meeting:
+        meeting_resp = MeetingResponse(
+            id=result.meeting.id,
+            title=result.meeting.title,
+            agenda=result.meeting.description,
+            start_at=_as_utc(result.meeting.start_at),
+            end_at=_as_utc(result.meeting.end_at),
+            join_url=result.meeting.join_url or "",
+            status=result.meeting.status,
+            organizer_id=result.meeting.organizer_id,
+            timezone=str(get_organization_timezone()),
+        )
+
+    conflicts = [
+        ConflictDetail(
+            attendee_email=c.attendee_email,
+            conflicting_event_title=c.conflicting_event_title,
+            conflicting_start_at=c.conflicting_start_at,
+            conflicting_end_at=c.conflicting_end_at,
+            attendee_name=c.attendee_name,
+        )
+        for c in result.conflicts
+    ]
+    alternative_slots = [
+        AlternativeSlotDetail(start_at=start, end_at=end)
+        for start, end in result.alternative_slots
+    ]
+
+    attendees = [
+        EmployeeResponse(
+            id=a["id"],
+            name=a["name"],
+            email=a["email"],
+            team=a.get("team"),
+        )
+        for a in result.resolved_attendees
+    ]
+
+    return NaturalLanguageScheduleResponse(
+        status=result.status,
+        meeting=meeting_resp,
+        timezone=str(get_organization_timezone()),
+        clarifying_question=result.clarifying_question,
+        conflicts=conflicts,
+        alternative_slots=alternative_slots,
+        message=result.message,
+        resolved_attendees=attendees,
+        invitations_sent=result.invitations_sent,
+        invitation_failures=result.invitation_failures,
+        calendar_provider=result.meeting.provider_name if result.meeting else "local",
+        reschedule_request_id=result.reschedule_request_id,
+    )
+
+
+@router.get(
+    "/reschedule-requests",
+    response_model=list[MeetingRescheduleRequestResponse],
+    summary="List meeting reschedule requests (Story 5.3)",
+)
+def list_reschedule_requests_endpoint(
+    status_filter: str | None = Query(default=None, alias="status"),
+    meeting_id: str | None = Query(default=None),
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    organizer_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    effective_user_id = x_user_id or organizer_id
+    query = db.query(MeetingRescheduleRequest)
+    if meeting_id is not None:
+        query = query.filter(MeetingRescheduleRequest.meeting_id == meeting_id)
+    if status_filter:
+        query = query.filter(MeetingRescheduleRequest.status == status_filter)
+
+    if effective_user_id:
+        delegate_org_tuples = (
+            db.query(MeetingDelegate.organizer_id)
+            .filter(MeetingDelegate.delegate_id == effective_user_id)
+            .all()
+        )
+        delegate_org_ids = [o[0] for o in delegate_org_tuples]
+        delegate_meeting_tuples = (
+            db.query(MeetingDelegate.meeting_id)
+            .filter(
+                MeetingDelegate.delegate_id == effective_user_id,
+                MeetingDelegate.meeting_id.is_not(None),
+            )
+            .all()
+        )
+        delegate_meeting_ids = [m[0] for m in delegate_meeting_tuples]
+
+        query = query.join(Meeting, MeetingRescheduleRequest.meeting_id == Meeting.id).filter(
+            (Meeting.organizer_id == effective_user_id)
+            | (Meeting.organizer_id.in_(delegate_org_ids))
+            | (Meeting.id.in_(delegate_meeting_ids))
+            | (MeetingRescheduleRequest.requested_by == effective_user_id)
+        )
+
+    records = query.order_by(MeetingRescheduleRequest.created_at.desc()).all()
+    results = []
+    for r in records:
+        meeting = db.query(Meeting).filter(Meeting.id == r.meeting_id).first()
+        requester = db.query(Employee).filter(Employee.id == r.requested_by).first()
+        part_count = (
+            db.query(MeetingParticipant)
+            .filter(MeetingParticipant.meeting_id == r.meeting_id)
+            .count()
+        )
+        results.append(
+            MeetingRescheduleRequestResponse(
+                id=r.id,
+                meeting_id=r.meeting_id,
+                meeting_title=meeting.title if meeting else "Meeting",
+                requested_by=r.requested_by,
+                requested_by_name=requester.name if requester else None,
+                new_start_at=_as_utc(r.new_start_at),
+                new_end_at=_as_utc(r.new_end_at),
+                reason=r.reason,
+                status=r.status,
+                decided_by=r.decided_by,
+                decided_at=r.decided_at,
+                decision_note=r.decision_note,
+                created_at=r.created_at,
+                attendee_count=part_count,
+            )
+        )
+    return results
+
+
+@router.post(
+    "/reschedule-requests/{request_id}/decide",
+    response_model=RescheduleDecisionResponse,
+    summary="Approve or reject a meeting reschedule request (Story 5.3)",
+)
+def decide_reschedule_request_endpoint(
+    request_id: str,
+    payload: RescheduleDecisionRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    organizer_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    effective_user_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
+    req, updated_event, message = decide_reschedule_request(
+        db=db,
+        request_id=request_id,
+        decision=payload.decision,
+        decider_id=effective_user_id,
+        decision_note=payload.note,
+    )
+    meeting = db.query(Meeting).filter(Meeting.id == req.meeting_id).first()
+    requester = db.query(Employee).filter(Employee.id == req.requested_by).first()
+    part_count = (
+        db.query(MeetingParticipant)
+        .filter(MeetingParticipant.meeting_id == req.meeting_id)
+        .count()
+    )
+    req_resp = MeetingRescheduleRequestResponse(
+        id=req.id,
+        meeting_id=req.meeting_id,
+        meeting_title=meeting.title if meeting else "Meeting",
+        requested_by=req.requested_by,
+        requested_by_name=requester.name if requester else None,
+        new_start_at=_as_utc(req.new_start_at),
+        new_end_at=_as_utc(req.new_end_at),
+        reason=req.reason,
+        status=req.status,
+        decided_by=req.decided_by,
+        decided_at=req.decided_at,
+        decision_note=req.decision_note,
+        created_at=req.created_at,
+        attendee_count=part_count,
+    )
+    meeting_resp = None
+    if updated_event:
+        meeting_resp = MeetingResponse(
+            id=updated_event.id,
+            title=updated_event.title,
+            agenda=updated_event.description,
+            start_at=_as_utc(updated_event.start_at),
+            end_at=_as_utc(updated_event.end_at),
+            join_url=updated_event.join_url or "",
+            status=updated_event.status,
+            organizer_id=updated_event.organizer_id,
+            timezone=str(get_organization_timezone()),
+        )
+    return RescheduleDecisionResponse(
+        request=req_resp,
+        meeting=meeting_resp,
+        message=message,
+    )
+
+
+@router.post(
+    "/delegates",
+    response_model=MeetingDelegateResponse,
+    summary="Authorize a delegate for meeting scheduling and rescheduling (Story 5.3)",
+)
+def add_meeting_delegate_endpoint(
+    payload: MeetingDelegateCreateRequest,
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    organizer_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    effective_organizer_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
+    delegate_record = add_meeting_delegate(
+        db=db,
+        organizer_id=effective_organizer_id,
+        delegate_id=payload.delegate_id,
+        meeting_id=payload.meeting_id,
+    )
+    return MeetingDelegateResponse(
+        id=delegate_record.id,
+        organizer_id=delegate_record.organizer_id,
+        delegate_id=delegate_record.delegate_id,
+        meeting_id=delegate_record.meeting_id,
+        created_at=delegate_record.created_at,
+    )
+
+
+@router.get(
+    "/delegates",
+    response_model=list[MeetingDelegateResponse],
+    summary="List authorized meeting delegates (Story 5.3)",
+)
+def list_meeting_delegates_endpoint(
+    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    organizer_id: str | None = Query(default=None),
+    meeting_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    effective_organizer_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
+    delegates = get_meeting_delegates(
+        db=db,
+        organizer_id=effective_organizer_id,
+        meeting_id=meeting_id,
+    )
+    return [
+        MeetingDelegateResponse(
+            id=d.id,
+            organizer_id=d.organizer_id,
+            delegate_id=d.delegate_id,
+            meeting_id=d.meeting_id,
+            created_at=d.created_at,
+        )
+        for d in delegates
+    ]
+
 
 
 @router.get("/{meeting_id}/validate", response_model=MeetingValidationResponse)

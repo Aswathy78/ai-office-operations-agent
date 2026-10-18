@@ -16,7 +16,7 @@ export function HomePage() {
           <p>Keep meetings, tasks and AI-powered office operations in one place.</p>
         </div>
         <div className="hero-actions">
-          <Link className="button ghost-button" to="/chat"><MessageSquarePlus size={17} aria-hidden="true" /> Ask AI Assistant</Link>
+          <Link className="button ghost-button" to="/chat"><MessageSquarePlus size={17} aria-hidden="true" /> Open Corporate Chatbox</Link>
         </div>
       </section>
 

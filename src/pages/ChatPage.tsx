@@ -26,16 +26,24 @@ export function isMeetingSchedulingIntent(prompt: string): boolean {
     return false
   }
 
+  // Rescheduling / move verbs — route through the same scheduling API which
+  // auto-detects reschedule intent on the backend
+  const rescheduleVerb =
+    /\b(move|shift|push|postpone|reschedule|change\s+the\s+time\s+of)\b/i
+  if (rescheduleVerb.test(p)) {
+    return true
+  }
+
   // Common scheduling verbs paired with meeting nouns or time/participants
-  const schedulingVerb = /\b(schedule|reschedule|book|set\s+up|arrange|organize)\b/i
+  const schedulingVerb = /\b(schedule|book|set\s+up|arrange|organize)\b/i
   const meetingNoun = /\b(meeting|sync|call|discussion|demo|session|catchup|catch-up|1-on-1|one-on-one)\b/i
 
   if (schedulingVerb.test(p) && meetingNoun.test(p)) {
     return true
   }
 
-  // Starts with "schedule ", "reschedule ", or "book "
-  if (/^(schedule|reschedule|book)\b/i.test(p)) {
+  // Starts with "schedule ", "book "
+  if (/^(schedule|book)\b/i.test(p)) {
     return true
   }
 
@@ -55,9 +63,9 @@ type ChatMessage =
     }
 
 const SUGGESTIONS = [
+  "Move tomorrow's meeting to 3 PM",
   'Schedule a project meeting tomorrow at 10 AM with the development team',
   "Email the development team a reminder about tomorrow's sprint demo at 10am",
-  'Let the finance team know I will be on leave next Monday and Tuesday',
   'Email Ava about the deadline for the Q3 report on Friday',
 ]
 
@@ -91,8 +99,7 @@ export function ChatPage() {
       id: 'welcome',
       role: 'assistant',
       text:
-        'Hi! Tell me what you need — draft an e-mail or schedule a meeting with a person or team such as ' +
-        '"the development team". I will prepare everything for you to review; nothing is sent until you confirm.',
+        'Hi! Tell me what you need — draft an e-mail, schedule a meeting, or reschedule an existing meeting (e.g. "Move tomorrow\'s meeting to 3 PM"). I will prepare everything for you to review; nothing is sent until you confirm.',
     },
   ])
   const [drafts, setDrafts] = useState<Record<string, EmailDraft>>({})
@@ -178,6 +185,23 @@ export function ChatPage() {
               role: 'assistant',
               text: result.message || `Scheduled "${result.meeting?.title}" successfully.`,
               meetingResult: result,
+            },
+          ])
+        } else if (result.status === 'pending_approval') {
+          lastClarificationPromptRef.current = null
+          const reqId = result.reschedule_request_id
+          setMessages((current) => [
+            ...current,
+            {
+              id: nextId(),
+              role: 'assistant',
+              text:
+                result.message ||
+                `Your reschedule request has been submitted for organizer approval.${
+                  reqId ? ` (Request ID: ${reqId})` : ''
+                }`,
+              tone: 'warning' as const,
+              // Do NOT attach meetingResult — no success card should be shown
             },
           ])
         } else if (result.status === 'needs_clarification') {
@@ -307,13 +331,13 @@ export function ChatPage() {
 
   return (
     <div className="chat-layout">
-      <section className="chat-panel" aria-label="AI Assistant chat">
+      <section className="chat-panel" aria-label="Corporate Chatbox">
         <header className="chat-header">
           <div className="meeting-icon" aria-hidden="true"><MessageSquare size={21} /></div>
           <div>
-            <p className="eyebrow">AI Assistant</p>
-            <h2>AI Assistant</h2>
-            <p>Draft e-mails or schedule meetings with colleagues using natural language.</p>
+            <p className="eyebrow">Corporate Chatbox</p>
+            <h2>Corporate Chatbox</h2>
+            <p>Draft e-mails, schedule or reschedule meetings with colleagues using natural language.</p>
           </div>
         </header>
 
@@ -364,8 +388,8 @@ export function ChatPage() {
 
         <form className="chat-input" onSubmit={onSubmit}>
           <textarea
-            aria-label="Message the AI Assistant"
-            placeholder="e.g. Schedule a meeting tomorrow at 10 AM with the development team, or draft an email..."
+            aria-label="Message Corporate Chatbox"
+            placeholder="e.g. Move tomorrow's meeting to 3 PM, schedule a project meeting tomorrow at 10 AM, or draft an email..."
             value={input}
             rows={2}
             onChange={(event) => setInput(event.target.value)}

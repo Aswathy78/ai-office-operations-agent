@@ -45,6 +45,7 @@ function makeScheduledResult(
     invitations_sent: [],
     invitation_failures: [],
     calendar_provider: 'local',
+    reschedule_request_id: null,
   }
 }
 
@@ -158,6 +159,7 @@ describe('ScheduledMeetingCard — UTC timestamp parsing', () => {
       resolved_attendees: [],
       invitations_sent: [],
       invitation_failures: [],
+      reschedule_request_id: null,
     }
     render(<ScheduledMeetingCard result={result} />)
     expect(screen.getByLabelText('Meeting scheduling conflict')).toBeInTheDocument()
