@@ -177,6 +177,15 @@ MINUTES_DELIVERY_STATUSES = (
     MINUTES_DELIVERY_STATUS_FAILED,
 )
 
+RESCHEDULE_STATUS_PENDING = "pending"
+RESCHEDULE_STATUS_APPROVED = "approved"
+RESCHEDULE_STATUS_REJECTED = "rejected"
+RESCHEDULE_STATUSES = (
+    RESCHEDULE_STATUS_PENDING,
+    RESCHEDULE_STATUS_APPROVED,
+    RESCHEDULE_STATUS_REJECTED,
+)
+
 
 class Base(DeclarativeBase):
     pass
@@ -215,6 +224,11 @@ class Meeting(Base):
     )
 
     minutes: Mapped[list["MeetingMinutes"]] = relationship(
+        back_populates="meeting",
+        cascade="all, delete-orphan",
+    )
+
+    reschedule_requests: Mapped[list["MeetingRescheduleRequest"]] = relationship(
         back_populates="meeting",
         cascade="all, delete-orphan",
     )
@@ -1233,6 +1247,88 @@ class EmailDraftEvent(Base):
     # Who caused it: a user id, or "system" for the dispatcher.
     actor_id: Mapped[str] = mapped_column(String(100), nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MeetingRescheduleRequest(Base):
+    """A meeting reschedule request awaiting organizer approval (Story 5.3)."""
+
+    __tablename__ = "meeting_reschedule_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ("
+            + ", ".join(repr(value) for value in RESCHEDULE_STATUSES)
+            + ")",
+            name="ck_meeting_reschedule_requests_status",
+        ),
+        Index("ix_meeting_reschedule_requests_meeting_status", "meeting_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    requested_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    requester_role: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    new_start_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    new_end_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=RESCHEDULE_STATUS_PENDING,
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    meeting: Mapped["Meeting"] = relationship(
+        "Meeting",
+        back_populates="reschedule_requests",
+    )
+
+
+class MeetingDelegate(Base):
+    """Explicit authorized delegates for meeting scheduling/rescheduling (Story 5.3)."""
+
+    __tablename__ = "meeting_delegates"
+    __table_args__ = (
+        UniqueConstraint(
+            "organizer_id",
+            "delegate_id",
+            "meeting_id",
+            name="uq_meeting_delegates_organizer_delegate_meeting",
+        ),
+        Index("ix_meeting_delegates_organizer_delegate", "organizer_id", "delegate_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    organizer_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delegate_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    meeting_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

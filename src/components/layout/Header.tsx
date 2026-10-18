@@ -6,7 +6,7 @@ import { ROLE_LABELS } from '../../types/user'
 const titles: Record<string, string> = {
   '/home': 'Home',
   '/meetings': 'Meetings',
-  '/chat': 'AI Assistant',
+  '/chat': 'Corporate Chatbox',
   '/tasks': 'My Tasks',
   '/calendar': 'Calendar',
   '/dashboard': 'Dashboard',
@@ -45,7 +45,7 @@ export function Header() {
       <div className="topbar-actions">
         <Link className="chat-shortcut" to="/chat">
           <MessageSquare size={17} aria-hidden="true" />
-          <span>Open AI Assistant</span>
+          <span>Open Corporate Chatbox</span>
         </Link>
         <button className="icon-button" type="button" aria-label="Notifications (placeholder)">
           <Bell size={19} aria-hidden="true" />

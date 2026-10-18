@@ -495,10 +495,11 @@ export interface ConflictDetail {
  * - `Completed`           – meeting and attendee invitations completed successfully
  * - `needs_clarification` – one question returned; re-prompt the user
  * - `conflict`            – free/busy clash; `conflicts` is populated
+ * - `pending_approval`    – reschedule queued, organizer must approve
  * - `error`               – backend error; `message` explains
  */
 export interface ScheduleResult {
-  status: 'Completed' | 'needs_clarification' | 'conflict' | 'error'
+  status: 'Completed' | 'needs_clarification' | 'conflict' | 'pending_approval' | 'error'
   meeting: ScheduledMeetingDetail | null
   clarifying_question: string | null
   conflicts: ConflictDetail[]
@@ -509,4 +510,33 @@ export interface ScheduleResult {
   invitation_failures: string[]
   calendar_provider?: string
   timezone: string
+  /** Populated when status is `pending_approval` */
+  reschedule_request_id: string | null
+}
+
+// ── Story 5.3: Meeting Rescheduling by Chat ────────────────────────────────────
+
+/** A pending/decided meeting reschedule request (GET /api/v1/meetings/reschedule-requests) */
+export interface MeetingRescheduleRequest {
+  id: string
+  meeting_id: string
+  meeting_title: string
+  requested_by: string
+  requested_by_name: string | null
+  new_start_at: string
+  new_end_at: string
+  reason: string | null
+  status: 'pending' | 'approved' | 'rejected'
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string | null
+  created_at: string
+  attendee_count: number
+}
+
+/** Response from POST /api/v1/meetings/reschedule-requests/{id}/decide */
+export interface RescheduleDecisionResponse {
+  request: MeetingRescheduleRequest
+  meeting: ScheduledMeetingDetail | null
+  message: string
 }

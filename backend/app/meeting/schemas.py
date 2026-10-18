@@ -606,7 +606,7 @@ class AlternativeSlotDetail(BaseModel):
 
 
 class NaturalLanguageScheduleResponse(BaseModel):
-    status: Literal["Completed", "needs_clarification", "conflict", "error"]
+    status: Literal["Completed", "needs_clarification", "conflict", "error", "pending_approval"]
     meeting: MeetingResponse | None = None
     timezone: str
     clarifying_question: str | None = None
@@ -617,6 +617,49 @@ class NaturalLanguageScheduleResponse(BaseModel):
     invitations_sent: list[str] = Field(default_factory=list)
     invitation_failures: list[str] = Field(default_factory=list)
     calendar_provider: str = "local"
+    reschedule_request_id: str | None = None
+
+
+class MeetingRescheduleRequestResponse(BaseModel):
+    id: str
+    meeting_id: str
+    meeting_title: str
+    requested_by: str
+    requested_by_name: str | None = None
+    new_start_at: datetime
+    new_end_at: datetime
+    reason: str | None = None
+    status: str
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_note: str | None = None
+    created_at: datetime
+    attendee_count: int = 0
+
+
+class RescheduleDecisionRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    note: str | None = None
+
+
+class RescheduleDecisionResponse(BaseModel):
+    request: MeetingRescheduleRequestResponse
+    meeting: MeetingResponse | None = None
+    message: str
+
+
+class MeetingDelegateCreateRequest(BaseModel):
+    delegate_id: str
+    meeting_id: str | None = None
+
+
+class MeetingDelegateResponse(BaseModel):
+    id: str
+    organizer_id: str
+    delegate_id: str
+    meeting_id: str | None = None
+    created_at: datetime
 
 
 TaskResponse.model_rebuild()
+

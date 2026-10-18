@@ -24,6 +24,8 @@ import type {
   ScheduleResult,
   ScheduledMeetingDetail,
   ConflictDetail,
+  MeetingRescheduleRequest,
+  RescheduleDecisionResponse,
 } from '../types/meeting'
 
 export let API_BASE_URL =
@@ -718,4 +720,46 @@ export function confirmMeetingSlot(
       organizer_id: actor.id,
     }),
   }).then((response) => readResponse<ScheduleResult>(response))
+}
+
+// ── Story 5.3: Meeting Reschedule Approvals ──────────────────────────────
+
+/**
+ * GET /api/v1/meetings/reschedule-requests
+ * Returns reschedule requests visible to the authenticated user.
+ * Organizers see requests for their meetings; others see their own requests.
+ */
+export function getRescheduleRequests(
+  actor: { id: string },
+  statusFilter?: 'pending' | '',
+): Promise<MeetingRescheduleRequest[]> {
+  const query = new URLSearchParams()
+  if (statusFilter) query.set('status', statusFilter)
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/reschedule-requests${query.toString() ? `?${query}` : ''}`,
+    { headers: { 'X-User-Id': actor.id } },
+  ).then((response) => readResponse<MeetingRescheduleRequest[]>(response))
+}
+
+/**
+ * POST /api/v1/meetings/reschedule-requests/{request_id}/decide
+ * Approve or reject a pending reschedule request (organizer only).
+ */
+export function decideRescheduleRequest(
+  requestId: string,
+  decision: 'approve' | 'reject',
+  note: string,
+  actor: { id: string },
+): Promise<RescheduleDecisionResponse> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/reschedule-requests/${encodeURIComponent(requestId)}/decide`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-User-Id': actor.id,
+      },
+      body: JSON.stringify({ decision, note: note || null }),
+    },
+  ).then((response) => readResponse<RescheduleDecisionResponse>(response))
 }

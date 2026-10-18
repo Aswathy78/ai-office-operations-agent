@@ -87,6 +87,7 @@ class CalendarProvider(ABC):
         attendee_emails: list[str],
         start_at: datetime,
         end_at: datetime,
+        exclude_meeting_id: str | None = None,
     ) -> FreeBusyResult:
         """Check whether any of the attendees have conflicting commitments during the requested window."""
 
@@ -102,6 +103,18 @@ class CalendarProvider(ABC):
         agenda: str | None = None,
     ) -> CalendarEvent:
         """Create a scheduled event in the calendar provider."""
+
+    @abstractmethod
+    def update_event(
+        self,
+        db: Session,
+        event_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        title: str | None = None,
+        agenda: str | None = None,
+    ) -> CalendarEvent:
+        """Update an existing scheduled event in the calendar provider."""
 
     @abstractmethod
     def get_event(
@@ -129,6 +142,7 @@ class LocalCalendarProvider(CalendarProvider):
         attendee_emails: list[str],
         start_at: datetime,
         end_at: datetime,
+        exclude_meeting_id: str | None = None,
     ) -> FreeBusyResult:
         search_start = _to_naive_utc(start_at)
         search_end = _to_naive_utc(end_at)
@@ -147,15 +161,14 @@ class LocalCalendarProvider(CalendarProvider):
         }
 
         # Find overlapping scheduled or in-progress meetings
-        overlapping_meetings = (
-            db.query(Meeting)
-            .filter(
-                Meeting.status.in_(["scheduled", "instant", "in_progress"]),
-                Meeting.start_at < search_end,
-                Meeting.end_at > search_start,
-            )
-            .all()
+        query = db.query(Meeting).filter(
+            Meeting.status.in_(["scheduled", "instant", "in_progress"]),
+            Meeting.start_at < search_end,
+            Meeting.end_at > search_start,
         )
+        if exclude_meeting_id:
+            query = query.filter(Meeting.id != exclude_meeting_id)
+        overlapping_meetings = query.all()
 
         for meeting in overlapping_meetings:
             # Check participants of this overlapping meeting
@@ -263,6 +276,80 @@ class LocalCalendarProvider(CalendarProvider):
             )
 
         return created_event
+
+    def update_event(
+        self,
+        db: Session,
+        event_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        title: str | None = None,
+        agenda: str | None = None,
+    ) -> CalendarEvent:
+        meeting = db.query(Meeting).filter(Meeting.id == event_id).first()
+        if meeting is None:
+            raise CalendarProviderError(f"Meeting with ID '{event_id}' not found.")
+
+        # Collect attendee emails for conflict check
+        participants = (
+            db.query(MeetingParticipant)
+            .filter(MeetingParticipant.meeting_id == meeting.id)
+            .all()
+        )
+        attendee_emails = [p.email for p in participants if p.email]
+        organizer_emp = db.query(Employee).filter(Employee.id == meeting.organizer_id).first()
+        if organizer_emp and organizer_emp.email:
+            attendee_emails.append(organizer_emp.email)
+
+        normalized_emails = list(dict.fromkeys(
+            e.strip().lower() for e in attendee_emails if e and e.strip()
+        ))
+
+        # Check availability, excluding this meeting from its own conflict check
+        availability = self.check_availability(
+            db=db,
+            attendee_emails=normalized_emails,
+            start_at=start_at,
+            end_at=end_at,
+            exclude_meeting_id=meeting.id,
+        )
+        if availability.has_conflicts:
+            conflict_names = [
+                c.attendee_name or c.attendee_email for c in availability.conflicts
+            ]
+            raise CalendarConflictError(
+                f"Scheduling conflict detected for {', '.join(conflict_names)}.",
+                conflicts=availability.conflicts,
+            )
+
+        persisted_start = _to_naive_utc(start_at)
+        persisted_end = _to_naive_utc(end_at)
+
+        meeting.start_at = persisted_start
+        meeting.end_at = persisted_end
+        if title is not None:
+            meeting.title = title
+        if agenda is not None:
+            meeting.agenda = agenda
+
+        db.commit()
+        db.refresh(meeting)
+
+        # Requirement 7: Read the event back from the calendar provider and verify the new start and end times
+        updated_event = self.get_event(db, meeting.id)
+        if updated_event is None:
+            raise CalendarProviderError(
+                f"Failed to verify event update in calendar provider for meeting {meeting.id}."
+            )
+
+        readback_start = _to_naive_utc(updated_event.start_at)
+        readback_end = _to_naive_utc(updated_event.end_at)
+        if readback_start != persisted_start or readback_end != persisted_end:
+            raise CalendarProviderError(
+                f"Provider read-back verification failed for meeting {meeting.id}: timestamps do not match."
+            )
+
+        return updated_event
 
     def get_event(
         self,
