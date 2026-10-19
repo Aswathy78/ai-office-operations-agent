@@ -7,6 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
+from app.auth_service import AuthenticatedPrincipal
+from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import (
     Employee,
@@ -257,13 +259,13 @@ def retry_assignment_email(task_id: str, db: Session = Depends(get_db)):
 
 
 def _actor(
-    actor_id: str = Query(min_length=1),
-    actor_role: TaskActorRole = Query(),
-    actor_team: str | None = Query(default=None),
-    actor_email: str | None = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ) -> TaskActor:
     return TaskActor(
-        id=actor_id, role=actor_role, team=actor_team or None, email=actor_email or None,
+        id=principal.user_id,
+        role=principal.role,
+        team=principal.team,
+        email=principal.email,
     )
 
 

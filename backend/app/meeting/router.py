@@ -3,9 +3,20 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.auth_service import (
+    AuthConfigurationError,
+    AuthenticatedPrincipal,
+    InvalidAccessToken,
+    authenticate_access_token,
+)
+from app.authentication import (
+    authenticated_actor_id,
+    require_authenticated_actor_id,
+    require_authenticated_principal,
+)
 from app.db.database import get_db
 from app.meeting.models import (
     Employee,
@@ -37,6 +48,7 @@ from app.meeting.schemas import (
     GuestJoinRequest,
     GuestRequestResponse,
     MeetingCreate,
+    MeetingCreationResponse,
     MeetingCalendarAttendeeResponse,
     MeetingCalendarEventResponse,
     MeetingCalendarResponse,
@@ -46,6 +58,7 @@ from app.meeting.schemas import (
     MeetingActionItemsResponse,
     MeetingReportResponse,
     MeetingResponse,
+    MeetingListResponse,
     MeetingValidationResponse,
     MeetingRecordingUploadResponse,
     ParticipantTrackRegisterResponse,
@@ -73,16 +86,27 @@ from app.meeting.schemas import (
     RescheduleDecisionResponse,
     MeetingDelegateCreateRequest,
     MeetingDelegateResponse,
+    MeetingAuditLogResponse,
+    MeetingCancellationDecisionRequest,
+    MeetingCancellationDecisionResponse,
+    MeetingCancellationRequestCreate,
+    MeetingCancellationRequestResponse,
+    MeetingChangeResponse,
+    MeetingParticipantBulkChangeRequest,
+    MeetingParticipantBulkChangeResponse,
+    MeetingParticipantChangeRequest,
+    MeetingParticipantResponse,
 )
 from app.meeting.scheduling_service import (
     _fits_attendee_working_hours,
     find_alternative_slots,
     get_organization_timezone,
+    send_meeting_invitations,
     schedule_meeting_from_natural_language,
     reschedule_meeting_from_natural_language,
     decide_reschedule_request,
 )
-from app.meeting.calendar_provider import get_calendar_provider
+from app.meeting.calendar_provider import CalendarEvent, get_calendar_provider
 from app.meeting.service import (
     TERMINAL_STATUSES,
     _try_complete_meeting,
@@ -110,6 +134,18 @@ from app.meeting.service import (
     get_meeting_transcript,
     update_meeting_transcript,
     get_meeting_transcript_corrections,
+    is_authorized_rescheduler,
+)
+from app.meeting.event_change_service import (
+    add_meeting_participant,
+    add_meeting_participants,
+    attendee_count,
+    decide_meeting_cancellation,
+    list_meeting_audit,
+    list_pending_cancellations,
+    remove_meeting_participant,
+    request_meeting_cancellation,
+    get_meeting_participants,
 )
 from app.meeting.action_item_service import (
     MeetingActionItemExtractionError,
@@ -139,6 +175,20 @@ router = APIRouter(
 DEMO_ORGANIZER_ID = "demo-organizer"
 
 
+def _meeting_response(meeting: Meeting) -> MeetingResponse:
+    return MeetingResponse(
+        id=meeting.id,
+        title=meeting.title,
+        agenda=meeting.agenda,
+        start_at=_as_utc(meeting.start_at),
+        end_at=_as_utc(meeting.end_at),
+        join_url=meeting.join_url,
+        status=meeting.status,
+        organizer_id=meeting.organizer_id,
+        timezone=str(get_organization_timezone()),
+    )
+
+
 def _is_assigned_task_viewer(
     db: Session,
     meeting_id: str,
@@ -161,11 +211,11 @@ def _is_assigned_task_viewer(
     return query.first() is not None
 
 
-@router.post("/", response_model=MeetingResponse)
+@router.post("/", response_model=MeetingCreationResponse)
 def create_new_meeting(
     meeting: MeetingCreate,
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
 ):
     if meeting.meeting_type == "scheduled":
         attendee_emails = list(dict.fromkeys(
@@ -274,9 +324,50 @@ def create_new_meeting(
     created = create_meeting(
         db=db,
         meeting_data=meeting,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
     )
-    return MeetingResponse(
+    persisted_participants = (
+        db.query(MeetingParticipant)
+        .filter(MeetingParticipant.meeting_id == created.id)
+        .all()
+    )
+    participant_emails = list(dict.fromkeys(
+        participant.email.strip().casefold()
+        for participant in persisted_participants
+        if participant.email and participant.email.strip()
+    ))
+    participant_user_ids = {
+        participant.user_id
+        for participant in persisted_participants
+        if participant.user_id
+    }
+    attendee_filters = []
+    if participant_user_ids:
+        attendee_filters.append(Employee.id.in_(participant_user_ids))
+    if participant_emails:
+        attendee_filters.append(
+            func.lower(func.trim(Employee.email)).in_(participant_emails)
+        )
+    attendees = db.query(Employee).filter(or_(*attendee_filters)).all() if attendee_filters else []
+    organizer = db.query(Employee).filter(Employee.id == actor_id).first()
+    event = CalendarEvent(
+        id=created.id,
+        title=created.title,
+        start_at=created.start_at,
+        end_at=created.end_at,
+        join_url=created.join_url,
+        organizer_id=created.organizer_id,
+        attendee_emails=participant_emails,
+        status=created.status,
+    )
+    invitations_sent, invitation_failures = send_meeting_invitations(
+        meeting=event,
+        organizer_name=organizer.name if organizer else "Meeting Organizer",
+        attendees=attendees,
+        timezone_name=str(get_organization_timezone()),
+        raw_emails=participant_emails,
+    )
+    return MeetingCreationResponse(
         id=created.id,
         title=created.title,
         agenda=created.agenda,
@@ -286,14 +377,15 @@ def create_new_meeting(
         status=created.status,
         organizer_id=created.organizer_id,
         timezone=str(get_organization_timezone()),
+        invitations_sent=invitations_sent,
+        invitation_failures=invitation_failures,
     )
 
 @router.get("/calendar", response_model=MeetingCalendarResponse)
 def get_calendar_meetings(
     year: int = Query(..., ge=2000, le=2200),
     month: int = Query(..., ge=1, le=12),
-    user_id: str = Query(..., min_length=1),
-    email: str = Query(..., min_length=3),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     calendar_timezone = get_organization_timezone()
@@ -306,8 +398,8 @@ def get_calendar_meetings(
 
     meetings = get_user_meetings(
         db=db,
-        user_id=user_id,
-        email=email,
+        user_id=principal.user_id,
+        email=principal.email,
         start_at=start_utc,
         end_at=end_utc,
     )
@@ -384,19 +476,45 @@ def get_calendar_meetings(
     )
 
 
-@router.get("/", response_model=list[MeetingResponse])
+@router.get("/", response_model=list[MeetingListResponse])
 def get_meetings(
     db: Session = Depends(get_db),
-    email: str | None = None,
-    user_id: str | None = None,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ):
     meetings = get_user_meetings(
         db=db,
-        user_id=user_id or DEMO_ORGANIZER_ID,
-        email=email,
+        user_id=principal.user_id,
+        email=principal.email,
     )
+    if principal.user_id:
+        delegated_organizer_ids = [
+            organizer_id
+            for (organizer_id,) in db.query(MeetingDelegate.organizer_id)
+            .filter(MeetingDelegate.delegate_id == principal.user_id)
+            .all()
+        ]
+        delegated_meeting_ids = [
+            meeting_id
+            for (meeting_id,) in db.query(MeetingDelegate.meeting_id)
+            .filter(
+                MeetingDelegate.delegate_id == principal.user_id,
+                MeetingDelegate.meeting_id.is_not(None),
+            )
+            .all()
+        ]
+        if delegated_organizer_ids or delegated_meeting_ids:
+            delegated_meetings = (
+                db.query(Meeting)
+                .filter(
+                    (Meeting.organizer_id.in_(delegated_organizer_ids))
+                    | (Meeting.id.in_(delegated_meeting_ids))
+                )
+                .all()
+            )
+            known_ids = {meeting.id for meeting in meetings}
+            meetings.extend(meeting for meeting in delegated_meetings if meeting.id not in known_ids)
     return [
-        MeetingResponse(
+        MeetingListResponse(
             id=m.id,
             title=m.title,
             agenda=m.agenda,
@@ -406,6 +524,7 @@ def get_meetings(
             status=m.status,
             organizer_id=m.organizer_id,
             timezone=str(get_organization_timezone()),
+            can_manage=is_authorized_rescheduler(db, m, principal.user_id),
         )
         for m in meetings
     ]
@@ -437,15 +556,13 @@ def get_active_employees(db: Session = Depends(get_db)):
 )
 def schedule_meeting_nl_endpoint(
     payload: NaturalLanguageScheduleRequest,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_organizer_id = payload.organizer_id or organizer_id or x_user_id or DEMO_ORGANIZER_ID
     result = schedule_meeting_from_natural_language(
         db=db,
         prompt=payload.prompt,
-        organizer_id=effective_organizer_id,
+        organizer_id=actor_id,
     )
 
     meeting_resp = None
@@ -510,15 +627,13 @@ def schedule_meeting_nl_endpoint(
 )
 def confirm_meeting_slot_endpoint(
     payload: ScheduleConfirmationRequest,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_organizer_id = payload.organizer_id or organizer_id or x_user_id or DEMO_ORGANIZER_ID
     result = schedule_meeting_from_natural_language(
         db=db,
         prompt=payload.prompt,
-        organizer_id=effective_organizer_id,
+        organizer_id=actor_id,
         selected_start_at=payload.start_at,
     )
     meeting_resp = None
@@ -577,15 +692,13 @@ def confirm_meeting_slot_endpoint(
 )
 def reschedule_meeting_nl_endpoint(
     payload: NaturalLanguageScheduleRequest,
-    requester_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_requester_id = payload.organizer_id or requester_id or x_user_id or DEMO_ORGANIZER_ID
     result = reschedule_meeting_from_natural_language(
         db=db,
         prompt=payload.prompt,
-        requester_id=effective_requester_id,
+        requester_id=actor_id,
     )
 
     meeting_resp = None
@@ -651,40 +764,36 @@ def reschedule_meeting_nl_endpoint(
 def list_reschedule_requests_endpoint(
     status_filter: str | None = Query(default=None, alias="status"),
     meeting_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    organizer_id: str | None = Query(default=None),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_user_id = x_user_id or organizer_id
     query = db.query(MeetingRescheduleRequest)
     if meeting_id is not None:
         query = query.filter(MeetingRescheduleRequest.meeting_id == meeting_id)
     if status_filter:
         query = query.filter(MeetingRescheduleRequest.status == status_filter)
 
-    if effective_user_id:
-        delegate_org_tuples = (
-            db.query(MeetingDelegate.organizer_id)
-            .filter(MeetingDelegate.delegate_id == effective_user_id)
-            .all()
+    delegate_org_ids = [
+        organizer_id
+        for (organizer_id,) in db.query(MeetingDelegate.organizer_id)
+        .filter(MeetingDelegate.delegate_id == actor_id)
+        .all()
+    ]
+    delegate_meeting_ids = [
+        delegated_meeting_id
+        for (delegated_meeting_id,) in db.query(MeetingDelegate.meeting_id)
+        .filter(
+            MeetingDelegate.delegate_id == actor_id,
+            MeetingDelegate.meeting_id.is_not(None),
         )
-        delegate_org_ids = [o[0] for o in delegate_org_tuples]
-        delegate_meeting_tuples = (
-            db.query(MeetingDelegate.meeting_id)
-            .filter(
-                MeetingDelegate.delegate_id == effective_user_id,
-                MeetingDelegate.meeting_id.is_not(None),
-            )
-            .all()
-        )
-        delegate_meeting_ids = [m[0] for m in delegate_meeting_tuples]
-
-        query = query.join(Meeting, MeetingRescheduleRequest.meeting_id == Meeting.id).filter(
-            (Meeting.organizer_id == effective_user_id)
-            | (Meeting.organizer_id.in_(delegate_org_ids))
-            | (Meeting.id.in_(delegate_meeting_ids))
-            | (MeetingRescheduleRequest.requested_by == effective_user_id)
-        )
+        .all()
+    ]
+    query = query.join(Meeting, MeetingRescheduleRequest.meeting_id == Meeting.id).filter(
+        (Meeting.organizer_id == actor_id)
+        | (Meeting.organizer_id.in_(delegate_org_ids))
+        | (Meeting.id.in_(delegate_meeting_ids))
+        | (MeetingRescheduleRequest.requested_by == actor_id)
+    )
 
     records = query.order_by(MeetingRescheduleRequest.created_at.desc()).all()
     results = []
@@ -725,16 +834,14 @@ def list_reschedule_requests_endpoint(
 def decide_reschedule_request_endpoint(
     request_id: str,
     payload: RescheduleDecisionRequest,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    organizer_id: str | None = Query(default=None),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_user_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
     req, updated_event, message = decide_reschedule_request(
         db=db,
         request_id=request_id,
         decision=payload.decision,
-        decider_id=effective_user_id,
+        decider_id=actor_id,
         decision_note=payload.note,
     )
     meeting = db.query(Meeting).filter(Meeting.id == req.meeting_id).first()
@@ -787,14 +894,12 @@ def decide_reschedule_request_endpoint(
 )
 def add_meeting_delegate_endpoint(
     payload: MeetingDelegateCreateRequest,
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    organizer_id: str | None = Query(default=None),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
-    effective_organizer_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
     delegate_record = add_meeting_delegate(
         db=db,
-        organizer_id=effective_organizer_id,
+        organizer_id=actor_id,
         delegate_id=payload.delegate_id,
         meeting_id=payload.meeting_id,
     )
@@ -813,15 +918,13 @@ def add_meeting_delegate_endpoint(
     summary="List authorized meeting delegates (Story 5.3)",
 )
 def list_meeting_delegates_endpoint(
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
-    organizer_id: str | None = Query(default=None),
+    actor_id: str = Depends(require_authenticated_actor_id),
     meeting_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    effective_organizer_id = x_user_id or organizer_id or DEMO_ORGANIZER_ID
     delegates = get_meeting_delegates(
         db=db,
-        organizer_id=effective_organizer_id,
+        organizer_id=actor_id,
         meeting_id=meeting_id,
     )
     return [
@@ -883,13 +986,236 @@ def validate_meeting(
 def delete_meeting_route(
     meeting_id: str,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
     """Permanently delete a completed meeting and its attendance records.
     Only the organizer may call this, and only on completed/cancelled meetings.
     """
-    delete_meeting(db=db, meeting_id=meeting_id, organizer_id=organizer_id)
+    delete_meeting(db=db, meeting_id=meeting_id, organizer_id=actor_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{meeting_id}/cancel",
+    response_model=MeetingChangeResponse,
+    summary="Cancel a meeting or submit a high-attendance cancellation for approval (Story 5.4)",
+)
+def cancel_meeting_route(
+    meeting_id: str,
+    payload: MeetingCancellationRequestCreate | None = None,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    meeting, request, sent, failures = request_meeting_cancellation(
+        db=db,
+        meeting_id=meeting_id,
+        actor_id=actor_id,
+        reason=payload.reason if payload else None,
+    )
+    pending = request is not None
+    return MeetingChangeResponse(
+        status="pending_approval" if pending else "applied",
+        message=(
+            "Cancellation submitted for organizer/delegate approval."
+            if pending
+            else "Meeting cancelled."
+        ),
+        meeting=_meeting_response(meeting),
+        request_id=request.id if request else None,
+        notifications_sent=sent,
+        notification_failures=failures,
+    )
+
+
+@router.get(
+    "/cancellation-requests",
+    response_model=list[MeetingCancellationRequestResponse],
+    summary="List pending meeting cancellation requests visible to the organizer or delegate",
+)
+def list_cancellation_requests_route(
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    return [
+        MeetingCancellationRequestResponse(
+            id=request.id,
+            meeting_id=meeting.id,
+            meeting_title=meeting.title,
+            requested_by=request.requested_by,
+            reason=request.reason,
+            status=request.status,
+            decided_by=request.decided_by,
+            decided_at=request.decided_at,
+            decision_note=request.decision_note,
+            created_at=request.created_at,
+            attendee_count=count,
+        )
+        for request, meeting, count in list_pending_cancellations(db, actor_id)
+    ]
+
+
+@router.post(
+    "/cancellation-requests/{request_id}/decide",
+    response_model=MeetingCancellationDecisionResponse,
+    summary="Approve or reject a high-attendance meeting cancellation (Story 5.4)",
+)
+def decide_cancellation_route(
+    request_id: str,
+    payload: MeetingCancellationDecisionRequest,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    request, meeting, sent, failures = decide_meeting_cancellation(
+        db=db,
+        request_id=request_id,
+        decision=payload.decision,
+        actor_id=actor_id,
+        note=payload.note,
+    )
+    meeting_record = db.query(Meeting).filter(Meeting.id == request.meeting_id).first()
+    return MeetingCancellationDecisionResponse(
+        request=MeetingCancellationRequestResponse(
+            id=request.id,
+            meeting_id=request.meeting_id,
+            meeting_title=meeting_record.title if meeting_record else "Meeting",
+            requested_by=request.requested_by,
+            reason=request.reason,
+            status=request.status,
+            decided_by=request.decided_by,
+            decided_at=request.decided_at,
+            decision_note=request.decision_note,
+            created_at=request.created_at,
+            attendee_count=attendee_count(db, meeting_record) if meeting_record else 0,
+        ),
+        meeting=_meeting_response(meeting) if meeting else None,
+        message=(
+            "Cancellation approved and meeting cancelled."
+            if request.status == "approved"
+            else "Cancellation request rejected."
+        ),
+        notifications_sent=sent,
+        notification_failures=failures,
+    )
+
+
+@router.post(
+    "/{meeting_id}/participants/bulk",
+    response_model=MeetingParticipantBulkChangeResponse,
+    summary="Invite multiple participants to a meeting (Story 5.4)",
+)
+def add_meeting_participants_route(
+    meeting_id: str,
+    payload: MeetingParticipantBulkChangeRequest,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    _, outcomes = add_meeting_participants(db, meeting_id, actor_id, payload)
+    added_count = len(outcomes["added"])
+    skipped_count = (
+        len(outcomes["already_present"])
+        + len(outcomes["duplicate_addresses"])
+    )
+    failed_count = (
+        len(outcomes["invalid_addresses"])
+        + len(outcomes["failed_addresses"])
+        + len(outcomes["notification_failures"])
+    )
+    message = (
+        f"{added_count} participant{'s' if added_count != 1 else ''} added; "
+        f"{failed_count} address{'es' if failed_count != 1 else ''} "
+        f"{'was' if failed_count == 1 else 'were'} invalid or failed."
+    )
+    if skipped_count:
+        message += f" {skipped_count} duplicate or already invited address{'es' if skipped_count != 1 else ''} skipped."
+    return MeetingParticipantBulkChangeResponse(message=message, **outcomes)
+
+
+@router.post(
+    "/{meeting_id}/participants",
+    response_model=MeetingChangeResponse,
+    summary="Invite a participant to a meeting (Story 5.4)",
+)
+def add_meeting_participant_route(
+    meeting_id: str,
+    payload: MeetingParticipantChangeRequest,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    meeting, sent, failures = add_meeting_participant(db, meeting_id, actor_id, payload)
+    return MeetingChangeResponse(
+        status="applied",
+        message="Participant added.",
+        meeting=_meeting_response(meeting),
+        notifications_sent=sent,
+        notification_failures=failures,
+    )
+
+
+@router.delete(
+    "/{meeting_id}/participants/{participant_id}",
+    response_model=MeetingChangeResponse,
+    summary="Remove a participant from a meeting (Story 5.4)",
+)
+def remove_meeting_participant_route(
+    meeting_id: str,
+    participant_id: str,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    meeting, sent, failures = remove_meeting_participant(db, meeting_id, participant_id, actor_id)
+    return MeetingChangeResponse(
+        status="applied",
+        message="Participant removed.",
+        meeting=_meeting_response(meeting),
+        notifications_sent=sent,
+        notification_failures=failures,
+    )
+
+
+@router.get(
+    "/{meeting_id}/participants",
+    response_model=list[MeetingParticipantResponse],
+    summary="List participants for an authorized meeting manager (Story 5.4)",
+)
+def list_meeting_participants_route(
+    meeting_id: str,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    participants = get_meeting_participants(db, meeting_id, actor_id)
+    return [
+        MeetingParticipantResponse(
+            id=participant.id,
+            user_id=participant.user_id,
+            name=employee.name if employee else participant.email or "Guest",
+            email=participant.email or (employee.email if employee else None),
+            role=participant.role,
+        )
+        for participant, employee in participants
+    ]
+
+
+@router.get(
+    "/{meeting_id}/audit",
+    response_model=list[MeetingAuditLogResponse],
+    summary="Read meeting change audit history (Story 5.4)",
+)
+def meeting_audit_route(
+    meeting_id: str,
+    actor_id: str = Depends(require_authenticated_actor_id),
+    db: Session = Depends(get_db),
+):
+    return [
+        MeetingAuditLogResponse(
+            id=entry.id,
+            meeting_id=entry.meeting_id,
+            actor_id=entry.actor_id,
+            action=entry.action,
+            details=entry.details,
+            created_at=entry.created_at,
+        )
+        for entry in list_meeting_audit(db, meeting_id, actor_id)
+    ]
 
 
 @router.post(
@@ -900,7 +1226,7 @@ def delete_meeting_route(
 async def end_meeting_for_everyone(
     meeting_id: str,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
     """End the meeting immediately, stamping all attendance records and
     broadcasting a 'meeting_ended' signal to all connected participants.
@@ -908,7 +1234,7 @@ async def end_meeting_for_everyone(
     meeting = force_complete_meeting(
         db=db,
         meeting_id=meeting_id,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
     )
     # Broadcast to all connected WebSocket participants
     await signaling_manager.broadcast(
@@ -1033,9 +1359,9 @@ def _recording_response(recording) -> MeetingRecordingResponse:
 def read_meeting_recording(
     meeting_id: str,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
-    recording = get_meeting_recording(db, meeting_id, organizer_id)
+    recording = get_meeting_recording(db, meeting_id, actor_id)
     return _recording_response(recording)
 
 
@@ -1047,9 +1373,9 @@ def read_meeting_recording(
 def begin_meeting_recording(
     meeting_id: str,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
-    recording = start_meeting_recording(db, meeting_id, organizer_id)
+    recording = start_meeting_recording(db, meeting_id, actor_id)
     return _recording_response(recording)
 
 
@@ -1061,9 +1387,9 @@ def begin_meeting_recording(
 def end_meeting_recording(
     meeting_id: str,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
-    recording = stop_meeting_recording(db, meeting_id, organizer_id)
+    recording = stop_meeting_recording(db, meeting_id, actor_id)
     return _recording_response(recording)
 
 
@@ -1076,12 +1402,12 @@ def upload_meeting_recording_file(
     meeting_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
     result = upload_meeting_recording(
         db=db,
         meeting_id=meeting_id,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
         upload=file.file,
         filename=file.filename,
         content_type=file.content_type,
@@ -1099,7 +1425,7 @@ def register_participant_tracks(
     meeting_id: str,
     body: ParticipantTracksRegisterRequest,
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
     """Creates one MeetingRecording row (status=processing) per submitted track.
 
@@ -1110,7 +1436,7 @@ def register_participant_tracks(
     rows = register_participant_track_recordings(
         db=db,
         meeting_id=meeting_id,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
         tracks=[
             {
                 "connection_id": track.connection_id,
@@ -1142,7 +1468,7 @@ def upload_participant_track_file(
     recording_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
 ):
     """Upload and encrypt a single participant audio track.
 
@@ -1154,7 +1480,7 @@ def upload_participant_track_file(
         db=db,
         meeting_id=meeting_id,
         recording_id=recording_id,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
         upload=file.file,
         filename=file.filename,
         content_type=file.content_type,
@@ -1172,8 +1498,7 @@ def upload_participant_track_file(
 )
 def get_meeting_report(
     meeting_id: str,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
-    employee_email: str | None = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     """Return a meeting report to its organizer or an assigned task employee.
@@ -1189,11 +1514,11 @@ def get_meeting_report(
             detail="Meeting not found",
         )
 
-    is_organizer = meeting.organizer_id == organizer_id
+    is_organizer = meeting.organizer_id == principal.user_id
     is_assigned_task_viewer = _is_assigned_task_viewer(
         db,
         meeting_id,
-        employee_email,
+        principal.email,
     )
     if not is_organizer and not is_assigned_task_viewer:
         raise HTTPException(
@@ -1269,9 +1594,15 @@ def guest_join_lobby(
 )
 def list_pending_guests(
     meeting_id: str,
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     """Returns all pending guest requests for the given meeting."""
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    if not is_authorized_rescheduler(db, meeting, actor_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Meeting manager access required")
     pending = get_pending_guest_requests(db=db, meeting_id=meeting_id)
     return [
         GuestRequestResponse(
@@ -1297,20 +1628,16 @@ async def organizer_decide_guest(
     meeting_id: str,
     request_id: str,
     decision: GuestDecisionRequest,
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
 ):
-    """Decide a guest request and notify its connected lobby socket.
-
-    The caller supplies their ``organizer_id`` as a query parameter so the
-    service layer can verify identity against the stored meeting organizer.
-    """
+    """Decide a guest request and notify its connected lobby socket."""
     guest_req = decide_guest_request(
         db=db,
         meeting_id=meeting_id,
         request_id=request_id,
         action=decision.decision,
-        organizer_id=organizer_id,
+        organizer_id=actor_id,
     )
     await signaling_manager.send_personal_message(
         meeting_id=f"lobby:{meeting_id}",
@@ -1346,8 +1673,6 @@ async def organizer_decide_guest(
 async def meeting_websocket_signaling(
     websocket: WebSocket,
     meeting_id: str,
-    client_id: str | None = None,
-    user_id: str | None = None,
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -1372,13 +1697,37 @@ async def meeting_websocket_signaling(
         )
         return
 
+    authenticated_principal: AuthenticatedPrincipal | None = None
+    authorization = websocket.headers.get("authorization")
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.casefold() != "bearer" or not token:
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason="Invalid authentication credentials",
+            )
+            return
+        try:
+            authenticated_principal = authenticate_access_token(db, token.strip())
+        except AuthConfigurationError:
+            await websocket.close(
+                code=status.WS_1011_INTERNAL_ERROR,
+                reason="Authentication is not configured",
+            )
+            return
+        except InvalidAccessToken:
+            await websocket.close(
+                code=status.WS_1008_POLICY_VIOLATION,
+                reason="Invalid or expired access token",
+            )
+            return
+
     # Release initial read transaction so SQLite does not hold a read lock during the WS loop
     db.commit()
 
     connection_id = await signaling_manager.connect(
         meeting_id=meeting_id,
         websocket=websocket,
-        connection_id=client_id,
     )
 
     existing_participants = signaling_manager.get_room_participants(
@@ -1512,9 +1861,7 @@ async def meeting_websocket_signaling(
                 )
 
             elif msg_type in ("mute_participant", "ask_unmute"):
-                # Only the meeting organizer may mute / ask to unmute another participant.
-                # We verify organizer by comparing user_id (passed as WS query param) against
-                # the stored organizer_id, falling back to connection_id for legacy clients.
+                # Only a token-authenticated organizer may control another participant.
                 payload = message.get("payload", {})
                 target_participant_id = payload.get("participant_id") if isinstance(payload, dict) else None
 
@@ -1523,10 +1870,9 @@ async def meeting_websocket_signaling(
                 if not current_meeting:
                     continue  # meeting disappeared
 
-                # Accept either user_id match or connection_id match so both old and new clients work
-                is_organizer = (
-                    (user_id is not None and current_meeting.organizer_id == user_id)
-                    or current_meeting.organizer_id == connection_id
+                is_organizer = bool(
+                    authenticated_principal
+                    and current_meeting.organizer_id == authenticated_principal.user_id
                 )
 
                 if not is_organizer:
@@ -1595,13 +1941,22 @@ async def meeting_websocket_signaling(
                     )
 
             elif msg_type == "participant_state":
-                # Participant broadcasts their mic/camera state to the room.
+                # Identity and organizer state are server-derived; ignore client assertions.
+                payload = message.get("payload")
+                state_payload = dict(payload) if isinstance(payload, dict) else {}
+                state_payload["connection_id"] = connection_id
+                current_meeting = get_meeting_by_id(db, meeting_id)
+                state_payload["is_organizer"] = bool(
+                    authenticated_principal
+                    and current_meeting
+                    and current_meeting.organizer_id == authenticated_principal.user_id
+                )
                 await signaling_manager.broadcast(
                     meeting_id=meeting_id,
                     message={
                         "type": "participant_state",
                         "sender_id": connection_id,
-                        "payload": message.get("payload", {}),
+                        "payload": state_payload,
                     },
                     exclude_id=connection_id,
                 )
@@ -1790,7 +2145,7 @@ async def lobby_websocket(
 )
 def get_meeting_summary(
         meeting_id: str,
-        organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
         db: Session = Depends(get_db),
 ):
         meeting = get_meeting_by_id(db, meeting_id)
@@ -1800,7 +2155,7 @@ def get_meeting_summary(
                 detail="Meeting not found",
             )
 
-        if meeting.organizer_id != organizer_id:
+        if meeting.organizer_id != actor_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the meeting organizer can access the summary",
@@ -1912,7 +2267,7 @@ def _meeting_action_items_response(
 )
 def extract_meeting_action_items(
     meeting_id: str,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     retry_empty: bool = Query(
         default=False,
         description="Re-run an extraction that completed without finding any action items.",
@@ -1926,7 +2281,7 @@ def extract_meeting_action_items(
             detail="Meeting not found",
         )
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can extract action items",
@@ -1951,7 +2306,7 @@ def extract_meeting_action_items(
             detail="Action item extraction failed",
         ) from None
 
-    synchronize_confirmed_action_item_tasks(db, extraction, organizer_id)
+    synchronize_confirmed_action_item_tasks(db, extraction, actor_id)
     return _meeting_action_items_response(extraction)
 
 
@@ -1964,7 +2319,7 @@ def confirm_action_item_owner(
     meeting_id: str,
     action_item_id: str,
     payload: ActionItemOwnerConfirmationRequest,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -1974,7 +2329,7 @@ def confirm_action_item_owner(
             detail="Meeting not found",
         )
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can confirm ownership",
@@ -2043,7 +2398,7 @@ def review_action_item_endpoint(
     meeting_id: str,
     action_item_id: str,
     payload: ActionItemReviewRequest,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2053,7 +2408,7 @@ def review_action_item_endpoint(
             detail="Meeting not found",
         )
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can review action items",
@@ -2082,7 +2437,7 @@ def review_action_item_endpoint(
             db=db,
             meeting_id=meeting_id,
             action_item_id=action_item_id,
-            reviewer_id=organizer_id,
+            reviewer_id=actor_id,
             action=payload.action,
             decision=payload.decision,
             review_status=payload.review_status,
@@ -2113,7 +2468,7 @@ def review_action_item_endpoint(
 )
 def get_meeting_action_items(
     meeting_id: str,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2123,7 +2478,7 @@ def get_meeting_action_items(
             detail="Meeting not found",
         )
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can access action items",
@@ -2157,9 +2512,8 @@ def get_meeting_action_items(
 )
 def get_transcript(
     meeting_id: str,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     transcript_id: str | None = Query(default=None),
-    employee_email: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     meeting = db.query(Meeting).filter(Meeting.id == meeting_id).first()
@@ -2167,10 +2521,10 @@ def get_transcript(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    if meeting.organizer_id != organizer_id and not _is_assigned_task_viewer(
+    if meeting.organizer_id != principal.user_id and not _is_assigned_task_viewer(
         db,
         meeting_id,
-        employee_email,
+        principal.email,
         transcript_id,
     ):
         raise HTTPException(
@@ -2209,7 +2563,7 @@ def get_transcript(
 def update_transcript(
     meeting_id: str,
     request: MeetingTranscriptUpdateRequest,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
@@ -2218,7 +2572,7 @@ def update_transcript(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(status_code=403, detail="Organizer access required")
 
     try:
@@ -2229,7 +2583,7 @@ def update_transcript(
                 segment.model_dump(exclude_unset=True)
                 for segment in request.segments
             ],
-            editor_id=organizer_id,
+            editor_id=actor_id,
             transcript_id=transcript_id,
         )
     except ValueError as exc:
@@ -2263,7 +2617,7 @@ def update_transcript(
 )
 def get_transcript_corrections(
     meeting_id: str,
-    organizer_id: str = Query(default=DEMO_ORGANIZER_ID),
+    actor_id: str = Depends(require_authenticated_actor_id),
     transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
@@ -2272,7 +2626,7 @@ def get_transcript_corrections(
     if meeting is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
 
-    if meeting.organizer_id != organizer_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(status_code=403, detail="Organizer access required")
 
     corrections = get_meeting_transcript_corrections(
@@ -2285,34 +2639,6 @@ def get_transcript_corrections(
 
 
 # -- Meeting Minutes (FR-19) ---------------------------------------------------
-
-
-def _resolve_organizer_id(
-    meeting: Meeting,
-    organizer_id: str | None = None,
-    x_user_id: str | None = None,
-) -> str:
-    """Resolve caller identity and validate against meeting organizer.
-
-    If an authenticated X-User-Id header is present, it is prioritized and validated
-    against any explicit organizer_id query parameter. If neither is passed, falls back
-    to DEMO_ORGANIZER_ID.
-    """
-    if x_user_id and x_user_id.strip():
-        auth_id = x_user_id.strip()
-        if (
-            organizer_id
-            and organizer_id != DEMO_ORGANIZER_ID
-            and organizer_id != auth_id
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Authenticated identity does not match requested organizer identity",
-            )
-        return auth_id
-    if organizer_id:
-        return organizer_id
-    return DEMO_ORGANIZER_ID
 
 
 @router.post(
@@ -2331,8 +2657,7 @@ def generate_meeting_minutes_endpoint(
         default=False,
         description="Re-aggregate content from current action items and summary (only applies when minutes are not yet approved)",
     ),
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2342,8 +2667,7 @@ def generate_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can generate meeting minutes",
@@ -2367,8 +2691,7 @@ def generate_meeting_minutes_endpoint(
 )
 def get_meeting_minutes_endpoint(
     meeting_id: str,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2378,8 +2701,7 @@ def get_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can access meeting minutes",
@@ -2408,8 +2730,7 @@ def get_meeting_minutes_endpoint(
 def update_meeting_minutes_endpoint(
     meeting_id: str,
     payload: MeetingMinutesUpdateRequest,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2419,8 +2740,7 @@ def update_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can edit meeting minutes",
@@ -2456,8 +2776,7 @@ def update_meeting_minutes_endpoint(
 )
 def refresh_meeting_minutes_endpoint(
     meeting_id: str,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2467,8 +2786,7 @@ def refresh_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can refresh meeting minutes",
@@ -2497,8 +2815,7 @@ def refresh_meeting_minutes_endpoint(
 def approve_meeting_minutes_endpoint(
     meeting_id: str,
     payload: MeetingMinutesApproveRequest | None = None,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2508,15 +2825,14 @@ def approve_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can approve meeting minutes",
         )
 
     try:
-        minutes = approve_meeting_minutes(db, meeting_id, approver_id=caller_id)
+        minutes = approve_meeting_minutes(db, meeting_id, approver_id=actor_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST,
@@ -2534,8 +2850,7 @@ def approve_meeting_minutes_endpoint(
 def send_meeting_minutes_endpoint(
     meeting_id: str,
     retry_failed: bool = Query(default=False, description="Re-attempt previously failed recipients"),
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2545,8 +2860,7 @@ def send_meeting_minutes_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can send meeting minutes",
@@ -2588,8 +2902,7 @@ def send_meeting_minutes_endpoint(
 )
 def get_minutes_recipients_endpoint(
     meeting_id: str,
-    organizer_id: str | None = Query(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    actor_id: str = Depends(require_authenticated_actor_id),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2599,8 +2912,7 @@ def get_minutes_recipients_endpoint(
             detail="Meeting not found",
         )
 
-    caller_id = _resolve_organizer_id(meeting, organizer_id=organizer_id, x_user_id=x_user_id)
-    if meeting.organizer_id != caller_id:
+    if meeting.organizer_id != actor_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the meeting organizer can view delivery status",

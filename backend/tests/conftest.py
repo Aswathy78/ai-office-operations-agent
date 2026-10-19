@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from fastapi import Request
 
 # TestClient(app) runs the startup hook. Never let the reminder scheduler or the
 # e-mail dispatcher run against the real database (and send real e-mails) during tests.
@@ -14,6 +15,80 @@ def _no_background_reminder_scheduler(monkeypatch):
 
     monkeypatch.setattr(main, "start_task_reminder_scheduler", lambda: False)
     monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def _test_authentication_boundary(request):
+    """Adapt legacy query-actor tests to a test-only authenticated principal.
+
+    Authentication tests deliberately use the real Bearer-token dependencies.
+    This adapter is test-only and is never installed by application code.
+    """
+    import main
+    from app.auth_service import AuthenticatedPrincipal
+    from app.authentication import (
+        authenticated_actor_id,
+        require_authenticated_actor_id,
+        require_authenticated_principal,
+    )
+
+    original_overrides = main.app.dependency_overrides.copy()
+    startup_handlers = main.app.router.on_startup[:]
+    shutdown_handlers = main.app.router.on_shutdown[:]
+    main.app.router.on_startup.clear()
+    main.app.router.on_shutdown.clear()
+
+    if request.module.__name__.endswith("test_authentication"):
+        principal_overrides = {}
+    else:
+        def principal_from_legacy_test_request(request: Request) -> AuthenticatedPrincipal:
+            query = request.query_params
+            actor_id = (
+                query.get("actor_id")
+                or query.get("user_id")
+                or query.get("organizer_id")
+                or query.get("requester_id")
+                or request.headers.get("X-User-Id")
+                or "test-employee"
+            )
+            role = query.get("actor_role", "employee")
+            team = query.get("actor_team")
+            email = (
+                query.get("email")
+                or query.get("employee_email")
+                or query.get("actor_email")
+                or f"{actor_id}@test.invalid"
+            )
+            return AuthenticatedPrincipal(
+                user_id=actor_id,
+                account_id="test-auth-account",
+                email=email,
+                name="Test Actor",
+                role=role,
+                team=team,
+                jti="test-auth-session",
+            )
+
+        def principal_dependency(request: Request) -> AuthenticatedPrincipal:
+            return principal_from_legacy_test_request(request)
+
+        def actor_dependency(request: Request) -> str:
+            return principal_from_legacy_test_request(request).user_id
+
+        principal_overrides = {
+            require_authenticated_principal: principal_dependency,
+            require_authenticated_actor_id: actor_dependency,
+            authenticated_actor_id: actor_dependency,
+        }
+        main.app.dependency_overrides.update(principal_overrides)
+
+    try:
+        yield
+    finally:
+        main.app.dependency_overrides.clear()
+        main.app.dependency_overrides.update(original_overrides)
+        main.app.router.on_startup[:] = startup_handlers
+        main.app.router.on_shutdown[:] = shutdown_handlers
 
 
 class _NoRealSmtp:

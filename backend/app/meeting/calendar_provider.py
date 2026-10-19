@@ -117,6 +117,29 @@ class CalendarProvider(ABC):
         """Update an existing scheduled event in the calendar provider."""
 
     @abstractmethod
+    def cancel_event(self, db: Session, event_id: str) -> CalendarEvent:
+        """Mark an event as cancelled in the calendar provider."""
+
+    @abstractmethod
+    def add_attendee(
+        self,
+        db: Session,
+        event_id: str,
+        user_id: str | None,
+        email: str,
+    ) -> CalendarEvent:
+        """Add one attendee to an existing event."""
+
+    @abstractmethod
+    def remove_attendee(
+        self,
+        db: Session,
+        event_id: str,
+        participant_id: str,
+    ) -> CalendarEvent:
+        """Remove one attendee from an existing event."""
+
+    @abstractmethod
     def get_event(
         self,
         db: Session,
@@ -350,6 +373,81 @@ class LocalCalendarProvider(CalendarProvider):
             )
 
         return updated_event
+
+    def cancel_event(self, db: Session, event_id: str) -> CalendarEvent:
+        meeting = db.query(Meeting).filter(Meeting.id == event_id).first()
+        if meeting is None:
+            raise CalendarProviderError(f"Meeting with ID '{event_id}' not found.")
+        meeting.status = "cancelled"
+        db.flush()
+        event = self.get_event(db, event_id)
+        if event is None:
+            raise CalendarProviderError(f"Failed to verify cancellation for meeting {event_id}.")
+        return event
+
+    def add_attendee(
+        self,
+        db: Session,
+        event_id: str,
+        user_id: str | None,
+        email: str,
+    ) -> CalendarEvent:
+        meeting = db.query(Meeting).filter(Meeting.id == event_id).first()
+        if meeting is None:
+            raise CalendarProviderError(f"Meeting with ID '{event_id}' not found.")
+        normalized_email = email.strip().lower()
+        participants = (
+            db.query(MeetingParticipant)
+            .filter(MeetingParticipant.meeting_id == event_id)
+            .all()
+        )
+        if not any(
+            (participant.email and participant.email.strip().lower() == normalized_email)
+            or (user_id and participant.user_id == user_id)
+            for participant in participants
+        ):
+            employee = (
+                db.query(Employee)
+                .filter(Employee.email.ilike(normalized_email))
+                .first()
+            )
+            db.add(
+                MeetingParticipant(
+                    id=str(uuid.uuid4()),
+                    meeting_id=event_id,
+                    user_id=user_id or (employee.id if employee else None),
+                    email=normalized_email,
+                    role="participant",
+                )
+            )
+            db.flush()
+        event = self.get_event(db, event_id)
+        if event is None:
+            raise CalendarProviderError(f"Failed to verify attendee update for meeting {event_id}.")
+        return event
+
+    def remove_attendee(
+        self,
+        db: Session,
+        event_id: str,
+        participant_id: str,
+    ) -> CalendarEvent:
+        participant = (
+            db.query(MeetingParticipant)
+            .filter(
+                MeetingParticipant.id == participant_id,
+                MeetingParticipant.meeting_id == event_id,
+            )
+            .first()
+        )
+        if participant is None:
+            raise CalendarProviderError(f"Participant '{participant_id}' not found in meeting '{event_id}'.")
+        db.delete(participant)
+        db.flush()
+        event = self.get_event(db, event_id)
+        if event is None:
+            raise CalendarProviderError(f"Failed to verify attendee update for meeting {event_id}.")
+        return event
 
     def get_event(
         self,

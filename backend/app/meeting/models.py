@@ -186,6 +186,17 @@ RESCHEDULE_STATUSES = (
     RESCHEDULE_STATUS_REJECTED,
 )
 
+CANCELLATION_STATUS_PENDING = "pending"
+CANCELLATION_STATUS_APPROVED = "approved"
+CANCELLATION_STATUS_REJECTED = "rejected"
+CANCELLATION_STATUSES = (
+    CANCELLATION_STATUS_PENDING,
+    CANCELLATION_STATUS_APPROVED,
+    CANCELLATION_STATUS_REJECTED,
+)
+
+AUTH_ACCOUNT_ROLES = ("employee", "manager", "hr_operations", "admin")
+
 
 class Base(DeclarativeBase):
     pass
@@ -1339,6 +1350,124 @@ class MeetingDelegate(Base):
         ForeignKey("meetings.id", ondelete="CASCADE"),
         nullable=True,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AuthAccount(Base):
+    """Operator-provisioned login account for one existing employee."""
+
+    __tablename__ = "auth_accounts"
+    __table_args__ = (
+        UniqueConstraint("employee_id", name="uq_auth_accounts_employee_id"),
+        UniqueConstraint("email_normalized", name="uq_auth_accounts_email_normalized"),
+        CheckConstraint(
+            "role IN (" + ", ".join(repr(role) for role in AUTH_ACCOUNT_ROLES) + ")",
+            name="ck_auth_accounts_role",
+        ),
+        Index("ix_auth_accounts_enabled_role", "is_enabled", "role"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    email_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="employee")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AuthSession(Base):
+    """A signed access token's server-side revocation and expiry record."""
+
+    __tablename__ = "auth_sessions"
+    __table_args__ = (
+        Index("ix_auth_sessions_account_expires", "account_id", "expires_at"),
+    )
+
+    jti: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("auth_accounts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MeetingCancellationRequest(Base):
+    """A cancellation awaiting organizer/delegate approval (Story 5.4)."""
+
+    __tablename__ = "meeting_cancellation_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ("
+            + ", ".join(repr(value) for value in CANCELLATION_STATUSES)
+            + ")",
+            name="ck_meeting_cancellation_requests_status",
+        ),
+        Index("ix_meeting_cancellation_requests_meeting_status", "meeting_id", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    meeting_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    requested_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=CANCELLATION_STATUS_PENDING,
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class MeetingAuditLog(Base):
+    """Persistent audit history for meeting cancellations and participant changes."""
+
+    __tablename__ = "meeting_audit_logs"
+    __table_args__ = (
+        Index("ix_meeting_audit_logs_meeting_created_at", "meeting_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Intentionally not a foreign key: permanent meeting deletion must not erase audit history.
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    action: Mapped[str] = mapped_column(String(50), nullable=False)
+    details: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

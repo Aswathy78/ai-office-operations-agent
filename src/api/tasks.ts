@@ -1,3 +1,6 @@
+import { API_BASE_URL, apiFetch } from './client'
+export { API_BASE_URL, apiFetch } from './client'
+
 export interface TaskRecord {
   id: string
   title: string
@@ -82,41 +85,6 @@ export interface TaskActor {
   team: string | null
   /** Lets an employee complete their own tasks. */
   email?: string | null
-}
-
-export let API_BASE_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) ||
-  'http://127.0.0.1:8000'
-
-function getFallbackBaseUrl(current: string): string | null {
-  if (current.includes(':8000')) {
-    return current.replace(':8000', ':9000')
-  }
-  if (current.includes(':9000')) {
-    return current.replace(':9000', ':8000')
-  }
-  return null
-}
-
-export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const urlStr = typeof input === 'string' ? input : input.toString()
-  try {
-    return init !== undefined ? await fetch(urlStr, init) : await fetch(urlStr)
-  } catch (err) {
-    const fallback = getFallbackBaseUrl(API_BASE_URL)
-    if (fallback && urlStr.startsWith(API_BASE_URL)) {
-      const fallbackUrl = urlStr.replace(API_BASE_URL, fallback)
-      try {
-        const response =
-          init !== undefined ? await fetch(fallbackUrl, init) : await fetch(fallbackUrl)
-        API_BASE_URL = fallback
-        return response
-      } catch {
-        // preserve original error
-      }
-    }
-    throw err
-  }
 }
 
 async function readTasks(response: Response): Promise<TaskRecord[]> {

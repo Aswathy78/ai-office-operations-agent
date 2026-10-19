@@ -1,23 +1,31 @@
 import { useState } from 'react'
-import { Clock3, Users, Video, FileText, Link as LinkIcon, Trash2 } from 'lucide-react'
+import { Clock3, Users, Video, FileText, Link as LinkIcon, Trash2, UserRoundCog } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { deleteMeeting } from '../../api/meetings'
 import { useAuth } from '../../contexts/AuthContext'
 import type { Meeting } from '../../types/meeting'
+import { MeetingManageDialog } from './MeetingManageDialog'
 
 interface MeetingCardProps {
   meeting: Meeting
   onDelete?: (meetingId: string) => void
+  cancellationPending?: boolean
+  onChanged?: () => void
 }
 
-export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
+export function MeetingCard({ meeting, onDelete, cancellationPending = false, onChanged }: MeetingCardProps) {
   const { user } = useAuth()
   const isOrganizer = user?.id === meeting.organizerId
+  const canManage = meeting.canManage ?? user?.id === meeting.organizerId
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [showManage, setShowManage] = useState(false)
 
   const lifecycle = meeting.lifecycle ?? (
+    meeting.status.toLowerCase() === 'cancelled'
+      ? 'cancelled'
+      :
     meeting.status === 'In progress' || meeting.status === 'Starting soon'
       ? 'active'
       : meeting.status === 'Completed'
@@ -78,12 +86,23 @@ export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
         </div>
       )}
 
+      {showManage && user && (
+        <MeetingManageDialog
+          meetingId={meeting.id}
+          meetingTitle={meeting.title}
+          meetingStatus={meeting.status.toLowerCase()}
+          cancellationPending={cancellationPending}
+          onClose={() => setShowManage(false)}
+          onChanged={() => onChanged?.()}
+        />
+      )}
+
       <div className="meeting-icon" aria-hidden="true"><Video size={21} /></div>
       <div className="meeting-info">
         <div className="meeting-heading">
           <h3>{meeting.title}</h3>
-          <span className={`status-pill ${lifecycle === 'active' ? 'warning' : lifecycle === 'completed' ? 'muted' : ''}`}>
-            {lifecycle === 'active' ? 'In progress' : lifecycle === 'completed' ? 'Completed' : 'Upcoming'}
+          <span className={`status-pill ${lifecycle === 'active' || cancellationPending ? 'warning' : lifecycle === 'completed' || lifecycle === 'cancelled' ? 'muted' : ''}`}>
+            {cancellationPending ? 'Cancellation pending' : lifecycle === 'active' ? 'In progress' : lifecycle === 'cancelled' ? 'Cancelled' : lifecycle === 'completed' ? 'Completed' : 'Upcoming'}
           </span>
         </div>
         {meeting.agenda && <p className="meeting-agenda">{meeting.agenda}</p>}
@@ -96,9 +115,9 @@ export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
       </div>
 
       <div className="meeting-card-actions" style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-        {lifecycle === 'completed' ? (
+        {lifecycle === 'completed' || lifecycle === 'cancelled' ? (
           <>
-            {isOrganizer && (
+            {isOrganizer && lifecycle === 'completed' && (
               <Link
                 className="button secondary meeting-card-action"
                 to={`/meetings/${encodeURIComponent(meeting.id)}/report`}
@@ -117,12 +136,22 @@ export function MeetingCard({ meeting, onDelete }: MeetingCardProps) {
                 <Trash2 size={16} /> Delete
               </button>
             )}
-            {!isOrganizer && (
-              <span style={{ fontSize: '13px', color: 'var(--muted)' }}>Completed</span>
+            {(lifecycle === 'cancelled' || !isOrganizer) && (
+              <span style={{ fontSize: '13px', color: 'var(--muted)' }}>{lifecycle === 'cancelled' ? 'Cancelled' : 'Completed'}</span>
             )}
           </>
         ) : (
           <>
+            {canManage && (
+              <button
+                className="button secondary meeting-card-action"
+                type="button"
+                onClick={() => setShowManage(true)}
+                aria-label={`Manage ${meeting.title}`}
+              >
+                <UserRoundCog size={16} aria-hidden="true" /> Manage
+              </button>
+            )}
             <Link
               className={`button ${lifecycle === 'active' ? 'primary' : 'secondary'} meeting-card-action`}
               to={`/meetings/${encodeURIComponent(meeting.id)}`}

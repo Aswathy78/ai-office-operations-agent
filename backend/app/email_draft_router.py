@@ -9,6 +9,8 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, stat
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from app.auth_service import AuthenticatedPrincipal
+from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.email_draft_service import (
     EmailActor,
@@ -196,11 +198,9 @@ class EmailDraftDecisionRequest(BaseModel):
 
 
 def _actor(
-    actor_id: str = Query(min_length=1),
-    actor_role: TaskActorRole = Query(),
-    actor_team: str | None = Query(default=None),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
 ) -> EmailActor:
-    return EmailActor(id=actor_id, role=actor_role, team=actor_team or None)
+    return EmailActor(id=principal.user_id, role=principal.role, team=principal.team)
 
 
 def _response(draft: EmailDraft) -> EmailDraftResponse:

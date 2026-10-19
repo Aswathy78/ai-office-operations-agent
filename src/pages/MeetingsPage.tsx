@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { CalendarDays, Plus, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { getMeetings } from '../api/meetings'
+import { decideMeetingCancellation, getMeetings, getPendingMeetingCancellations } from '../api/meetings'
 import { MeetingCard } from '../components/meetings/MeetingCard'
 import { TodaysMeetings } from '../components/meetings/TodaysMeetings'
 import { useAuth } from '../contexts/AuthContext'
-import type { Meeting, MeetingListRecord } from '../types/meeting'
+import type { Meeting, MeetingCancellationRequest, MeetingListRecord } from '../types/meeting'
 
 function parseMeetingDate(value: string): Date {
   const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value)
@@ -28,7 +28,8 @@ function lifecycleFor(meeting: MeetingListRecord, now: number): Meeting['lifecyc
   const start = parseMeetingDate(meeting.start_at).getTime()
   const end = parseMeetingDate(meeting.end_at).getTime()
 
-  if (status === 'completed' || status === 'cancelled' || (Number.isFinite(end) && end < now)) {
+  if (status === 'cancelled') return 'cancelled'
+  if (status === 'completed' || (Number.isFinite(end) && end < now)) {
     return 'completed'
   }
   if (Number.isFinite(start) && Number.isFinite(end) && start <= now && now <= end) {
@@ -65,12 +66,20 @@ function toMeeting(record: MeetingListRecord, now: number): Meeting {
     status: record.status,
     joinUrl: record.join_url,
     organizerId: record.organizer_id,
+    canManage: record.can_manage,
     lifecycle: lifecycleFor(record, now),
     timezone: record.timezone,
   }
 }
 
-function MeetingGroup({ title, eyebrow, meetings, onDelete }: { title: string; eyebrow: string; meetings: Meeting[]; onDelete?: (id: string) => void }) {
+function MeetingGroup({ title, eyebrow, meetings, onDelete, onChanged, pendingMeetingIds }: {
+  title: string
+  eyebrow: string
+  meetings: Meeting[]
+  onDelete?: (id: string) => void
+  onChanged?: () => void
+  pendingMeetingIds?: Set<string>
+}) {
   if (meetings.length === 0) return null
   return (
     <section aria-label={title}>
@@ -82,7 +91,15 @@ function MeetingGroup({ title, eyebrow, meetings, onDelete }: { title: string; e
         <span className="date-label">{meetings.length} {meetings.length === 1 ? 'meeting' : 'meetings'}</span>
       </div>
       <div className="meeting-list">
-        {meetings.map((meeting) => <MeetingCard key={meeting.id} meeting={meeting} onDelete={onDelete} />)}
+        {meetings.map((meeting) => (
+          <MeetingCard
+            key={meeting.id}
+            meeting={meeting}
+            onDelete={onDelete}
+            onChanged={onChanged}
+            cancellationPending={pendingMeetingIds?.has(meeting.id)}
+          />
+        ))}
       </div>
     </section>
   )
@@ -95,6 +112,11 @@ export function MeetingsPage() {
   const [error, setError] = useState('')
   const [retryKey, setRetryKey] = useState(0)
   const [toastMessage, setToastMessage] = useState('')
+  const [cancellationRequests, setCancellationRequests] = useState<MeetingCancellationRequest[]>([])
+  const [approvalLoadError, setApprovalLoadError] = useState('')
+  const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null)
+  const [approvalMessage, setApprovalMessage] = useState('')
+  const [approvalError, setApprovalError] = useState('')
 
   function handleDeleteMeeting(meetingId: string) {
     setMeetings((current) => current.filter((m) => m.id !== meetingId))
@@ -107,7 +129,7 @@ export function MeetingsPage() {
     let active = true
     setLoading(true)
     setError('')
-    getMeetings(user.id, user.email)
+    getMeetings()
       .then((records) => {
         if (!active) return
         const now = Date.now()
@@ -125,11 +147,46 @@ export function MeetingsPage() {
     return () => { active = false }
   }, [user, retryKey])
 
+  useEffect(() => {
+    if (!user) return
+    let active = true
+    setApprovalLoadError('')
+    getPendingMeetingCancellations()
+      .then((requests) => { if (active) setCancellationRequests(requests) })
+      .catch((reason: unknown) => {
+        if (!active) return
+        setCancellationRequests([])
+        setApprovalLoadError(reason instanceof Error ? reason.message : 'Cancellation approvals could not be loaded.')
+      })
+    return () => { active = false }
+  }, [user, retryKey])
+
+  async function decideCancellation(request: MeetingCancellationRequest, decision: 'approve' | 'reject') {
+    if (!user) return
+    setDecisionBusyId(request.id)
+    setApprovalMessage('')
+    setApprovalError('')
+    try {
+      const result = await decideMeetingCancellation(request.id, decision)
+      const deliveryNote = result.notification_failures.length > 0
+        ? ` Notification failed for: ${result.notification_failures.join(', ')}`
+        : ''
+      setApprovalMessage(`${result.message}${deliveryNote}`)
+      setCancellationRequests((current) => current.filter((item) => item.id !== request.id))
+      setRetryKey((key) => key + 1)
+    } catch (reason) {
+      setApprovalError(reason instanceof Error ? reason.message : 'The cancellation decision could not be saved.')
+    } finally {
+      setDecisionBusyId(null)
+    }
+  }
+
   const today = meetings.filter((meeting) => meeting.lifecycle !== 'completed' && (
-    isToday(meeting.startAt ?? meeting.startTime, meeting.timezone ?? 'UTC') || meeting.lifecycle === 'active'
+    meeting.lifecycle !== 'cancelled' && (isToday(meeting.startAt ?? meeting.startTime, meeting.timezone ?? 'UTC') || meeting.lifecycle === 'active')
   ))
   const upcoming = meetings.filter((meeting) => meeting.lifecycle === 'upcoming' && !isToday(meeting.startAt ?? meeting.startTime, meeting.timezone ?? 'UTC'))
-  const completed = meetings.filter((meeting) => meeting.lifecycle === 'completed')
+  const completed = meetings.filter((meeting) => meeting.lifecycle === 'completed' || meeting.lifecycle === 'cancelled')
+  const pendingMeetingIds = new Set(cancellationRequests.map((request) => request.meeting_id))
 
   return (
     <div className="page-stack meetings-page">
@@ -141,6 +198,49 @@ export function MeetingsPage() {
         </div>
         <Link className="button primary" to="/meetings/create"><Plus size={17} aria-hidden="true" /> Create Meeting</Link>
       </header>
+
+      {approvalLoadError && <p className="meeting-manage-error" role="alert">{approvalLoadError}</p>}
+      {approvalMessage && <p className="meeting-manage-notice" role="status">{approvalMessage}</p>}
+
+      {cancellationRequests.length > 0 && (
+        <section className="meeting-approval-queue" aria-labelledby="meeting-approval-heading">
+          <div className="meeting-approval-heading">
+            <div>
+              <p className="eyebrow">Organizer or delegate decision</p>
+              <h2 id="meeting-approval-heading">Cancellation approvals</h2>
+            </div>
+            <span className="date-label">{cancellationRequests.length} pending</span>
+          </div>
+          <p className="meeting-approval-policy">
+            Requests above the attendee threshold are approved by the meeting organizer or an authorized delegate.
+          </p>
+          {approvalError && <p className="meeting-manage-error" role="alert">{approvalError}</p>}
+          <div className="meeting-approval-list">
+            {cancellationRequests.map((request) => (
+              <article className="meeting-approval-row" key={request.id}>
+                <div>
+                  <h3>{request.meeting_title}</h3>
+                  <p>{request.attendee_count} attendees{request.reason ? ` · ${request.reason}` : ''}</p>
+                </div>
+                <div className="meeting-approval-actions">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={decisionBusyId === request.id}
+                    onClick={() => void decideCancellation(request, 'reject')}
+                  >Reject</button>
+                  <button
+                    className="button danger"
+                    type="button"
+                    disabled={decisionBusyId === request.id}
+                    onClick={() => void decideCancellation(request, 'approve')}
+                  >{decisionBusyId === request.id ? 'Saving…' : 'Approve cancellation'}</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       {loading ? (
         <section className="meetings-loading" role="status" aria-live="polite">
@@ -162,11 +262,17 @@ export function MeetingsPage() {
         </section>
       ) : (
         <div className="meetings-groups">
-          {today.length > 0 ? <TodaysMeetings meetings={today} /> : (
+          {today.length > 0 ? (
+            <TodaysMeetings
+              meetings={today}
+              onChanged={() => setRetryKey((key) => key + 1)}
+              pendingMeetingIds={pendingMeetingIds}
+            />
+          ) : (
             <section className="meetings-today-empty"><p className="eyebrow">Schedule</p><h2>Today's meetings</h2><p>No meetings today.</p></section>
           )}
-          <MeetingGroup title="Upcoming meetings" eyebrow="On your calendar" meetings={upcoming} />
-          <MeetingGroup title="Completed meetings" eyebrow="Past meetings" meetings={completed} onDelete={handleDeleteMeeting} />
+          <MeetingGroup title="Upcoming meetings" eyebrow="On your calendar" meetings={upcoming} onChanged={() => setRetryKey((key) => key + 1)} pendingMeetingIds={pendingMeetingIds} />
+          <MeetingGroup title="Completed and cancelled meetings" eyebrow="Past meetings" meetings={completed} onDelete={handleDeleteMeeting} onChanged={() => setRetryKey((key) => key + 1)} pendingMeetingIds={pendingMeetingIds} />
         </div>
       )}
 

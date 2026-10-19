@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -15,6 +16,8 @@ from app.email_delivery_service import process_due_emails
 from app.email_providers import DeliveryReceipt
 from app.email_draft_service import scan_sensitive
 from app.meeting.models import Base, Employee
+from app.auth_service import AuthenticatedPrincipal
+from app.authentication import require_authenticated_principal
 
 EMPLOYEE = {"actor_id": "user-001", "actor_role": "employee", "actor_team": "Engineering"}
 OTHER_EMPLOYEE = {"actor_id": "user-009", "actor_role": "employee", "actor_team": "Finance"}
@@ -44,10 +47,33 @@ def client(db_session: Session):
     def override_get_db():
         yield db_session
 
+    def test_principal(request: Request) -> AuthenticatedPrincipal:
+        query = request.query_params
+        return AuthenticatedPrincipal(
+            user_id=query.get("actor_id", "test-employee"),
+            account_id="test-auth-account",
+            email="test@example.test",
+            name="Test Actor",
+            role=query.get("actor_role", "employee"),
+            team=query.get("actor_team"),
+            jti="test-session",
+        )
+
+    original_overrides = app.dependency_overrides.copy()
+    startup_handlers = app.router.on_startup[:]
+    shutdown_handlers = app.router.on_shutdown[:]
+    app.router.on_startup.clear()
+    app.router.on_shutdown.clear()
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+    app.dependency_overrides[require_authenticated_principal] = test_principal
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(original_overrides)
+        app.router.on_startup[:] = startup_handlers
+        app.router.on_shutdown[:] = shutdown_handlers
 
 
 @pytest.fixture(autouse=True)
