@@ -2611,6 +2611,22 @@ The implementation includes backend scheduling and calendar API tests and fronte
 
 The frontend production build was also verified successfully.
 
+## Meeting Cancellation and Participant Management (Story 5.4)
+
+The platform supports meeting cancellation and participant management through the meeting management interface.
+
+### Features
+- Meeting cancellation through the meeting management dialog.
+- High-risk cancellation approval for meetings with more than 20 attendees.
+- Authorized delegate approval for cancellation requests.
+- Meeting event-change audit records.
+- Updated backend APIs, schemas, and database models.
+- Automated backend and frontend tests for meeting event changes.
+
+### Testing
+- Verified the high-risk cancellation approval workflow with a meeting containing 22 attendees.
+- Verified that an authorized delegate could approve the cancellation.
+- Added automated tests for meeting event changes.
 
 # 📌 Current Project Status
 
