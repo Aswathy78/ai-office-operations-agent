@@ -2,7 +2,15 @@ import { CalendarDays } from 'lucide-react'
 import type { Meeting } from '../../types/meeting'
 import { MeetingCard } from './MeetingCard'
 
-export function TodaysMeetings({ meetings }: { meetings: Meeting[] }) {
+export function TodaysMeetings({
+  meetings,
+  onChanged,
+  pendingMeetingIds,
+}: {
+  meetings: Meeting[]
+  onChanged?: () => void
+  pendingMeetingIds?: Set<string>
+}) {
   return (
     <section aria-labelledby="todays-meetings-title">
       <div className="section-heading">
@@ -13,7 +21,14 @@ export function TodaysMeetings({ meetings }: { meetings: Meeting[] }) {
         <span className="date-label"><CalendarDays size={16} aria-hidden="true" /> Today</span>
       </div>
       <div className="meeting-list">
-        {meetings.length > 0 ? meetings.map((meeting) => <MeetingCard key={meeting.id} meeting={meeting} />) : (
+        {meetings.length > 0 ? meetings.map((meeting) => (
+          <MeetingCard
+            key={meeting.id}
+            meeting={meeting}
+            onChanged={onChanged}
+            cancellationPending={pendingMeetingIds?.has(meeting.id)}
+          />
+        )) : (
           <div className="empty-card">
             <h3>No meetings today</h3>
             <p>Your schedule is clear. You can create a meeting when needed.</p>

@@ -1,17 +1,28 @@
-import { Building2, ShieldCheck, Users } from 'lucide-react'
+import { useState } from 'react'
+import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ROLE_LABELS, type UserRole } from '../types/user'
 import { useAuth } from '../contexts/AuthContext'
-
-const demoRoles: UserRole[] = ['employee', 'manager', 'hr_operations', 'admin']
 
 export function LoginPage() {
   const navigate = useNavigate()
-  const { signInAsDemo } = useAuth()
+  const { signIn, authNotice } = useAuth()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  const handleDemoLogin = (role: UserRole) => {
-    signInAsDemo(role)
-    navigate('/home', { replace: true })
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setError('')
+    setSubmitting(true)
+    try {
+      await signIn(email, password)
+      navigate('/home', { replace: true })
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Sign-in failed. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -31,42 +42,36 @@ export function LoginPage() {
           <p>Access meetings, tasks and AI-powered office operations from one workspace.</p>
         </div>
 
-        <div className="login-actions">
-          <button className="login-provider" type="button" onClick={() => alert('Google OAuth integration will be connected by the authentication team.')}>
-            <span className="provider-icon" aria-hidden="true">G</span>
-            Continue with Google
+        {authNotice && <p className="auth-error" role="alert">{authNotice}</p>}
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <label htmlFor="login-email">Work email</label>
+          <input
+            id="login-email"
+            type="email"
+            autoComplete="username"
+            required
+            maxLength={255}
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+          <label htmlFor="login-password">Password</label>
+          <input
+            id="login-password"
+            type="password"
+            autoComplete="current-password"
+            required
+            maxLength={1024}
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+          {error && <p className="auth-error" role="alert">{error}</p>}
+          <button className="button primary auth-submit" type="submit" disabled={submitting}>
+            {submitting ? 'Signing in…' : 'Sign in'}
           </button>
-          <button className="login-provider" type="button" onClick={() => alert('Microsoft Entra ID integration will be connected by the authentication team.')}>
-            <span className="provider-icon microsoft" aria-hidden="true"><Building2 size={17} /></span>
-            Continue with Microsoft
-          </button>
-        </div>
-
-        <div className="login-divider"><span>Development demo</span></div>
-
-        <div className="demo-login">
-          <p className="demo-title">Choose a demo account</p>
-          <p className="demo-description">This temporary selector simulates the role returned after authentication. Users will not choose their role in production.</p>
-          <div className="demo-role-grid">
-            {demoRoles.map((role) => (
-              <button key={role} className="demo-role" type="button" onClick={() => handleDemoLogin(role)}>
-                <span className="demo-role-icon" aria-hidden="true">
-                  {role === 'employee' && <Users size={18} />}
-                  {role === 'manager' && <Users size={18} />}
-                  {role === 'hr_operations' && <Building2 size={18} />}
-                  {role === 'admin' && <ShieldCheck size={18} />}
-                </span>
-                <span>
-                  <strong>{ROLE_LABELS[role]}</strong>
-                  <small>Sign in as demo</small>
-                </span>
-              </button>
-            ))}
-          </div>
-        </div>
+        </form>
 
         <p className="login-note">
-          Authentication is currently mocked for development. Google / Microsoft OAuth and server-side RBAC will replace this demo layer.
+          Accounts are provisioned by an administrator. Your access and role are verified by the server.
         </p>
       </section>
     </main>

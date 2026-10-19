@@ -10,7 +10,8 @@ export interface Meeting {
   agenda?: string | null
   organizer?: string | null
   organizerId?: string | null
-  lifecycle?: 'active' | 'upcoming' | 'completed'
+  canManage?: boolean
+  lifecycle?: 'active' | 'upcoming' | 'completed' | 'cancelled'
   timezone?: string
 }
 
@@ -24,6 +25,7 @@ export interface MeetingListRecord {
   status: string
   organizer_id?: string | null
   timezone: string
+  can_manage?: boolean
 }
 
 export interface MeetingCalendarAttendee {
@@ -58,6 +60,65 @@ export interface MeetingDetails {
   organizer_id: string
   is_valid: boolean
   is_expired: boolean
+}
+
+export interface MeetingParticipantRecord {
+  id: string
+  user_id: string | null
+  name: string
+  email: string | null
+  role: string
+}
+
+export interface MeetingAuditEntry {
+  id: string
+  meeting_id: string
+  actor_id: string
+  action: string
+  details: Record<string, unknown>
+  created_at: string
+}
+
+export interface MeetingCancellationRequest {
+  id: string
+  meeting_id: string
+  meeting_title: string
+  requested_by: string
+  reason: string | null
+  status: 'pending' | 'approved' | 'rejected'
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string | null
+  created_at: string
+  attendee_count: number
+}
+
+export interface MeetingChangeResult {
+  status: 'applied' | 'pending_approval'
+  message: string
+  meeting: MeetingListRecord | null
+  request_id: string | null
+  notifications_sent: string[]
+  notification_failures: string[]
+}
+
+export interface MeetingParticipantBulkChangeResult {
+  message: string
+  added: string[]
+  already_present: string[]
+  duplicate_addresses: string[]
+  invalid_addresses: string[]
+  failed_addresses: string[]
+  notifications_sent: string[]
+  notification_failures: string[]
+}
+
+export interface MeetingCancellationDecisionResult {
+  request: MeetingCancellationRequest
+  meeting: MeetingListRecord | null
+  message: string
+  notifications_sent: string[]
+  notification_failures: string[]
 }
 
 export interface GuestJoinRequest {

@@ -9,11 +9,19 @@ type Mode = 'pick' | 'instant' | 'scheduled' | 'created'
 
 type Participant = { email?: string; user_id?: string }
 
+const EMAIL_PATTERN = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$/i
+
+function normalizeParticipantEmail(email: string): string {
+  return email.trim().toLowerCase()
+}
+
 interface CreatedMeeting {
   id: string
   title: string
   join_url: string
   status: string
+  invitationsSent: string[]
+  invitationFailures: string[]
 }
 
 export function CreateMeetingPlaceholder() {
@@ -32,9 +40,18 @@ export function CreateMeetingPlaceholder() {
   const [copied, setCopied] = useState(false)
 
   function addParticipant() {
-    const email = participantEmail.trim()
+    const email = normalizeParticipantEmail(participantEmail)
     if (!email) return
-    setParticipants((c) => [...c, { email }])
+    if (!EMAIL_PATTERN.test(email) || email.length > 254) {
+      setError('Enter a valid email address for the participant.')
+      return
+    }
+    setParticipants((current) => (
+      current.some((participant) => normalizeParticipantEmail(participant.email ?? '') === email)
+        ? current
+        : [...current, { email }]
+    ))
+    setError('')
     setParticipantEmail('')
   }
 
@@ -59,28 +76,43 @@ export function CreateMeetingPlaceholder() {
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     setError('')
-    setLoading(true)
     const isInstant = mode === 'instant'
+    const pendingParticipantEmail = normalizeParticipantEmail(participantEmail)
+    if (pendingParticipantEmail && (
+      pendingParticipantEmail.length > 254 ||
+      !EMAIL_PATTERN.test(pendingParticipantEmail)
+    )) {
+      setError('Enter a valid email address for the participant.')
+      return
+    }
 
     if (!title.trim()) {
       setError('Meeting title is required.')
-      setLoading(false)
       return
     }
 
     if (!isInstant) {
       if (!startAt || !endAt) {
         setError('Start and end times are required for scheduled meetings.')
-        setLoading(false)
         return
       }
       if (new Date(endAt) <= new Date(startAt)) {
         setError('End time must be after start time.')
-        setLoading(false)
         return
       }
     }
 
+    const submittedParticipants = new Map<string, Participant>()
+    for (const participant of participants) {
+      if (!participant.email) continue
+      const email = normalizeParticipantEmail(participant.email)
+      if (email) submittedParticipants.set(email, { ...participant, email })
+    }
+    if (pendingParticipantEmail && !submittedParticipants.has(pendingParticipantEmail)) {
+      submittedParticipants.set(pendingParticipantEmail, { email: pendingParticipantEmail })
+    }
+
+    setLoading(true)
     try {
       const body: {
         title: string
@@ -93,7 +125,7 @@ export function CreateMeetingPlaceholder() {
         title: title.trim(),
         agenda: agenda.trim() || null,
         meeting_type: isInstant ? 'instant' : 'scheduled',
-        participants,
+        participants: [...submittedParticipants.values()],
       }
       if (!isInstant) {
         body.start_at = startAt
@@ -102,7 +134,14 @@ export function CreateMeetingPlaceholder() {
 
       const data = await createMeeting(body, user?.id ?? 'demo-organizer')
 
-      setCreated({ id: data.id, title: data.title, join_url: data.join_url, status: data.status })
+      setCreated({
+        id: data.id,
+        title: data.title,
+        join_url: data.join_url,
+        status: data.status,
+        invitationsSent: data.invitations_sent,
+        invitationFailures: data.invitation_failures,
+      })
       setMode('created')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to connect to the meeting server.')
@@ -144,6 +183,18 @@ export function CreateMeetingPlaceholder() {
         </div>
         <p className="eyebrow">Meeting {created.status === 'instant' ? 'ready' : 'scheduled'}</p>
         <h2 id="meeting-created-title">{created.title}</h2>
+        {created.invitationFailures.length > 0 ? (
+          <p role="alert">
+            Meeting created. {created.invitationsSent.length} invitation(s) sent; invitations could not be
+            delivered to: {created.invitationFailures.join(', ')}.
+          </p>
+        ) : (
+          <p role="status">
+            {created.invitationsSent.length > 0
+              ? `Invitation email sent to ${created.invitationsSent.length} participant(s).`
+              : 'No participant invitations were needed.'}
+          </p>
+        )}
 
         <div className="meeting-created-link-box">
           <label>Meeting link</label>

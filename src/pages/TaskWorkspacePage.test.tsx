@@ -74,12 +74,7 @@ describe('TaskWorkspacePage employee identity', () => {
       .toHaveAttribute('href', '/api/v1/tasks/calendar.ics')
     expect(getMyTasks).toHaveBeenCalledWith(demoUsers.employee.email)
     const now = new Date()
-    expect(getCalendarMeetings).toHaveBeenCalledWith(
-      demoUsers.employee.id,
-      demoUsers.employee.email,
-      now.getFullYear(),
-      now.getMonth() + 1,
-    )
+    expect(getCalendarMeetings).toHaveBeenCalledWith(now.getFullYear(), now.getMonth() + 1)
 
     await user.click(screen.getByRole('button', { name: 'Refresh' }))
     await waitFor(() => {
@@ -243,8 +238,6 @@ describe('TaskWorkspacePage employee identity', () => {
 
     await waitFor(() => {
       expect(getCalendarMeetings).toHaveBeenLastCalledWith(
-        demoUsers.employee.id,
-        demoUsers.employee.email,
         nextMonth.getFullYear(),
         nextMonth.getMonth() + 1,
       )

@@ -15,6 +15,14 @@ import {
   approveMeetingMinutes,
   sendMeetingMinutes,
   getMeetingMinutesRecipients,
+  addMeetingParticipant,
+  addMeetingParticipants,
+  cancelMeeting,
+  decideMeetingCancellation,
+  getMeetingAudit,
+  getMeetingParticipants,
+  getPendingMeetingCancellations,
+  removeMeetingParticipant,
 } from './meetings'
 import type {
   MeetingActionItems,
@@ -26,6 +34,7 @@ import type {
   MeetingMinutesDeliveryResponse,
   MeetingMinutesRecipient,
 } from '../types/meeting'
+import { clearAccessToken, setAccessToken } from './client'
 
 const transcriptFixture: MeetingTranscript = {
   id: 'transcript-1',
@@ -105,6 +114,7 @@ function stubFetch(responseBody: unknown = transcriptFixture) {
 }
 
 afterEach(() => {
+  clearAccessToken()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -209,18 +219,88 @@ describe('meeting calendar API', () => {
     }
     const fetchMock = stubFetch(responseBody)
 
-    const result = await getCalendarMeetings(
-      'employee/1',
-      'maya+work@example.test',
-      2026,
-      10,
-    )
+    const result = await getCalendarMeetings(2026, 10)
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1:8000/api/v1/meetings/calendar?user_id=employee%2F1&email=maya%2Bwork%40example.test&year=2026&month=10',
+      'http://127.0.0.1:8000/api/v1/meetings/calendar?year=2026&month=10',
     )
     expect(result.timezone).toBe('Asia/Kolkata')
     expect(result.meetings[0].attendees[0].name).toBe('Ava Patel')
+  })
+})
+
+describe('meeting event change API (Story 5.4)', () => {
+  it('loads the authorized roster and sends participant changes to the meeting routes', async () => {
+    const fetchMock = stubFetch({ status: 'applied', message: 'Done', notifications_sent: [], notification_failures: [] })
+
+    await getMeetingParticipants('meeting/one')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting%2Fone/participants',
+    )
+
+    await addMeetingParticipant('meeting-1', { email: 'guest@example.test' })
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/participants',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ email: 'guest@example.test' }) }),
+    )
+
+    await addMeetingParticipants('meeting-1', ['guest1@example.test', 'guest2@example.test'])
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/participants/bulk',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ emails: ['guest1@example.test', 'guest2@example.test'] }),
+      }),
+    )
+
+    await removeMeetingParticipant('meeting-1', 'participant-1')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/participants/participant-1',
+      { method: 'DELETE' },
+    )
+  })
+
+  it('requests cancellation, lists pending requests, and submits approval decisions', async () => {
+    const fetchMock = stubFetch([])
+
+    await cancelMeeting('meeting-1', 'No longer needed')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/cancel',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ reason: 'No longer needed' }) }),
+    )
+
+    await getPendingMeetingCancellations()
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/cancellation-requests',
+    )
+
+    await decideMeetingCancellation('request-1', 'approve')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/cancellation-requests/request-1/decide',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ decision: 'approve', note: null }) }),
+    )
+
+    await decideMeetingCancellation('request/reject', 'reject')
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/cancellation-requests/request%2Freject/decide',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ decision: 'reject', note: null }) }),
+    )
+  })
+
+  it('loads meeting audit history with the authenticated API client', async () => {
+    const fetchMock = stubFetch([])
+    setAccessToken('verified-session-token')
+
+    await getMeetingAudit('meeting-1')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:8000/api/v1/meetings/meeting-1/audit',
+      expect.objectContaining({
+        headers: expect.any(Headers),
+      }),
+    )
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization'))
+      .toBe('Bearer verified-session-token')
   })
 })
 

@@ -1,18 +1,40 @@
 from datetime import datetime, timezone
+import re
 from typing import Literal
 from pydantic import (
     AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
+    field_validator,
     model_serializer,
     model_validator,
+)
+
+_PARTICIPANT_EMAIL_PATTERN = re.compile(
+    r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+    r"(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$",
+    re.IGNORECASE,
 )
 
 
 class ParticipantCreate(BaseModel):
     user_id: str | None = None
     email: str | None = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_and_validate_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Participant email must be a valid email address.")
+        email = value.strip().casefold()
+        if not email:
+            return None
+        if len(email) > 254 or not _PARTICIPANT_EMAIL_PATTERN.fullmatch(email):
+            raise ValueError("Participant email must be a valid email address.")
+        return email
 
 
 class MeetingCreate(BaseModel):
@@ -39,6 +61,32 @@ class MeetingCreate(BaseModel):
             self.start_at = start_at
             self.end_at = end_at
 
+        participants_by_email: dict[str, int] = {}
+        unique_participants: list[ParticipantCreate] = []
+        for participant in self.participants:
+            if participant.email is None:
+                unique_participants.append(participant)
+                continue
+
+            existing_index = participants_by_email.get(participant.email)
+            if existing_index is None:
+                participants_by_email[participant.email] = len(unique_participants)
+                unique_participants.append(participant)
+                continue
+
+            existing = unique_participants[existing_index]
+            if (
+                existing.user_id is not None
+                and participant.user_id is not None
+                and existing.user_id != participant.user_id
+            ):
+                raise ValueError(
+                    "Duplicate participant emails cannot refer to different user IDs."
+                )
+            if existing.user_id is None and participant.user_id is not None:
+                unique_participants[existing_index] = participant
+
+        self.participants = unique_participants
         return self
 
     @staticmethod
@@ -61,6 +109,15 @@ class MeetingResponse(BaseModel):
     status: str
     organizer_id: str | None = None
     timezone: str
+
+
+class MeetingCreationResponse(MeetingResponse):
+    invitations_sent: list[str] = Field(default_factory=list)
+    invitation_failures: list[str] = Field(default_factory=list)
+
+
+class MeetingListResponse(MeetingResponse):
+    can_manage: bool = False
 
 
 class MeetingCalendarAttendeeResponse(BaseModel):
@@ -661,5 +718,109 @@ class MeetingDelegateResponse(BaseModel):
     created_at: datetime
 
 
-TaskResponse.model_rebuild()
+class MeetingCancellationRequestCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+class MeetingCancellationRequestResponse(BaseModel):
+    id: str
+    meeting_id: str
+    meeting_title: str
+    requested_by: str
+    reason: str | None = None
+    status: Literal["pending", "approved", "rejected"]
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_note: str | None = None
+    created_at: datetime
+    attendee_count: int
+
+
+class MeetingCancellationDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class MeetingParticipantChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str | None = Field(default=None, min_length=1)
+    email: str | None = Field(default=None, min_length=3, max_length=255)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_and_validate_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("Participant email must be a valid email address.")
+        email = value.strip().casefold()
+        if not email:
+            return None
+        if len(email) > 254 or not _PARTICIPANT_EMAIL_PATTERN.fullmatch(email):
+            raise ValueError("Participant email must be a valid email address.")
+        return email
+
+    @model_validator(mode="after")
+    def require_participant_identity(self):
+        if not self.user_id and not self.email:
+            raise ValueError("Provide a user_id or email for the participant.")
+        return self
+
+
+class MeetingParticipantBulkChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    emails: list[str] = Field(min_length=1, max_length=200)
+
+
+class MeetingChangeResponse(BaseModel):
+    status: Literal["applied", "pending_approval"]
+    message: str
+    meeting: MeetingResponse | None = None
+    request_id: str | None = None
+    notifications_sent: list[str] = Field(default_factory=list)
+    notification_failures: list[str] = Field(default_factory=list)
+
+
+class MeetingParticipantBulkChangeResponse(BaseModel):
+    message: str
+    added: list[str] = Field(default_factory=list)
+    already_present: list[str] = Field(default_factory=list)
+    duplicate_addresses: list[str] = Field(default_factory=list)
+    invalid_addresses: list[str] = Field(default_factory=list)
+    failed_addresses: list[str] = Field(default_factory=list)
+    notifications_sent: list[str] = Field(default_factory=list)
+    notification_failures: list[str] = Field(default_factory=list)
+
+
+class MeetingCancellationDecisionResponse(BaseModel):
+    request: MeetingCancellationRequestResponse
+    meeting: MeetingResponse | None = None
+    message: str
+    notifications_sent: list[str] = Field(default_factory=list)
+    notification_failures: list[str] = Field(default_factory=list)
+
+
+class MeetingAuditLogResponse(BaseModel):
+    id: str
+    meeting_id: str
+    actor_id: str
+    action: str
+    details: dict
+    created_at: datetime
+
+
+class MeetingParticipantResponse(BaseModel):
+    id: str
+    user_id: str | None = None
+    name: str
+    email: str | None = None
+    role: str
+
+
+TaskResponse.model_rebuild()

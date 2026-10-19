@@ -315,13 +315,15 @@ def send_meeting_invitations(
 
     # Collect recipient list (resolved employees and any direct raw emails)
     recipient_map: dict[str, str] = {
-        att.email.lower(): f"{att.name} <{att.email}>" for att in attendees if att.email
+        att.email.strip().casefold(): f"{att.name} <{att.email.strip()}>"
+        for att in attendees
+        if att.email and att.email.strip()
     }
     if raw_emails:
         for email in raw_emails:
-            e_lower = email.strip().lower()
-            if e_lower and e_lower not in recipient_map:
-                recipient_map[e_lower] = email.strip()
+            normalized_email = email.strip().casefold()
+            if normalized_email and normalized_email not in recipient_map:
+                recipient_map[normalized_email] = email.strip()
 
     body_lines = [
         "You have been invited to a meeting.",

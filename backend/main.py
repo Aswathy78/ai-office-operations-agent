@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import create_tables
+from app.auth_router import router as auth_router
 from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
 from app.task_router import router as task_router
@@ -41,6 +42,7 @@ app.add_middleware(
 app.include_router(meeting_router)
 app.include_router(task_router)
 app.include_router(email_draft_router)
+app.include_router(auth_router)
 
 
 @app.on_event("startup")

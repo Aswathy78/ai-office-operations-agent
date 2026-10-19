@@ -11,6 +11,8 @@ python-multipart==0.0.32
 # implementing the AES-GCM storage integration.
 cryptography==50.0.2
 python-dotenv==1.2.4
+PyJWT==2.15.1
+pwdlib[argon2]==0.3.1
 
 # Groq API structured summary generation and action item extraction.
 groq>=0.11.0

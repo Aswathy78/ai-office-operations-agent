@@ -21,47 +21,20 @@ import type {
   MeetingMinutesDeliveryResponse,
   MeetingMinutesRecipient,
   MeetingMinutesUpdateRequest,
+  MeetingParticipantRecord,
+  MeetingChangeResult,
+  MeetingParticipantBulkChangeResult,
+  MeetingCancellationRequest,
+  MeetingCancellationDecisionResult,
+  MeetingAuditEntry,
   ScheduleResult,
   ScheduledMeetingDetail,
   ConflictDetail,
   MeetingRescheduleRequest,
   RescheduleDecisionResponse,
 } from '../types/meeting'
-
-export let API_BASE_URL =
-  (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL) ||
-  'http://127.0.0.1:8000'
-
-function getFallbackBaseUrl(current: string): string | null {
-  if (current.includes(':8000')) {
-    return current.replace(':8000', ':9000')
-  }
-  if (current.includes(':9000')) {
-    return current.replace(':9000', ':8000')
-  }
-  return null
-}
-
-async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const urlStr = typeof input === 'string' ? input : input.toString()
-  try {
-    return init !== undefined ? await fetch(urlStr, init) : await fetch(urlStr)
-  } catch (err) {
-    const fallback = getFallbackBaseUrl(API_BASE_URL)
-    if (fallback && urlStr.startsWith(API_BASE_URL)) {
-      const fallbackUrl = urlStr.replace(API_BASE_URL, fallback)
-      try {
-        const response =
-          init !== undefined ? await fetch(fallbackUrl, init) : await fetch(fallbackUrl)
-        API_BASE_URL = fallback
-        return response
-      } catch {
-        // preserve original error
-      }
-    }
-    throw err
-  }
-}
+import { API_BASE_URL, apiFetch } from './client'
+export { API_BASE_URL } from './client'
 
 export class MeetingApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -106,21 +79,16 @@ export function getMeeting(meetingId: string): Promise<MeetingDetails> {
     .then((response) => readResponse<MeetingDetails>(response))
 }
 
-export async function getMeetings(userId: string, userEmail: string): Promise<MeetingListRecord[]> {
-  const query = new URLSearchParams({ user_id: userId, email: userEmail })
-  return apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`)
+export async function getMeetings(): Promise<MeetingListRecord[]> {
+  return apiFetch(`${API_BASE_URL}/api/v1/meetings/`)
     .then((response) => readResponse<MeetingListRecord[]>(response))
 }
 
 export function getCalendarMeetings(
-  userId: string,
-  userEmail: string,
   year: number,
   month: number,
 ): Promise<MeetingCalendarResponse> {
   const query = new URLSearchParams({
-    user_id: userId,
-    email: userEmail,
     year: String(year),
     month: String(month),
   })
@@ -151,7 +119,7 @@ export function decideGuestRequest(
   organizerId: string,
 ): Promise<GuestRequest> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/lobby/${encodeURIComponent(requestId)}/decision?${query}`,
     {
       method: 'POST',
@@ -177,7 +145,7 @@ export function getMeetingSummary(
   organizerId: string,
 ): Promise<MeetingSummary> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/summary?${query}`,
   ).then((response) => readResponse<MeetingSummary>(response))
 }
@@ -187,7 +155,7 @@ export function getMeetingActionItems(
   organizerId: string,
 ): Promise<MeetingActionItems> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items?${query}`,
   ).then((response) => readResponse<MeetingActionItems>(response))
 }
@@ -204,7 +172,7 @@ export function confirmActionItemOwner(
   organizerId: string,
 ): Promise<MeetingActionItem> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/action-items/${encodeURIComponent(actionItemId)}/confirm-owner?${query}`,
     {
       method: 'POST',
@@ -307,13 +275,12 @@ export function getMeetingTranscriptCorrections(
   ).then((response) => readResponse<TranscriptCorrection[]>(response))
 }
 
-export function meetingWebSocketUrl(meetingId: string, userId?: string | null): string {
+export function meetingWebSocketUrl(meetingId: string): string {
   const url = new URL(
     `/api/v1/meetings/${encodeURIComponent(meetingId)}/ws`,
     API_BASE_URL,
   )
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  if (userId) url.searchParams.set('user_id', userId)
   return url.toString()
 }
 
@@ -397,7 +364,7 @@ export function startMeetingRecording(
   organizerId: string,
 ): Promise<MeetingRecordingRecord> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/start?${query}`,
     { method: 'POST' },
   ).then((response) => readResponse<MeetingRecordingRecord>(response))
@@ -408,7 +375,7 @@ export function stopMeetingRecording(
   organizerId: string,
 ): Promise<MeetingRecordingRecord> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/stop?${query}`,
     { method: 'POST' },
   ).then((response) => readResponse<MeetingRecordingRecord>(response))
@@ -437,7 +404,7 @@ export function uploadMeetingRecording(
   const query = new URLSearchParams({ organizer_id: organizerId })
   const formData = new FormData()
   formData.append('file', recording, `recording.${extension}`)
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/upload?${query}`,
     { method: 'POST', body: formData },
   ).then((response) => readResponse<MeetingRecordingUploadResponse>(response))
@@ -467,7 +434,7 @@ export function registerParticipantTracks(
   tracks: ParticipantTrackRegistration[],
 ): Promise<ParticipantTrackRegistrationResponse[]> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/tracks?${query}`,
     {
       method: 'POST',
@@ -498,7 +465,7 @@ export function uploadParticipantTrack(
   const query = new URLSearchParams({ organizer_id: organizerId })
   const formData = new FormData()
   formData.append('file', recording, `participant_track.${extension}`)
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/recording/${encodeURIComponent(recordingId)}/upload?${query}`,
     { method: 'POST', body: formData },
   ).then((response) => readResponse<MeetingRecordingUploadResponse>(response))
@@ -517,7 +484,7 @@ export function joinMeetingAttendance(
 }
 
 export function leaveMeetingAttendance(meetingId: string, attendanceId: string): Promise<AttendanceRecord> {
-  return fetch(
+  return apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/attendance/${encodeURIComponent(attendanceId)}/leave`,
     { method: 'POST', keepalive: true },
   ).then((response) => readResponse<AttendanceRecord>(response))
@@ -533,7 +500,18 @@ export async function createMeeting(
     participants: { email?: string; user_id?: string }[]
   },
   organizerId: string,
-): Promise<{ id: string; title: string; join_url: string; status: string; start_at: string; end_at: string; organizer_id?: string | null; timezone: string }> {
+): Promise<{
+  id: string
+  title: string
+  join_url: string
+  status: string
+  start_at: string
+  end_at: string
+  organizer_id?: string | null
+  timezone: string
+  invitations_sent: string[]
+  invitation_failures: string[]
+}> {
   const query = new URLSearchParams({ organizer_id: organizerId })
   const response = await apiFetch(`${API_BASE_URL}/api/v1/meetings/?${query}`, {
     method: 'POST',
@@ -545,7 +523,7 @@ export async function createMeeting(
 
 export async function deleteMeeting(meetingId: string, organizerId: string): Promise<void> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}?${query}`,
     { method: 'DELETE' },
   )
@@ -554,12 +532,99 @@ export async function deleteMeeting(meetingId: string, organizerId: string): Pro
   }
 }
 
+export function getMeetingParticipants(
+  meetingId: string,
+): Promise<MeetingParticipantRecord[]> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/participants`,
+  ).then((response) => readResponse<MeetingParticipantRecord[]>(response))
+}
+
+export function getMeetingAudit(meetingId: string): Promise<MeetingAuditEntry[]> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/audit`,
+  ).then((response) => readResponse<MeetingAuditEntry[]>(response))
+}
+
+export function addMeetingParticipant(
+  meetingId: string,
+  participant: { user_id?: string; email?: string },
+): Promise<MeetingChangeResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/participants`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(participant),
+    },
+  ).then((response) => readResponse<MeetingChangeResult>(response))
+}
+
+export function addMeetingParticipants(
+  meetingId: string,
+  emails: string[],
+): Promise<MeetingParticipantBulkChangeResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/participants/bulk`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emails }),
+    },
+  ).then((response) => readResponse<MeetingParticipantBulkChangeResult>(response))
+}
+
+export function removeMeetingParticipant(
+  meetingId: string,
+  participantId: string,
+): Promise<MeetingChangeResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/participants/${encodeURIComponent(participantId)}`,
+    { method: 'DELETE' },
+  ).then((response) => readResponse<MeetingChangeResult>(response))
+}
+
+export function cancelMeeting(
+  meetingId: string,
+  reason?: string,
+): Promise<MeetingChangeResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/cancel`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason || null }),
+    },
+  ).then((response) => readResponse<MeetingChangeResult>(response))
+}
+
+export function getPendingMeetingCancellations(): Promise<MeetingCancellationRequest[]> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/cancellation-requests`,
+  ).then((response) => readResponse<MeetingCancellationRequest[]>(response))
+}
+
+export function decideMeetingCancellation(
+  requestId: string,
+  decision: 'approve' | 'reject',
+  note?: string,
+): Promise<MeetingCancellationDecisionResult> {
+  return apiFetch(
+    `${API_BASE_URL}/api/v1/meetings/cancellation-requests/${encodeURIComponent(requestId)}/decide`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, note: note || null }),
+    },
+  ).then((response) => readResponse<MeetingCancellationDecisionResult>(response))
+}
+
 export async function endMeetingForEveryone(
   meetingId: string,
   organizerId: string,
 ): Promise<{ id: string; status: string }> {
   const query = new URLSearchParams({ organizer_id: organizerId })
-  const response = await fetch(
+  const response = await apiFetch(
     `${API_BASE_URL}/api/v1/meetings/${encodeURIComponent(meetingId)}/end?${query}`,
     { method: 'POST' },
   )

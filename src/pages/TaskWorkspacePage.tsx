@@ -75,12 +75,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
     setCalendarLoading(true)
     setCalendarError('')
     setCalendarMeetings([])
-    getCalendarMeetings(
-      user.id,
-      user.email,
-      calendarMonth.year,
-      calendarMonth.month,
-    ).then((result) => {
+    getCalendarMeetings(calendarMonth.year, calendarMonth.month).then((result) => {
       if (!active) return
       setCalendarMeetings(result.meetings)
       setCalendarTimeZone(result.timezone)

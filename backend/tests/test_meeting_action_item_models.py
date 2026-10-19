@@ -428,5 +428,168 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
             and index["unique"]
             for index in inspector.get_indexes("task_notifications")
         )
+
+        assert {
+            "id",
+            "meeting_id",
+            "requested_by",
+            "reason",
+            "status",
+            "decided_by",
+            "decided_at",
+            "decision_note",
+            "created_at",
+        } == {
+            column["name"]
+            for column in inspector.get_columns("meeting_cancellation_requests")
+        }
+        cancellation_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("meeting_cancellation_requests")
+        }
+        assert isinstance(cancellation_columns["meeting_id"]["type"], sa.String)
+        assert cancellation_columns["meeting_id"]["type"].length == 36
+        assert any(
+            foreign_key["constrained_columns"] == ["meeting_id"]
+            and foreign_key["referred_table"] == "meetings"
+            and foreign_key["referred_columns"] == ["id"]
+            and foreign_key["options"].get("ondelete") == "CASCADE"
+            for foreign_key in inspector.get_foreign_keys("meeting_cancellation_requests")
+        )
+        assert any(
+            "pending" in constraint["sqltext"]
+            and "approved" in constraint["sqltext"]
+            and "rejected" in constraint["sqltext"]
+            for constraint in inspector.get_check_constraints("meeting_cancellation_requests")
+        )
+        assert any(
+            index["name"] == "ix_meeting_cancellation_requests_meeting_status"
+            and index["column_names"] == ["meeting_id", "status"]
+            for index in inspector.get_indexes("meeting_cancellation_requests")
+        )
+
+        assert {
+            "id",
+            "meeting_id",
+            "actor_id",
+            "action",
+            "details",
+            "created_at",
+        } == {
+            column["name"]
+            for column in inspector.get_columns("meeting_audit_logs")
+        }
+        audit_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("meeting_audit_logs")
+        }
+        assert isinstance(audit_columns["details"]["type"], sa.JSON)
+        assert inspector.get_foreign_keys("meeting_audit_logs") == []
+        assert any(
+            index["name"] == "ix_meeting_audit_logs_meeting_created_at"
+            and index["column_names"] == ["meeting_id", "created_at"]
+            for index in inspector.get_indexes("meeting_audit_logs")
+        )
+
+        assert {
+            "id",
+            "employee_id",
+            "email_normalized",
+            "password_hash",
+            "role",
+            "is_enabled",
+            "created_at",
+            "updated_at",
+        } == {
+            column["name"] for column in inspector.get_columns("auth_accounts")
+        }
+        assert any(
+            unique["name"] == "uq_auth_accounts_employee_id"
+            and unique["column_names"] == ["employee_id"]
+            for unique in inspector.get_unique_constraints("auth_accounts")
+        )
+        assert any(
+            unique["name"] == "uq_auth_accounts_email_normalized"
+            and unique["column_names"] == ["email_normalized"]
+            for unique in inspector.get_unique_constraints("auth_accounts")
+        )
+        assert any(
+            foreign_key["constrained_columns"] == ["employee_id"]
+            and foreign_key["referred_table"] == "employees"
+            and foreign_key["options"].get("ondelete") == "RESTRICT"
+            for foreign_key in inspector.get_foreign_keys("auth_accounts")
+        )
+        assert any(
+            index["name"] == "ix_auth_accounts_enabled_role"
+            and index["column_names"] == ["is_enabled", "role"]
+            for index in inspector.get_indexes("auth_accounts")
+        )
+        assert {
+            "jti",
+            "account_id",
+            "expires_at",
+            "revoked_at",
+            "created_at",
+        } == {
+            column["name"] for column in inspector.get_columns("auth_sessions")
+        }
+        assert any(
+            foreign_key["constrained_columns"] == ["account_id"]
+            and foreign_key["referred_table"] == "auth_accounts"
+            and foreign_key["options"].get("ondelete") == "CASCADE"
+            for foreign_key in inspector.get_foreign_keys("auth_sessions")
+        )
+        assert any(
+            index["name"] == "ix_auth_sessions_account_expires"
+            and index["column_names"] == ["account_id", "expires_at"]
+            for index in inspector.get_indexes("auth_sessions")
+        )
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "20261018_02")
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "auth_accounts" not in inspector.get_table_names()
+        assert "auth_sessions" not in inspector.get_table_names()
+        assert "meeting_cancellation_requests" in inspector.get_table_names()
+        assert "meeting_audit_logs" in inspector.get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "auth_accounts" in inspector.get_table_names()
+        assert "auth_sessions" in inspector.get_table_names()
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "20261018_01")
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "meeting_cancellation_requests" not in inspector.get_table_names()
+        assert "meeting_audit_logs" not in inspector.get_table_names()
+        assert "auth_accounts" not in inspector.get_table_names()
+        assert "auth_sessions" not in inspector.get_table_names()
+        assert "meeting_reschedule_requests" in inspector.get_table_names()
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url)
+    try:
+        inspector = inspect(engine)
+        assert "meeting_cancellation_requests" in inspector.get_table_names()
+        assert "meeting_audit_logs" in inspector.get_table_names()
+        assert "auth_accounts" in inspector.get_table_names()
+        assert "auth_sessions" in inspector.get_table_names()
+        assert any(
+            index["name"] == "ix_auth_sessions_account_expires"
+            for index in inspector.get_indexes("auth_sessions")
+        )
     finally:
         engine.dispose()

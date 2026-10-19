@@ -25,8 +25,8 @@ export function Header() {
 
   if (!user) return null
 
-  const handleSignOut = () => {
-    signOut()
+  const handleSignOut = async () => {
+    await signOut()
     navigate('/login', { replace: true })
   }
 

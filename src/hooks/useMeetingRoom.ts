@@ -729,7 +729,7 @@ export function useMeetingRoom({
 
     let socket: WebSocket
     try {
-      socket = new WebSocket(meetingWebSocketUrl(activeMeetingId, userIdRef.current))
+      socket = new WebSocket(meetingWebSocketUrl(activeMeetingId))
     } catch (error) {
       setConnectionState('error')
       setLastError(error instanceof Error ? error.message : 'Unable to create meeting connection.')
