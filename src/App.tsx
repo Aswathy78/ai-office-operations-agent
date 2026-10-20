@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/layout/AppShell'
 import { AccessDenied, NotFound } from './components/common/AccessDenied'
 import { routePermissions } from './config/navigation'
+import { AssistantProvider } from './contexts/AssistantContext'
 import { useAuth } from './contexts/AuthContext'
 import { CreateMeetingPlaceholder } from './pages/CreateMeetingPlaceholder'
 import { GuestMeetingRoomPlaceholder } from './pages/GuestMeetingRoomPlaceholder'
@@ -81,5 +82,9 @@ function AppRoutes() {
 }
 
 export default function App() {
-  return <AppRoutes />
+  return (
+    <AssistantProvider>
+      <AppRoutes />
+    </AssistantProvider>
+  )
 }

@@ -55,6 +55,11 @@ def normalize_email(value: str) -> str:
 
 def _jwt_settings() -> tuple[bytes, str, str, int]:
     secret = os.getenv("AUTH_JWT_SECRET", "")
+    if len(secret.encode("utf-8")) < 32:
+        from dotenv import load_dotenv
+        from pathlib import Path
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env", override=True)
+        secret = os.getenv("AUTH_JWT_SECRET", "")
     secret_bytes = secret.encode("utf-8")
     if len(secret_bytes) < 32:
         raise AuthConfigurationError(
