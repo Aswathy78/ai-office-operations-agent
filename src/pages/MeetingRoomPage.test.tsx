@@ -8,7 +8,8 @@ import { getMeeting, getMeetingSummary } from '../api/meetings'
 import { MeetingRoomPage } from './MeetingRoomPage'
 import type { MeetingDetails, MeetingSummary } from '../types/meeting'
 
-const { authValue, roomValue } = vi.hoisted(() => ({
+const { authValue, roomValue, recordingValue } = vi.hoisted(() => ({
+  recordingValue: {} as Record<string, unknown>,
   authValue: { user: { id: 'organizer-1', name: 'Maya', email: 'maya@example.com' } },
   roomValue: {
     isMutedByOrganizer: false,
@@ -64,7 +65,7 @@ vi.mock('../hooks/useMeetingRoom', () => ({
 }))
 
 vi.mock('../hooks/useMeetingRecording', () => ({
-  useMeetingRecording: () => ({}),
+  useMeetingRecording: () => recordingValue,
 }))
 
 vi.mock('../components/meetings/LocalMediaPreview', () => ({
@@ -121,6 +122,8 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
   roomValue.meetingEnded = false
+  roomValue.isMicrophoneEnabled = false
+  for (const key of Object.keys(recordingValue)) delete recordingValue[key]
 })
 
 describe('MeetingRoomPage summary', () => {
@@ -151,5 +154,32 @@ describe('MeetingRoomPage summary', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Meeting summary is being processed.',
     )
+  })
+})
+
+describe('MeetingRoomPage recording with a muted microphone', () => {
+  it('warns that a muted microphone is not being recorded', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getMeeting).mockResolvedValue(meeting)
+    recordingValue.state = 'recording'
+    roomValue.isMicrophoneEnabled = false
+
+    render(meetingRoomElement())
+    await user.click(await screen.findByRole('button', { name: 'Join meeting' }))
+
+    expect(await screen.findByText(/your microphone is muted, so your voice is not being recorded/)).toBeInTheDocument()
+  })
+
+  it('shows plain Recording when the microphone is on', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getMeeting).mockResolvedValue(meeting)
+    recordingValue.state = 'recording'
+    roomValue.isMicrophoneEnabled = true
+
+    render(meetingRoomElement())
+    await user.click(await screen.findByRole('button', { name: 'Join meeting' }))
+
+    expect(await screen.findByText('Recording')).toBeInTheDocument()
+    expect(screen.queryByText(/microphone is muted/)).not.toBeInTheDocument()
   })
 })

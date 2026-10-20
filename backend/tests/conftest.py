@@ -1,12 +1,13 @@
 import os
 
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 # TestClient(app) runs the startup hook. Never let the reminder scheduler or the
 # e-mail dispatcher run against the real database (and send real e-mails) during tests.
 os.environ["TASK_REMINDER_SCHEDULER_ENABLED"] = "false"
 os.environ["EMAIL_DISPATCHER_ENABLED"] = "false"
+os.environ["TASK_CALENDAR_SYNC_ENABLED"] = "false"
 
 
 @pytest.fixture(autouse=True)
@@ -15,6 +16,7 @@ def _no_background_reminder_scheduler(monkeypatch):
 
     monkeypatch.setattr(main, "start_task_reminder_scheduler", lambda: False)
     monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
+    monkeypatch.setattr(main, "start_task_calendar_scheduler", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -43,14 +45,18 @@ def _test_authentication_boundary(request):
     else:
         def principal_from_legacy_test_request(request: Request) -> AuthenticatedPrincipal:
             query = request.query_params
-            actor_id = (
+            query_actor = (
                 query.get("actor_id")
                 or query.get("user_id")
                 or query.get("organizer_id")
                 or query.get("requester_id")
-                or request.headers.get("X-User-Id")
-                or "test-employee"
             )
+            header_actor = request.headers.get("X-User-Id")
+            if query_actor and header_actor and query_actor != header_actor:
+                # Two different identities in one request can never come from one
+                # signed-in user; refuse it as the real token check would.
+                raise HTTPException(status_code=403, detail="Conflicting caller identity.")
+            actor_id = query_actor or header_actor or "test-employee"
             role = query.get("actor_role", "employee")
             team = query.get("actor_team")
             email = (

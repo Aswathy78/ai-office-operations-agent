@@ -564,3 +564,17 @@ def test_wake_runs_a_pass_immediately(monkeypatch):
         stop.set()
         email_dispatcher.wake()
         thread.join(timeout=2)
+
+
+def test_email_times_are_sent_as_utc(client, db_session, monkeypatch):
+    """SQLite drops the timezone; the API must still mark times as UTC so browsers show local time."""
+    FakeProvider(monkeypatch)
+    draft = _create(client)
+    _send(client, draft["id"])
+    _dispatch(db_session)
+    sent = _get(client, draft["id"])
+    events = client.get(f"/api/v1/email-drafts/{draft['id']}/events", params=EMPLOYEE).json()
+    for value in (sent["created_at"], sent["sent_at"], sent["status_changed_at"], events[-1]["created_at"]):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        assert parsed.utcoffset() == timedelta(0), value
+        assert abs((parsed - datetime.now(timezone.utc)).total_seconds()) < 120, value

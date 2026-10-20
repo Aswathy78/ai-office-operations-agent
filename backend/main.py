@@ -13,6 +13,10 @@ from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
 from app.task_router import router as task_router
 from app.email_dispatcher import start_email_dispatcher, stop_email_dispatcher
+from app.task_calendar_scheduler import (
+    start_task_calendar_scheduler,
+    stop_task_calendar_scheduler,
+)
 from app.task_reminder_scheduler import (
     start_task_reminder_scheduler,
     stop_task_reminder_scheduler,
@@ -58,12 +62,14 @@ def startup():
         pass
     start_task_reminder_scheduler()
     start_email_dispatcher()
+    start_task_calendar_scheduler()
 
 
 @app.on_event("shutdown")
 def shutdown():
     stop_task_reminder_scheduler()
     stop_email_dispatcher()
+    stop_task_calendar_scheduler()
 
 
 @app.get("/")

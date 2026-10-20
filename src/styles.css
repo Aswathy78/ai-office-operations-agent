@@ -1209,3 +1209,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .email-escalation { display: grid; gap: 4px; padding: 10px 12px; border-radius: 8px; background: #f6f1ff; color: #4b2b85; font-size: 12px; }
 .email-escalation ul { margin: 0; padding-left: 18px; }
 .email-notice.failed { color: var(--danger); }
+
+/* Task deadline calendar sync (Story 5.5 / FR-28) */
+.calendar-sync-state small { display: block; }
+.calendar-sync-error { color: var(--danger); overflow-wrap: anywhere; }
+.calendar-sync-external { color: var(--warning); }

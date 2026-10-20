@@ -755,7 +755,10 @@ export function MeetingRoomPage() {
               ? recordingMessage
               : getRecordingUploadMessage(recordingUploadState)
             : recording.state === 'recording'
-              ? 'Recording'
+              ? room.isMicrophoneEnabled === false
+                // A muted track records pure silence, which cannot be transcribed.
+                ? 'Recording — your microphone is muted, so your voice is not being recorded. Unmute to be heard.'
+                : 'Recording'
               : recordingMessage || (
                 recordingConsent === 'consented'
                   ? 'You have consented to recording.'

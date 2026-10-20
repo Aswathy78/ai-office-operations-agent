@@ -1524,3 +1524,112 @@ class EmailFailureNotification(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+# Task deadline calendar sync (Story 5.5 / FR-28): exactly one status per task.
+CALENDAR_SYNC_STATUS_PENDING = "pending"
+CALENDAR_SYNC_STATUS_PROCESSING = "processing"
+CALENDAR_SYNC_STATUS_COMPLETED = "completed"
+CALENDAR_SYNC_STATUS_RETRYING = "retrying"
+CALENDAR_SYNC_STATUS_FAILED = "failed"
+CALENDAR_SYNC_STATUSES = (
+    CALENDAR_SYNC_STATUS_PENDING,
+    CALENDAR_SYNC_STATUS_PROCESSING,
+    CALENDAR_SYNC_STATUS_COMPLETED,
+    CALENDAR_SYNC_STATUS_RETRYING,
+    CALENDAR_SYNC_STATUS_FAILED,
+)
+
+
+class CalendarDeadlineEntry(Base):
+    """A deadline entry held by the *local* calendar provider (Story 5.5).
+
+    This table plays the role of the external calendar for local development:
+    the app writes entries through ``LocalCalendarProvider`` and the poller reads
+    them back. Anything that edits a row here outside the sync service (bumping
+    ``version``) is an "external change", as a user editing Google/Outlook would be.
+    """
+
+    __tablename__ = "calendar_deadline_entries"
+    __table_args__ = (
+        Index("ix_calendar_deadline_entries_owner", "owner_email"),
+        Index("ix_calendar_deadline_entries_external_ref", "external_ref"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    owner_email: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reminder_minutes_before: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    # The app object this entry mirrors, e.g. "task:<id>".
+    external_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Incremented on every change; the poller compares it with what was last synced.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class TaskCalendarSync(Base):
+    """Calendar sync state of one task's deadline (Story 5.5 / FR-28).
+
+    ``status`` is the single status shown to users. ``completed`` is only set after
+    the provider's copy was read back and matched the task's assignee, title and due date.
+    """
+
+    __tablename__ = "task_calendar_syncs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in CALENDAR_SYNC_STATUSES)})",
+            name="ck_task_calendar_syncs_status",
+        ),
+        UniqueConstraint("task_id", name="uq_task_calendar_syncs_task_id"),
+        Index("ix_task_calendar_syncs_status_next", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, default="local")
+    external_entry_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=CALENDAR_SYNC_STATUS_PENDING)
+    status_changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Why the entry needs (re)syncing, e.g. "Due date changed" or "Moved in the calendar".
+    pending_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Snapshot of what the provider holds after the last completed sync.
+    synced_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    synced_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    synced_assignee_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    synced_owner_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    synced_sequence: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    synced_entry_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_poll_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_change_detected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    external_change_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

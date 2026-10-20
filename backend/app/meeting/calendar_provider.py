@@ -19,7 +19,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.meeting.models import Employee, Meeting, MeetingParticipant
+from app.meeting.models import CalendarDeadlineEntry, Employee, Meeting, MeetingParticipant
 from app.meeting.schemas import MeetingCreate, ParticipantCreate
 from app.meeting.service import create_meeting
 
@@ -58,6 +58,21 @@ class FreeBusyConflict:
 class FreeBusyResult:
     has_conflicts: bool
     conflicts: list[FreeBusyConflict] = field(default_factory=list)
+
+
+@dataclass
+class DeadlineEntry:
+    """A task-deadline entry (all-day style reminder) in the provider's calendar (Story 5.5)."""
+
+    id: str
+    owner_email: str
+    title: str
+    due_at: datetime
+    description: str | None = None
+    reminder_minutes_before: int = 60
+    version: int = 1
+    deleted: bool = False
+    provider_name: str = "local"
 
 
 class CalendarProviderError(Exception):
@@ -146,6 +161,32 @@ class CalendarProvider(ABC):
         event_id: str,
     ) -> CalendarEvent | None:
         """Fetch an event by its unique ID from the provider."""
+
+    # --- Task deadline entries (Story 5.5). Optional for providers: the defaults
+    # raise, so a provider without deadline support reports a clear sync failure.
+
+    def upsert_deadline_entry(
+        self,
+        db: Session,
+        *,
+        entry_id: str | None,
+        owner_email: str,
+        title: str,
+        due_at: datetime,
+        description: str | None = None,
+        reminder_minutes_before: int = 60,
+        external_ref: str | None = None,
+    ) -> DeadlineEntry:
+        """Create the entry (``entry_id`` None) or update it in place; return the stored entry."""
+        raise CalendarProviderError(f"Calendar provider '{self.provider_name}' does not support task deadlines.")
+
+    def get_deadline_entry(self, db: Session, entry_id: str) -> DeadlineEntry | None:
+        """Read an entry back from the provider (None if it no longer exists)."""
+        raise CalendarProviderError(f"Calendar provider '{self.provider_name}' does not support task deadlines.")
+
+    def delete_deadline_entry(self, db: Session, entry_id: str) -> None:
+        """Remove an entry from the provider's calendar."""
+        raise CalendarProviderError(f"Calendar provider '{self.provider_name}' does not support task deadlines.")
 
 
 class LocalCalendarProvider(CalendarProvider):
@@ -477,6 +518,64 @@ class LocalCalendarProvider(CalendarProvider):
             status=meeting.status,
             provider_name=self.provider_name,
         )
+
+    # --- Task deadline entries (Story 5.5), stored in calendar_deadline_entries ---
+
+    def _deadline_entry(self, row: CalendarDeadlineEntry) -> DeadlineEntry:
+        return DeadlineEntry(
+            id=row.id,
+            owner_email=row.owner_email,
+            title=row.title,
+            due_at=row.due_at,
+            description=row.description,
+            reminder_minutes_before=row.reminder_minutes_before,
+            version=row.version,
+            deleted=row.deleted_at is not None,
+            provider_name=self.provider_name,
+        )
+
+    def upsert_deadline_entry(
+        self,
+        db: Session,
+        *,
+        entry_id: str | None,
+        owner_email: str,
+        title: str,
+        due_at: datetime,
+        description: str | None = None,
+        reminder_minutes_before: int = 60,
+        external_ref: str | None = None,
+    ) -> DeadlineEntry:
+        now = datetime.now(timezone.utc)
+        row = db.get(CalendarDeadlineEntry, entry_id) if entry_id else None
+        if row is None or row.deleted_at is not None:
+            row = CalendarDeadlineEntry(id=str(uuid.uuid4()), created_at=now, version=0)
+            db.add(row)
+        row.owner_email = owner_email.strip().lower()
+        row.title = title
+        row.description = description
+        row.due_at = _to_naive_utc(due_at)
+        row.reminder_minutes_before = reminder_minutes_before
+        row.external_ref = external_ref
+        row.deleted_at = None
+        row.version = (row.version or 0) + 1
+        row.updated_at = now
+        db.flush()
+        return self._deadline_entry(row)
+
+    def get_deadline_entry(self, db: Session, entry_id: str) -> DeadlineEntry | None:
+        row = db.get(CalendarDeadlineEntry, entry_id)
+        if row is None:
+            return None
+        db.refresh(row)
+        return self._deadline_entry(row)
+
+    def delete_deadline_entry(self, db: Session, entry_id: str) -> None:
+        row = db.get(CalendarDeadlineEntry, entry_id)
+        if row is not None and row.deleted_at is None:
+            row.deleted_at = datetime.now(timezone.utc)
+            row.version = (row.version or 0) + 1
+            db.flush()
 
 
 def get_calendar_provider() -> CalendarProvider:

@@ -2,7 +2,6 @@
 with the delivery lifecycle Draft / Approval / Queued / Sending / Sent / Failed / Retry
 (Story 4.4 / FR-22)."""
 
-from datetime import datetime
 from typing import Callable, Literal
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
@@ -45,6 +44,7 @@ from app.email_escalation_service import (
 )
 from app.meeting.models import EmailDraft, EmailDraftEvent, EmailFailureNotification
 from app.meeting.schemas import TaskActorRole
+from app.time_utils import UtcDateTime
 
 router = APIRouter(prefix="/api/v1/email-drafts", tags=["E-mail drafts"])
 
@@ -79,7 +79,7 @@ class DeliveryResult(BaseModel):
     status: Literal["sent", "failed", "bounced"]
     error: str | None = None
     message_id: str | None = None
-    accepted_at: datetime | None = None
+    accepted_at: UtcDateTime | None = None
     attempt: int | None = None
     provider: str | None = None
     fallback_used: bool = False
@@ -92,7 +92,7 @@ class BounceRecord(BaseModel):
     code: int | None = None
     diagnostic: str | None = None
     message_id: str | None = None
-    recorded_at: datetime
+    recorded_at: UtcDateTime
 
 
 class FailureNotificationResponse(BaseModel):
@@ -105,11 +105,11 @@ class FailureNotificationResponse(BaseModel):
     recipient_email: str | None
     status: Literal["pending", "sent", "failed", "recorded"]
     attempts: int
-    next_attempt_at: datetime | None
+    next_attempt_at: UtcDateTime | None
     provider: str | None
     error: str | None
-    sent_at: datetime | None
-    created_at: datetime
+    sent_at: UtcDateTime | None
+    created_at: UtcDateTime
 
 
 class BounceReportResponse(BaseModel):
@@ -126,7 +126,7 @@ class EmailDraftEventResponse(BaseModel):
     to_status: EmailLifecycleStatus
     actor_id: str
     detail: str | None
-    created_at: datetime
+    created_at: UtcDateTime
 
 
 class EmailDraftResponse(BaseModel):
@@ -152,25 +152,25 @@ class EmailDraftResponse(BaseModel):
     approval_threshold: int
     sensitive_findings: list[SensitiveFinding]
     status: EmailLifecycleStatus
-    status_changed_at: datetime | None
+    status_changed_at: UtcDateTime | None
     approval_decision: Literal["approved", "rejected"] | None
     decided_by: str | None
-    decided_at: datetime | None
+    decided_at: UtcDateTime | None
     decision_note: str | None
     delivery_results: list[DeliveryResult]
-    sent_at: datetime | None
-    queued_at: datetime | None
+    sent_at: UtcDateTime | None
+    queued_at: UtcDateTime | None
     attempt_count: int
     max_attempts: int
-    next_attempt_at: datetime | None
+    next_attempt_at: UtcDateTime | None
     last_error: str | None
     acknowledged_sensitive: bool
-    discarded_at: datetime | None
+    discarded_at: UtcDateTime | None
     bounces: list[BounceRecord]
-    escalated_at: datetime | None
+    escalated_at: UtcDateTime | None
     notifications: list[FailureNotificationResponse]
-    created_at: datetime
-    updated_at: datetime
+    created_at: UtcDateTime
+    updated_at: UtcDateTime
 
 
 class EmailDraftCreateRequest(BaseModel):

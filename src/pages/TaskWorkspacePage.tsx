@@ -6,15 +6,18 @@ import {
   getDashboardTasks,
   getMyTasks,
   retryAssignmentEmail,
+  retryTaskCalendarSync,
   setTaskStatus,
   taskCalendarUrl,
   type TaskActor,
   type TaskRecord,
 } from '../api/tasks'
 import { EmailDeliveryPanel } from '../components/email/EmailDeliveryPanel'
+import { CALENDAR_SYNC_IN_FLIGHT, CalendarSyncStatus } from '../components/tasks/CalendarSyncStatus'
 import { TaskCalendarMonth } from '../components/tasks/TaskCalendarMonth'
 import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
 import { useAuth } from '../contexts/AuthContext'
+import { usePolling } from '../hooks/usePolling'
 import type { Employee } from '../types/meeting'
 import type { MeetingCalendarEvent } from '../types/meeting'
 
@@ -25,6 +28,7 @@ interface TaskWorkspacePageProps {
 }
 
 const DASHBOARD_REFRESH_INTERVAL_MS = 15_000
+const CALENDAR_SYNC_POLL_MS = 3_000
 
 function formatSourceTimestamp(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
@@ -49,6 +53,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
   const [refreshKey, setRefreshKey] = useState(0)
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null)
   const [statusTaskId, setStatusTaskId] = useState<string | null>(null)
+  const [calendarRetryTaskId, setCalendarRetryTaskId] = useState<string | null>(null)
   const [managingTaskId, setManagingTaskId] = useState<string | null>(null)
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null)
   const [employees, setEmployees] = useState<Employee[]>([])
@@ -188,6 +193,32 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
     }
   }
 
+  async function handleCalendarRetry(taskId: string) {
+    setCalendarRetryTaskId(taskId)
+    try {
+      replaceTask(await retryTaskCalendarSync(taskId))
+      setError('')
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Calendar sync could not be retried.')
+    } finally {
+      setCalendarRetryTaskId(null)
+    }
+  }
+
+  // While a deadline is being written to the calendar, refresh quietly so
+  // Pending -> Processing -> Completed / Retrying / Failed shows up promptly.
+  const calendarSyncInFlight = tasks.some(
+    (task) => task.calendar_sync && CALENDAR_SYNC_IN_FLIGHT.has(task.calendar_sync.status),
+  )
+  usePolling(
+    async () => {
+      if (!user) return
+      setTasks(view === 'dashboard' ? await getDashboardTasks() : await getMyTasks(user.email))
+    },
+    CALENDAR_SYNC_POLL_MS,
+    calendarSyncInFlight && !loading && view !== 'calendar',
+  )
+
   async function handleStatusChange(task: TaskRecord) {
     if (!actor) return
     setStatusTaskId(task.id)
@@ -296,6 +327,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                 <th scope="col">Status</th>
                 <th scope="col">Source</th>
                 <th scope="col">Assignment email</th>
+                <th scope="col">Calendar</th>
                 {canManageTasks && <th scope="col"><span className="visually-hidden">Actions</span></th>}
               </tr>
             </thead>
@@ -384,6 +416,14 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                       </div>
                     )}
                   </td>
+                  <td>
+                    <CalendarSyncStatus
+                      sync={task.calendar_sync}
+                      canRetry={Boolean(actor)}
+                      retrying={calendarRetryTaskId === task.id}
+                      onRetry={() => void handleCalendarRetry(task.id)}
+                    />
+                  </td>
                   {canManageTasks && (
                     <td>
                       <button
@@ -401,7 +441,7 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                 </tr>
                 {canManageTasks && actor && managingTaskId === task.id && (
                   <tr className="task-manage-row">
-                    <td colSpan={8}>
+                    <td colSpan={9}>
                       <TaskManagePanel
                         task={task}
                         actor={actor}

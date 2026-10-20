@@ -26,6 +26,24 @@ export interface TaskRecord {
   updated_at?: string | null
   calendar_sequence?: number
   pending_reassignment?: TaskReassignmentRequest | null
+  /** The deadline's calendar sync (Story 5.5); null until the scheduler picks the task up. */
+  calendar_sync?: TaskCalendarSync | null
+}
+
+export type TaskCalendarSyncStatus = 'pending' | 'processing' | 'completed' | 'retrying' | 'failed'
+
+export interface TaskCalendarSync {
+  status: TaskCalendarSyncStatus
+  provider: string
+  pending_reason: string | null
+  attempt_count: number
+  max_attempts: number
+  next_attempt_at: string | null
+  last_error: string | null
+  last_synced_at: string | null
+  last_polled_at: string | null
+  external_change_detected_at: string | null
+  external_change_detail: string | null
 }
 
 export interface TaskReassignmentRequest {
@@ -129,6 +147,15 @@ export function getDashboardTasks(): Promise<TaskRecord[]> {
 export function taskCalendarUrl(assigneeEmail: string): string {
   const query = new URLSearchParams({ assignee_email: assigneeEmail })
   return `${API_BASE_URL}/api/v1/tasks/calendar.ics?${query}`
+}
+
+/** Failed -> Pending: try writing the task deadline to the calendar again. */
+export async function retryTaskCalendarSync(taskId: string): Promise<TaskRecord> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/tasks/${encodeURIComponent(taskId)}/calendar-sync/retry`,
+    { method: 'POST' },
+  )
+  return readTask(response)
 }
 
 export async function retryAssignmentEmail(taskId: string): Promise<TaskRecord> {

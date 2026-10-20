@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import re
 from typing import Literal
+from app.time_utils import UtcDateTime
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -370,6 +371,22 @@ class MeetingActionItemsResponse(BaseModel):
     action_items: list[MeetingActionItemResponse] = Field(default_factory=list)
 
 
+class TaskCalendarSyncResponse(BaseModel):
+    """The task deadline's calendar sync (Story 5.5): exactly one status."""
+
+    status: Literal["pending", "processing", "completed", "retrying", "failed"]
+    provider: str
+    pending_reason: str | None = None
+    attempt_count: int = 0
+    max_attempts: int = 5
+    next_attempt_at: UtcDateTime | None = None
+    last_error: str | None = None
+    last_synced_at: UtcDateTime | None = None
+    last_polled_at: UtcDateTime | None = None
+    external_change_detected_at: UtcDateTime | None = None
+    external_change_detail: str | None = None
+
+
 class TaskResponse(BaseModel):
     id: str
     title: str
@@ -395,6 +412,8 @@ class TaskResponse(BaseModel):
     updated_at: datetime | None = None
     calendar_sequence: int = 0
     pending_reassignment: "TaskReassignmentRequestResponse | None" = None
+    # None until the sync scheduler has picked the task up.
+    calendar_sync: TaskCalendarSyncResponse | None = None
 
 
 TaskActorRole = Literal["employee", "manager", "hr_operations", "admin"]

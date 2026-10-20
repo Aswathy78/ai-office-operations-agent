@@ -245,6 +245,36 @@ def _persist_failure(
     db.commit()
 
 
+# Peak amplitude below this (about -80 dBFS) means the recording has no sound,
+# e.g. the microphone was muted, blocked or not the selected input.
+SILENCE_PEAK_THRESHOLD = 1e-4
+SILENT_RECORDING_MESSAGE = (
+    "The recording contains no sound, so it could not be transcribed. The microphone was "
+    "probably muted, blocked by the browser or Windows, or not the selected input. "
+    "Record the meeting again with the microphone on."
+)
+
+
+class SilentRecordingError(ValueError):
+    """The recording decoded fine but contains no audible sound."""
+
+
+def recording_is_silent(path: str | Path) -> bool:
+    """True when the decoded audio has no sound at all; False if audible or not decodable."""
+    try:
+        from faster_whisper.audio import decode_audio
+
+        audio = decode_audio(str(path), sampling_rate=16000)
+    except Exception as error:  # noqa: BLE001 - let Whisper report undecodable media
+        logger.info("Silence check skipped for %s: %s", path, error)
+        return False
+    if getattr(audio, "size", 0) == 0:
+        return True
+    peak = float(abs(audio).max())
+    logger.info("Recording audio peak=%.6f", peak)
+    return peak < SILENCE_PEAK_THRESHOLD
+
+
 def process_claimed_transcript(
     db: Session,
     transcript_id: str,
@@ -313,6 +343,15 @@ def process_claimed_transcript(
             encrypted_path,
             temporary_directory=temporary_directory,
         )
+
+        # ---------------------------------------------------------
+        # 5b. Refuse silent recordings
+        # ---------------------------------------------------------
+        # Whisper invents text ("You", "Thanks for watching!") for audio with no
+        # sound, which would then produce a meaningless summary and action items.
+
+        if recording_is_silent(plaintext_path):
+            raise SilentRecordingError(SILENT_RECORDING_MESSAGE)
 
         # ---------------------------------------------------------
         # 6. Run Whisper

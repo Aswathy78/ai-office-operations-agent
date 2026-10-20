@@ -14,6 +14,7 @@ from app.meeting.models import (
     Employee,
     Meeting,
     Task,
+    TaskCalendarSync,
     TaskAuditLog,
     TaskNotification,
     TaskReassignmentRequest,
@@ -29,6 +30,7 @@ from app.meeting.schemas import (
     TaskReassignRequest,
     TaskReassignmentDecisionRequest,
     TaskReassignmentRequestResponse,
+    TaskCalendarSyncResponse,
     TaskReminderRunResponse,
     TaskResponse,
     TaskStatusUpdateRequest,
@@ -42,6 +44,13 @@ from app.task_reassignment_service import (
     decide_reassignment_request,
     reassign_task,
     set_task_status,
+)
+from app.task_calendar_sync_service import (
+    InvalidCalendarSyncTransition,
+    max_attempts as calendar_sync_max_attempts,
+    request_sync,
+    retry_failed,
+    run_sync_pass,
 )
 from app.task_reminder_service import run_task_reminders
 from app.task_service import attempt_assignment_email
@@ -86,11 +95,30 @@ def _reassignment_response(
     )
 
 
+def _calendar_sync_response(sync: TaskCalendarSync | None) -> TaskCalendarSyncResponse | None:
+    if sync is None:
+        return None
+    return TaskCalendarSyncResponse(
+        status=sync.status,
+        provider=sync.provider,
+        pending_reason=sync.pending_reason,
+        attempt_count=sync.attempt_count,
+        max_attempts=calendar_sync_max_attempts(),
+        next_attempt_at=sync.next_attempt_at,
+        last_error=sync.last_error,
+        last_synced_at=sync.last_synced_at,
+        last_polled_at=sync.last_polled_at,
+        external_change_detected_at=sync.external_change_detected_at,
+        external_change_detail=sync.external_change_detail,
+    )
+
+
 def _task_response(
     task: Task,
     employee: Employee,
     meeting: Meeting,
     pending_reassignment: TaskReassignmentRequestResponse | None = None,
+    calendar_sync: TaskCalendarSync | None = None,
 ) -> TaskResponse:
     return TaskResponse(
         id=task.id,
@@ -121,6 +149,7 @@ def _task_response(
         updated_at=task.updated_at,
         calendar_sequence=task.calendar_sequence or 0,
         pending_reassignment=pending_reassignment,
+        calendar_sync=_calendar_sync_response(calendar_sync),
     )
 
 
@@ -130,6 +159,12 @@ def _task_responses(
 ) -> list[TaskResponse]:
     task_ids = [task.id for task, _, _ in rows]
     pending: dict[str, TaskReassignmentRequest] = {}
+    syncs: dict[str, TaskCalendarSync] = {}
+    if task_ids:
+        syncs = {
+            sync.task_id: sync
+            for sync in db.query(TaskCalendarSync).filter(TaskCalendarSync.task_id.in_(task_ids)).all()
+        }
     if task_ids:
         pending = {
             request.task_id: request
@@ -146,6 +181,7 @@ def _task_responses(
             employee,
             meeting,
             _reassignment_response(db, pending[task.id]) if task.id in pending else None,
+            syncs.get(task.id),
         )
         for task, employee, meeting in rows
     ]
@@ -339,10 +375,12 @@ def reassign_task_endpoint(
     actor: TaskActor = Depends(_actor),
     db: Session = Depends(get_db),
 ):
-    return _run_change(
+    response = _run_change(
         db,
         lambda: reassign_task(db, task_id, actor, payload.assignee_id, payload.reason),
     )
+    _sync_calendar_soon(db, task_id, "Task reassigned")
+    return response
 
 
 @router.patch(
@@ -356,10 +394,12 @@ def change_task_due_date_endpoint(
     actor: TaskActor = Depends(_actor),
     db: Session = Depends(get_db),
 ):
-    return _run_change(
+    response = _run_change(
         db,
         lambda: change_task_due_date(db, task_id, actor, payload.due_at, payload.reason),
     )
+    _sync_calendar_soon(db, task_id, "Due date changed")
+    return response
 
 
 @router.get(
@@ -466,3 +506,67 @@ def run_task_reminders_endpoint(
             detail="Only managers, HR / Operations or admins can trigger reminders.",
         )
     return run_task_reminders(db).as_dict()
+
+
+def _sync_calendar_soon(db: Session, task_id: str, reason: str) -> None:
+    """Queue the task's calendar entry and wake the sync scheduler (best effort)."""
+    from app.task_calendar_scheduler import wake
+
+    try:
+        request_sync(db, task_id, reason)
+    except Exception:  # noqa: BLE001 - the scheduler's reconcile pass will catch it up
+        db.rollback()
+    wake()
+
+
+def _can_manage_calendar_sync(db: Session, task_id: str, actor: TaskActor) -> bool:
+    if actor.role in ("manager", "hr_operations", "admin"):
+        return True
+    task = db.get(Task, task_id)
+    assignee = db.get(Employee, task.assignee_id) if task else None
+    return bool(assignee and actor.email and assignee.email.casefold() == actor.email.casefold())
+
+
+@router.post(
+    "/{task_id}/calendar-sync/retry",
+    response_model=TaskResponse,
+    summary="Retry a failed calendar sync for a task deadline",
+)
+def retry_task_calendar_sync(
+    task_id: str,
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    if _task_row(db, task_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if not _can_manage_calendar_sync(db, task_id, actor):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assignee or a manager can retry this calendar sync.",
+        )
+    try:
+        retry_failed(db, task_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except InvalidCalendarSyncTransition as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    from app.task_calendar_scheduler import wake
+
+    wake()
+    return _task_responses(db, [_task_row(db, task_id)])[0]
+
+
+@router.post(
+    "/calendar-sync/run",
+    summary="Run a calendar sync pass now, including the external-change poll",
+)
+def run_task_calendar_sync(
+    actor: TaskActor = Depends(_actor),
+    db: Session = Depends(get_db),
+):
+    if actor.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers, HR / Operations or admins can run the calendar sync.",
+        )
+    return run_sync_pass(db, poll=True).as_dict()
