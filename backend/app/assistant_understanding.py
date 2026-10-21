@@ -1,0 +1,343 @@
+"""Intent classification and entity extraction for assistant chat commands."""
+
+from __future__ import annotations
+
+from datetime import date as Date
+from datetime import datetime, time as Time, timezone
+import re
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sqlalchemy.orm import Session
+
+from app.email_draft_service import detect_groups, detect_named_employees
+from app.meeting.scheduling_service import (
+    extract_meeting_title,
+    get_organization_timezone,
+    parse_duration_minutes,
+    parse_meeting_date,
+    parse_time_of_day,
+)
+
+
+Intent = Literal["task_assignment", "meeting_scheduling", "send_email", "unsupported"]
+UnderstandingStatus = Literal["understood", "needs_clarification", "unsupported"]
+
+
+class AssistantEntities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    people: list[str] = Field(default_factory=list)
+    groups: list[str] = Field(default_factory=list)
+    task: str | None = None
+    meeting: str | None = None
+    topic: str | None = None
+    date: Date | None = None
+    time: Time | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=1440)
+
+
+class AssistantUnderstanding(BaseModel):
+    """Validated, normalized interpretation of an assistant command."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    intent: Intent
+    status: UnderstandingStatus
+    entities: AssistantEntities = Field(default_factory=AssistantEntities)
+    missing_entities: list[str] = Field(default_factory=list)
+    explanation: str | None = None
+
+    @model_validator(mode="after")
+    def validate_status_and_required_entities(self) -> AssistantUnderstanding:
+        if self.intent == "unsupported":
+            if self.status != "unsupported" or not self.explanation:
+                raise ValueError("Unsupported requests require an explanation.")
+            return self
+
+        if self.status == "unsupported":
+            raise ValueError("Supported intents cannot have unsupported status.")
+
+        if self.status == "understood":
+            if self.missing_entities:
+                raise ValueError("Understood requests cannot have missing entities.")
+            if self.intent == "task_assignment" and (
+                not self.entities.task or not self.entities.people
+            ):
+                raise ValueError("Task assignments require a task and an assignee.")
+            if self.intent == "meeting_scheduling" and (
+                not (self.entities.people or self.entities.groups)
+                or self.entities.date is None
+                or self.entities.time is None
+            ):
+                raise ValueError(
+                    "Meeting requests require an attendee, date, and time."
+                )
+            if self.intent == "send_email" and (
+                not (self.entities.people or self.entities.groups)
+                or not self.entities.topic
+            ):
+                raise ValueError(
+                    "E-mail requests require a recipient and a topic."
+                )
+        elif not self.missing_entities:
+            raise ValueError(
+                "Requests needing clarification must identify missing entities."
+            )
+        return self
+
+
+_TASK_COMMAND = re.compile(
+    r"\b(?:assign|reassign|allocate)\s+(?:the\s+)?(?P<task>.+?)\s+to\s+"
+    r"(?P<person>.+?)(?=\s+(?:by|before|due|on)\b|[.!?,]|$)",
+    re.IGNORECASE,
+)
+_TASK_INTENT = re.compile(r"\b(?:assign|reassign|allocate)\b", re.IGNORECASE)
+_MEETING_INTENT = re.compile(
+    r"\b(?:schedule|book|set\s+up)\b.*\bmeeting\b|\bmeeting\b.*"
+    r"\b(?:schedule|book|set\s+up)\b",
+    re.IGNORECASE,
+)
+_EMAIL_INTENT = re.compile(
+    r"\b(?:send|e-?mail|mail)\b.*\b(?:e-?mail|mail|to|about)\b",
+    re.IGNORECASE,
+)
+_ACTION_REQUEST = re.compile(
+    r"\b(?:delete|cancel|create|update|move|reschedule|book|schedule|send|"
+    r"assign|reassign|allocate|notify|email|e-mail)\b",
+    re.IGNORECASE,
+)
+_DURATION = re.compile(
+    r"\b(?:for\s+)?(\d+)\s*(?:hours?|hrs?|minutes?|mins?)\b",
+    re.IGNORECASE,
+)
+_DATE_MODIFIER_PATTERN = (
+    r"\b(?:today|tomorrow|the next day|in\s+\d+\s+days?|"
+    r"(?:(?:next|this|on)\s+)?(?:monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday)|\d{4}-\d{2}-\d{2}|"
+    r"(?:\d{1,2}(?:st|nd|rd|th)?\s+)?"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)(?:\.?\s+\d{1,2}(?:st|nd|rd|th)?)?)\b"
+)
+_TOPIC = re.compile(
+    rf"\babout\s+(.+?)(?=\s+(?:to|cc)\b|\s+by\s+(?={_DATE_MODIFIER_PATTERN})|[.!?]|$)",
+    re.IGNORECASE,
+)
+_DATE_MODIFIER = re.compile(
+    _DATE_MODIFIER_PATTERN,
+    re.IGNORECASE,
+)
+
+
+def _clean_phrase(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip(" \t\r\n.,;:!?")).strip()
+
+
+def _recognized_employee_name(db: Session, phrase: str) -> str:
+    candidates = detect_named_employees(db, phrase)
+    normalized = _clean_phrase(phrase)
+    for employee in candidates:
+        if employee.name.casefold() == normalized.casefold():
+            return employee.name
+        if employee.name.split()[0].casefold() == normalized.casefold():
+            return employee.name
+    return normalized
+
+
+def _reference_local(reference_time: datetime | None) -> datetime:
+    organization_timezone = get_organization_timezone()
+    reference = reference_time or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    return reference.astimezone(organization_timezone)
+
+
+def _intent_for(text: str) -> Intent | None:
+    if _TASK_INTENT.search(text):
+        return "task_assignment"
+    if _MEETING_INTENT.search(text):
+        return "meeting_scheduling"
+    if _EMAIL_INTENT.search(text):
+        return "send_email"
+    if _ACTION_REQUEST.search(text):
+        return "unsupported"
+    return None
+
+
+def _extract_people(db: Session, text: str) -> list[str]:
+    return list(dict.fromkeys(employee.name for employee in detect_named_employees(db, text)))
+
+
+def _extract_date(text: str, reference_local: datetime) -> Date | None:
+    if not _DATE_MODIFIER.search(text):
+        return None
+    return parse_meeting_date(text, reference_local)
+
+
+def _extract_duration(text: str) -> int | None:
+    match = _DURATION.search(text)
+    if not match:
+        return None
+    duration = parse_duration_minutes(match.group(0))
+    return duration if 1 <= duration <= 1440 else None
+
+
+def _missing_entities(intent: Intent, entities: AssistantEntities) -> list[str]:
+    missing: list[str] = []
+    if intent == "task_assignment":
+        if not entities.task:
+            missing.append("task")
+        if not entities.people:
+            missing.append("assignee")
+    elif intent == "meeting_scheduling":
+        if not (entities.people or entities.groups):
+            missing.append("attendee or group")
+        if entities.date is None:
+            missing.append("date")
+        if entities.time is None:
+            missing.append("time")
+    elif intent == "send_email":
+        if not (entities.people or entities.groups):
+            missing.append("recipient or group")
+        if not entities.topic:
+            missing.append("email topic")
+    return missing
+
+
+def _unsupported_result() -> AssistantUnderstanding:
+    return AssistantUnderstanding(
+        intent="unsupported",
+        status="unsupported",
+        explanation=(
+            "I can understand task assignments, meeting requests, and e-mail "
+            "requests here, but I can't handle that operation yet."
+        ),
+    )
+
+
+def understand_assistant_command(
+    db: Session,
+    text: str,
+    reference_time: datetime | None = None,
+) -> AssistantUnderstanding | None:
+    """Classify supported commands and return their schema-validated entities.
+
+    Returns ``None`` for general conversation so the existing chat completion
+    flow can handle it.
+    """
+    intent = _intent_for(text)
+    if intent is None:
+        return None
+    if intent == "unsupported":
+        return _unsupported_result()
+
+    reference_local = _reference_local(reference_time)
+    groups = detect_groups(db, text)
+    people = _extract_people(db, text)
+    task = None
+    meeting = None
+    topic = None
+
+    if intent == "task_assignment":
+        match = _TASK_COMMAND.search(text)
+        if match:
+            task = _clean_phrase(match.group("task"))
+            requested_assignee = _clean_phrase(match.group("person"))
+            if requested_assignee:
+                people = [_recognized_employee_name(db, requested_assignee)]
+    elif intent == "meeting_scheduling":
+        meeting = extract_meeting_title(text)
+        if meeting.casefold() == "project meeting":
+            meeting = "Meeting"
+    elif intent == "send_email":
+        topic_match = _TOPIC.search(text)
+        if topic_match:
+            topic = _clean_phrase(topic_match.group(1))
+
+    time_of_day = parse_time_of_day(text)
+    twelve_hour_match = re.search(
+        r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b",
+        text,
+        re.IGNORECASE,
+    )
+    valid_twelve_hour_time = (
+        twelve_hour_match is None
+        or (
+            1 <= int(twelve_hour_match.group(1)) <= 12
+            and int(twelve_hour_match.group(2) or 0) <= 59
+        )
+    )
+    parsed_time = (
+        Time(hour=time_of_day[0], minute=time_of_day[1])
+        if time_of_day is not None
+        and valid_twelve_hour_time
+        and 0 <= time_of_day[0] <= 23
+        and 0 <= time_of_day[1] <= 59
+        else None
+    )
+    duration = _extract_duration(text)
+    has_invalid_duration = _DURATION.search(text) is not None and duration is None
+
+    entities = AssistantEntities(
+        people=people,
+        groups=groups,
+        task=task,
+        meeting=meeting,
+        topic=topic,
+        date=_extract_date(text, reference_local),
+        time=parsed_time,
+        duration_minutes=duration,
+    )
+    missing = _missing_entities(intent, entities)
+    if has_invalid_duration:
+        missing.append("a valid duration (1 to 1440 minutes)")
+    status: UnderstandingStatus = (
+        "needs_clarification" if missing else "understood"
+    )
+    return AssistantUnderstanding(
+        intent=intent,
+        status=status,
+        entities=entities,
+        missing_entities=missing,
+    )
+
+
+def explain_understanding(result: AssistantUnderstanding) -> str:
+    """Format a validated understanding as a plain-language assistant reply."""
+    if result.status == "unsupported":
+        return result.explanation or "I can't handle that request yet."
+
+    if result.status == "needs_clarification":
+        needed = ", ".join(result.missing_entities)
+        return (
+            f"I understood this as a {result.intent.replace('_', ' ')} request, "
+            f"but I still need {needed}. I haven't made any changes."
+        )
+
+    entities = result.entities
+    if result.intent == "task_assignment":
+        details = (
+            f'the task "{entities.task}" to {entities.people[0]}'
+            + (f" by {_format_date(entities.date)}" if entities.date else "")
+        )
+    elif result.intent == "meeting_scheduling":
+        recipient = (entities.groups or entities.people)[0]
+        details = (
+            f"a meeting with {recipient} on {_format_date(entities.date)} "
+            f"at {_format_time(entities.time)}"
+        )
+        if entities.duration_minutes is not None:
+            details += f" for {entities.duration_minutes} minutes"
+    else:
+        recipient = (entities.groups or entities.people)[0]
+        details = f'an e-mail to {recipient} about "{entities.topic}"'
+    return f"I understood this as a request for {details}. I haven't made any changes."
+
+
+def _format_date(value: Date) -> str:
+    return value.strftime("%B %d").replace(" 0", " ")
+
+
+def _format_time(value: Time) -> str:
+    return value.strftime("%I:%M %p").lstrip("0")

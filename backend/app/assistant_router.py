@@ -24,6 +24,10 @@ from app.assistant_service import (
     list_user_conversations,
     persist_message,
 )
+from app.assistant_understanding import (
+    explain_understanding,
+    understand_assistant_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,8 @@ def stream_assistant_chat(
     Enforces authorization: users cannot append to or read another user's conversation.
     Streams incoming tokens as Server-Sent Events (`data: {"token": "..."}\n\n`).
     Persists user prompt and full assistant response in the database.
+    Recognized operation requests include validated intent/entity metadata and are
+    explained without executing task, meeting, or e-mail actions.
     """
     if req.conversation_id:
         conv = db.get(AssistantConversation, req.conversation_id)
@@ -96,6 +102,7 @@ def stream_assistant_chat(
         )
 
     conv_id = conv.id
+    understanding = understand_assistant_command(db, req.message)
 
     # Persist the incoming user message
     persist_message(db, conv_id, role="user", content=req.message)
@@ -113,13 +120,26 @@ def stream_assistant_chat(
     context_messages.append({"role": "user", "content": req.message})
 
     def sse_event_stream():
-        init_payload = json.dumps({"conversation_id": conv_id, "role": "assistant"})
+        init_payload = json.dumps({
+            "conversation_id": conv_id,
+            "role": "assistant",
+            "understanding": (
+                understanding.model_dump(mode="json")
+                if understanding is not None
+                else None
+            ),
+        })
         yield f"data: {init_payload}\n\n"
 
         accumulated_chunks: list[str] = []
 
         try:
-            for token in assistant_service.stream_chat_completion(context_messages):
+            response_stream = (
+                iter([explain_understanding(understanding)])
+                if understanding is not None
+                else assistant_service.stream_chat_completion(context_messages)
+            )
+            for token in response_stream:
                 if token:
                     accumulated_chunks.append(token)
                     token_payload = json.dumps({"token": token})
