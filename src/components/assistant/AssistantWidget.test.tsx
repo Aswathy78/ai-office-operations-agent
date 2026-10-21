@@ -145,6 +145,42 @@ describe('Epic 6.1 — AI Assistant Floating Chat Widget', () => {
     })
   })
 
+  it('reuses and persists the backend conversation ID for clarification replies', async () => {
+    const user = userEvent.setup()
+    const conversationIds: Array<string | null | undefined> = []
+
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      conversationIds.push(options.conversationId)
+      options.onConversationId?.('conversation-clarification')
+      options.onChunk('Please clarify.')
+      options.onComplete?.('Please clarify.')
+    })
+
+    const rendered = renderWidget()
+    await user.click(screen.getByRole('button', { name: /open ai assistant/i }))
+
+    const input = screen.getByRole('textbox', { name: /message ai assistant/i })
+    await user.type(input, 'Schedule a meeting')
+    await user.click(screen.getByRole('button', { name: /send message/i }))
+    await waitFor(() => {
+      expect(conversationIds).toHaveLength(1)
+    })
+    expect(window.sessionStorage.getItem('ao_assistant_chat_emp-101_conversation'))
+      .toBe('conversation-clarification')
+
+    rendered.unmount()
+    renderWidget()
+    await user.click(screen.getByRole('button', { name: /open ai assistant/i }))
+    const replyInput = screen.getByRole('textbox', { name: /message ai assistant/i })
+    await user.type(replyInput, 'Tomorrow at 3 PM')
+    await user.click(screen.getByRole('button', { name: /send message/i }))
+
+    await waitFor(() => {
+      expect(conversationIds).toHaveLength(2)
+    })
+    expect(conversationIds).toEqual([null, 'conversation-clarification'])
+  })
+
   it('clicking a quick action immediately submits the command without faking completed operations', async () => {
     const user = userEvent.setup()
 

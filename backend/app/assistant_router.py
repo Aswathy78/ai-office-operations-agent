@@ -22,16 +22,23 @@ from app.assistant_service import (
     get_conversation_history,
     get_or_create_conversation,
     list_user_conversations,
+    load_pending_clarification,
     persist_message,
+    save_pending_clarification,
 )
 from app.assistant_understanding import (
+    AssistantUnderstanding,
+    clarification_question,
+    clarification_target,
     explain_understanding,
+    merge_clarification_answer,
     understand_assistant_command,
 )
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/assistant", tags=["AI Assistant"])
+MAX_CLARIFICATION_QUESTIONS = 2
 
 
 class ChatMessageItem(BaseModel):
@@ -102,7 +109,79 @@ def stream_assistant_chat(
         )
 
     conv_id = conv.id
-    understanding = understand_assistant_command(db, req.message)
+    pending_state = load_pending_clarification(conv)
+    forced_response: str | None = None
+    clarification_count = 0
+
+    if pending_state is not None:
+        if req.message.strip().casefold() in {
+            "cancel",
+            "cancel request",
+            "never mind",
+            "nevermind",
+            "start over",
+        }:
+            save_pending_clarification(db, conv, None)
+            understanding = None
+            forced_response = "I canceled the pending request. No operation was performed."
+        else:
+            prior_understanding = AssistantUnderstanding.model_validate(
+                pending_state["understanding"]
+            )
+            target = pending_state["pending_field"]
+            understanding = merge_clarification_answer(
+                db,
+                prior_understanding,
+                target,
+                req.message,
+                pending_state["original_message"],
+            )
+            clarification_count = pending_state["clarification_count"]
+
+            if understanding.status == "needs_clarification":
+                next_target = clarification_target(understanding)
+                if clarification_count < MAX_CLARIFICATION_QUESTIONS:
+                    clarification_count += 1
+                    forced_response = clarification_question(understanding)
+                else:
+                    forced_response = (
+                        "I still need "
+                        f"{', '.join(understanding.missing_entities)}. "
+                        "I have reached the two-question limit for this request. "
+                        "Send the remaining detail in your next message, or say "
+                        "'cancel request' to reset it. No operation was performed."
+                    )
+                save_pending_clarification(
+                    db,
+                    conv,
+                    {
+                        "original_message": pending_state["original_message"],
+                        "understanding": understanding.model_dump(mode="json"),
+                        "clarification_count": clarification_count,
+                        "pending_field": next_target,
+                    },
+                )
+            else:
+                save_pending_clarification(db, conv, None)
+                forced_response = (
+                    "All required details are resolved. "
+                    + explain_understanding(understanding)
+                )
+    else:
+        understanding = understand_assistant_command(db, req.message)
+        if understanding is not None and understanding.status == "needs_clarification":
+            clarification_count = 1
+            forced_response = clarification_question(understanding)
+            save_pending_clarification(
+                db,
+                conv,
+                {
+                    "original_message": req.message,
+                    "understanding": understanding.model_dump(mode="json"),
+                    "clarification_count": clarification_count,
+                    "pending_field": clarification_target(understanding),
+                },
+            )
 
     # Persist the incoming user message
     persist_message(db, conv_id, role="user", content=req.message)
@@ -128,6 +207,7 @@ def stream_assistant_chat(
                 if understanding is not None
                 else None
             ),
+            "clarification_count": clarification_count,
         })
         yield f"data: {init_payload}\n\n"
 
@@ -135,7 +215,9 @@ def stream_assistant_chat(
 
         try:
             response_stream = (
-                iter([explain_understanding(understanding)])
+                iter([forced_response])
+                if forced_response is not None
+                else iter([explain_understanding(understanding)])
                 if understanding is not None
                 else assistant_service.stream_chat_completion(context_messages)
             )

@@ -171,14 +171,47 @@ def detect_named_employees(db: Session, text: str) -> list[Employee]:
 
     found: list[Employee] = []
     for employee in employees:
-        full = re.compile(rf"\b{re.escape(employee.name)}\b", re.IGNORECASE)
         first = employee.name.split()[0]
         first_re = re.compile(rf"\b{re.escape(first)}\b", re.IGNORECASE)
-        if full.search(text) or (
+        full_name_match = (
+            len(employee.name.split()) > 1
+            and re.search(rf"\b{re.escape(employee.name)}\b", text, re.IGNORECASE)
+        )
+        unique_first_name_match = (
             first_name_counts[first.casefold()] == 1 and first_re.search(text)
-        ):
+        )
+        if full_name_match or unique_first_name_match:
             found.append(employee)
     return found
+
+
+def detect_ambiguous_employee_names(
+    db: Session,
+    text: str,
+) -> dict[str, list[str]]:
+    """Return duplicate first names mentioned without a disambiguating full name."""
+    employees = _active_employees(db)
+    first_names: dict[str, list[Employee]] = {}
+    for employee in employees:
+        first_names.setdefault(employee.name.split()[0].casefold(), []).append(employee)
+
+    explicitly_named = {
+        employee.id
+        for employee in employees
+        if len(employee.name.split()) > 1
+        and re.search(rf"\b{re.escape(employee.name)}\b", text, re.IGNORECASE)
+    }
+    ambiguous: dict[str, list[str]] = {}
+    for candidates in first_names.values():
+        first_name = candidates[0].name.split()[0]
+        if len(candidates) < 2 or not re.search(
+            rf"\b{re.escape(first_name)}\b", text, re.IGNORECASE
+        ):
+            continue
+        if any(employee.id in explicitly_named for employee in candidates):
+            continue
+        ambiguous[first_name] = [employee.name for employee in candidates]
+    return ambiguous
 
 
 def _is_internal(email: str, directory_emails: set[str]) -> bool:

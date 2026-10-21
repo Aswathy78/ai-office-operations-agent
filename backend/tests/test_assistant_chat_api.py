@@ -16,10 +16,20 @@ from app.meeting.models import (
     AssistantMessage,
     Base,
     Employee,
+    Meeting,
+    Task,
 )
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 import app.assistant_service as assistant_service
+
+
+def _sse_events(response) -> list[dict]:
+    return [
+        json.loads(line.removeprefix("data:").strip())
+        for line in response.text.splitlines()
+        if line.startswith("data:") and line.strip() != "data: [DONE]"
+    ]
 
 
 @pytest.fixture()
@@ -217,6 +227,272 @@ def test_streaming_chat_returns_sse_and_incremental_chunks(client: TestClient, m
     assert detail["messages"][0]["content"] == "Hello assistant!"
     assert detail["messages"][1]["role"] == "assistant"
     assert detail["messages"][1]["content"] == "".join(tokens_to_yield)
+
+
+def test_missing_required_details_persist_and_resume_same_conversation(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail("clarification must not reach the LLM"),
+    )
+
+    first = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Schedule a meeting with Maya tomorrow"},
+    )
+    first_events = _sse_events(first)
+    conversation_id = first_events[0]["conversation_id"]
+
+    assert first_events[0]["understanding"]["status"] == "needs_clarification"
+    assert "What time" in first_events[1]["token"]
+    conversation = db_session.get(AssistantConversation, conversation_id)
+    state = json.loads(conversation.pending_clarification)
+    assert state["clarification_count"] == 1
+    assert state["understanding"]["intent"] == "meeting_scheduling"
+    assert state["understanding"]["missing_entities"] == ["time"]
+    assert db_session.query(Meeting).count() == 0
+    assert db_session.query(Task).count() == 0
+
+    second = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "3 PM", "conversation_id": conversation_id},
+    )
+    second_events = _sse_events(second)
+
+    assert second_events[0]["conversation_id"] == conversation_id
+    assert second_events[0]["understanding"]["status"] == "understood"
+    assert "All required details are resolved" in second_events[1]["token"]
+    assert db_session.get(AssistantConversation, conversation_id).pending_clarification is None
+    assert len(db_session.query(AssistantMessage).filter_by(
+        conversation_id=conversation_id,
+    ).all()) == 4
+    assert db_session.query(Meeting).count() == 0
+
+
+def test_ambiguous_employee_name_requires_explicit_selection(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    db_session.add_all([
+        Employee(
+            id="emp-rahul-one",
+            name="Rahul Sharma",
+            email="rahul.sharma@northstar.example",
+            team="Engineering",
+            is_active=True,
+        ),
+        Employee(
+            id="emp-rahul-two",
+            name="Rahul Verma",
+            email="rahul.verma@northstar.example",
+            team="Design",
+            is_active=True,
+        ),
+    ])
+    db_session.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail("recognized requests must not reach the LLM"),
+    )
+
+    response = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Assign the database task to Rahul"},
+    )
+    events = _sse_events(response)
+    conversation_id = events[0]["conversation_id"]
+
+    assert events[0]["understanding"]["status"] == "needs_clarification"
+    assert events[0]["understanding"]["entities"]["people"] == []
+    assert events[0]["understanding"]["entities"]["ambiguous_people"] == {
+        "Rahul": ["Rahul Sharma", "Rahul Verma"],
+    }
+    assert "Which one did you mean?" in events[1]["token"]
+
+    resolved = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Rahul Sharma", "conversation_id": conversation_id},
+    )
+    resolved_events = _sse_events(resolved)
+    assert resolved_events[0]["understanding"]["status"] == "understood"
+    assert resolved_events[0]["understanding"]["entities"]["people"] == ["Rahul Sharma"]
+    assert db_session.get(AssistantConversation, conversation_id).pending_clarification is None
+
+
+def test_ambiguous_meeting_attendee_requires_selection_without_scheduling(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    db_session.add_all([
+        Employee(
+            id="emp-meeting-rahul-one",
+            name="Rahul",
+            email="rahul.one@northstar.example",
+            team="Engineering",
+            is_active=True,
+        ),
+        Employee(
+            id="emp-meeting-rahul-two",
+            name="Rahul Verma",
+            email="rahul.verma@northstar.example",
+            team="Design",
+            is_active=True,
+        ),
+    ])
+    db_session.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail("recognized requests must not reach the LLM"),
+    )
+    monkeypatch.setattr(
+        "app.meeting.scheduling_service.schedule_meeting_from_natural_language",
+        lambda *_args, **_kwargs: pytest.fail(
+            "ambiguous meeting requests must not reach scheduling"
+        ),
+    )
+
+    response = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Schedule a meeting with Rahul tomorrow at 10 AM."},
+    )
+    events = _sse_events(response)
+
+    assert response.status_code == 200
+    assert events[0]["understanding"]["intent"] == "meeting_scheduling"
+    assert events[0]["understanding"]["status"] == "needs_clarification"
+    assert events[0]["understanding"]["entities"]["ambiguous_people"] == {
+        "Rahul": ["Rahul", "Rahul Verma"],
+    }
+    assert events[0]["understanding"]["entities"]["people"] == []
+    clarification = events[1]["token"]
+    assert "Which one did you mean?" in clarification
+    assert "Rahul" in clarification
+    assert "Rahul Verma" in clarification
+    assert db_session.query(Meeting).count() == 0
+
+
+def test_full_name_resolves_one_candidate_when_other_employee_has_same_first_name(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    db_session.add_all([
+        Employee(
+            id="emp-full-name-rahul-one",
+            name="Rahul",
+            email="rahul.one@northstar.example",
+            team="Engineering",
+            is_active=True,
+        ),
+        Employee(
+            id="emp-full-name-rahul-two",
+            name="Rahul Verma",
+            email="rahul.verma@northstar.example",
+            team="Design",
+            is_active=True,
+        ),
+    ])
+    db_session.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail("recognized requests must not reach the LLM"),
+    )
+
+    response = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Schedule a meeting with Rahul Verma tomorrow at 10 AM."},
+    )
+    events = _sse_events(response)
+
+    assert events[0]["understanding"]["status"] == "understood"
+    assert events[0]["understanding"]["entities"]["people"] == ["Rahul Verma"]
+    assert events[0]["understanding"]["entities"]["ambiguous_people"] == {}
+    assert db_session.query(Meeting).count() == 0
+
+
+def test_clarification_question_limit_is_two_but_pending_answer_can_resolve(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail("clarification must not reach the LLM"),
+    )
+
+    first = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Schedule a meeting"},
+    )
+    first_events = _sse_events(first)
+    conversation_id = first_events[0]["conversation_id"]
+
+    second = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "the Engineering team", "conversation_id": conversation_id},
+    )
+    second_events = _sse_events(second)
+    assert "What date" in second_events[1]["token"]
+    assert second_events[0]["clarification_count"] == 2
+
+    third = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "tomorrow", "conversation_id": conversation_id},
+    )
+    third_events = _sse_events(third)
+    assert "two-question limit" in third_events[1]["token"]
+    assert "?" not in third_events[1]["token"]
+    assert third_events[0]["clarification_count"] == 2
+    assert sum(
+        events[1]["token"].count("?")
+        for events in (first_events, second_events, third_events)
+    ) == 2
+    state = json.loads(
+        db_session.get(AssistantConversation, conversation_id).pending_clarification
+    )
+    assert state["clarification_count"] == 2
+    assert state["pending_field"] == "time"
+
+    fourth = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "4 PM", "conversation_id": conversation_id},
+    )
+    fourth_events = _sse_events(fourth)
+    assert fourth_events[0]["understanding"]["status"] == "understood"
+    assert "All required details are resolved" in fourth_events[1]["token"]
+    assert db_session.get(AssistantConversation, conversation_id).pending_clarification is None
+
+
+def test_clarification_can_be_canceled_without_executing(
+    client: TestClient,
+    db_session: Session,
+):
+    response = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Schedule a meeting with Maya tomorrow"},
+    )
+    conversation_id = _sse_events(response)[0]["conversation_id"]
+
+    canceled = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "cancel request", "conversation_id": conversation_id},
+    )
+    events = _sse_events(canceled)
+
+    assert "canceled" in events[1]["token"]
+    assert db_session.get(AssistantConversation, conversation_id).pending_clarification is None
+    assert db_session.query(Meeting).count() == 0
+    assert db_session.query(Task).count() == 0
 
 
 def test_measure_time_to_first_response_chunk(client: TestClient, monkeypatch):

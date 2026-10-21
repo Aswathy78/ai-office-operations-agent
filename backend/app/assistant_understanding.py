@@ -10,7 +10,11 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
-from app.email_draft_service import detect_groups, detect_named_employees
+from app.email_draft_service import (
+    detect_ambiguous_employee_names,
+    detect_groups,
+    detect_named_employees,
+)
 from app.meeting.scheduling_service import (
     extract_meeting_title,
     get_organization_timezone,
@@ -28,6 +32,7 @@ class AssistantEntities(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     people: list[str] = Field(default_factory=list)
+    ambiguous_people: dict[str, list[str]] = Field(default_factory=dict)
     groups: list[str] = Field(default_factory=list)
     task: str | None = None
     meeting: str | None = None
@@ -59,7 +64,7 @@ class AssistantUnderstanding(BaseModel):
             raise ValueError("Supported intents cannot have unsupported status.")
 
         if self.status == "understood":
-            if self.missing_entities:
+            if self.missing_entities or self.entities.ambiguous_people:
                 raise ValueError("Understood requests cannot have missing entities.")
             if self.intent == "task_assignment" and (
                 not self.entities.task or not self.entities.people
@@ -185,6 +190,8 @@ def _extract_duration(text: str) -> int | None:
 
 def _missing_entities(intent: Intent, entities: AssistantEntities) -> list[str]:
     missing: list[str] = []
+    if entities.ambiguous_people:
+        missing.append("ambiguous employee")
     if intent == "task_assignment":
         if not entities.task:
             missing.append("task")
@@ -235,6 +242,7 @@ def understand_assistant_command(
     reference_local = _reference_local(reference_time)
     groups = detect_groups(db, text)
     people = _extract_people(db, text)
+    ambiguous_people = detect_ambiguous_employee_names(db, text)
     task = None
     meeting = None
     topic = None
@@ -245,7 +253,10 @@ def understand_assistant_command(
             task = _clean_phrase(match.group("task"))
             requested_assignee = _clean_phrase(match.group("person"))
             if requested_assignee:
-                people = [_recognized_employee_name(db, requested_assignee)]
+                if requested_assignee.casefold() not in {
+                    name.casefold() for name in ambiguous_people
+                }:
+                    people = [_recognized_employee_name(db, requested_assignee)]
     elif intent == "meeting_scheduling":
         meeting = extract_meeting_title(text)
         if meeting.casefold() == "project meeting":
@@ -281,6 +292,7 @@ def understand_assistant_command(
 
     entities = AssistantEntities(
         people=people,
+        ambiguous_people=ambiguous_people,
         groups=groups,
         task=task,
         meeting=meeting,
@@ -333,6 +345,128 @@ def explain_understanding(result: AssistantUnderstanding) -> str:
         recipient = (entities.groups or entities.people)[0]
         details = f'an e-mail to {recipient} about "{entities.topic}"'
     return f"I understood this as a request for {details}. I haven't made any changes."
+
+
+def clarification_target(result: AssistantUnderstanding) -> str:
+    """Return the one unresolved field to ask about next."""
+    if result.entities.ambiguous_people:
+        name = next(iter(result.entities.ambiguous_people))
+        return f"ambiguous:{name}"
+    return result.missing_entities[0]
+
+
+def clarification_question(result: AssistantUnderstanding) -> str:
+    """Ask a focused question about the next unresolved field."""
+    if result.entities.ambiguous_people:
+        name = next(iter(result.entities.ambiguous_people))
+        candidates = result.entities.ambiguous_people[name]
+        choices = ", ".join(candidates)
+        return f"I found multiple employees named {name}: {choices}. Which one did you mean?"
+
+    target = clarification_target(result)
+    if target == "task":
+        return "What task should I assign?"
+    if target == "assignee":
+        return f"Who should I assign {result.entities.task or 'the task'} to?"
+    if target == "attendee or group":
+        return "Who should attend the meeting?"
+    if target == "date":
+        return "What date should I schedule the meeting?"
+    if target == "time":
+        return "What time should I schedule the meeting?"
+    if target == "recipient or group":
+        return "Who should receive the e-mail?"
+    if target == "email topic":
+        return "What should the e-mail be about?"
+    if target.startswith("a valid duration"):
+        return "What duration should I use, between 1 and 1440 minutes?"
+    return f"What value should I use for {target}?"
+
+
+def merge_clarification_answer(
+    db: Session,
+    result: AssistantUnderstanding,
+    target: str,
+    answer: str,
+    original_prompt: str,
+    reference_time: datetime | None = None,
+) -> AssistantUnderstanding:
+    """Apply an answer to the pending field and revalidate with the shared parser."""
+    if target.startswith("ambiguous:"):
+        ambiguous_name = target.removeprefix("ambiguous:")
+        candidates = result.entities.ambiguous_people.get(ambiguous_name, [])
+        selected = next(
+            (candidate for candidate in candidates if candidate.casefold() == answer.strip().casefold()),
+            None,
+        )
+        if selected is None and answer.strip().isdigit():
+            selection = int(answer.strip()) - 1
+            if 0 <= selection < len(candidates):
+                selected = candidates[selection]
+        if selected is None:
+            return result
+        resolved_prompt = re.sub(
+            rf"\b{re.escape(ambiguous_name)}\b",
+            selected,
+            original_prompt,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        return understand_assistant_command(db, resolved_prompt, reference_time) or result
+
+    entities = result.entities
+    task = entities.task or ""
+    assignee = entities.people[0] if entities.people else ""
+    recipient = (entities.groups or entities.people)
+    recipient_name = recipient[0] if recipient else ""
+    date_text = entities.date.isoformat() if entities.date else ""
+    time_text = entities.time.strftime("%I:%M %p").lstrip("0") if entities.time else ""
+    duration_text = (
+        f" for {entities.duration_minutes} minutes"
+        if entities.duration_minutes is not None
+        else ""
+    )
+
+    if result.intent == "task_assignment":
+        if target == "task":
+            task = answer
+        elif target == "assignee":
+            assignee = answer
+        probe = f"Assign {task} to {assignee}"
+        if entities.date:
+            probe += f" by {date_text}"
+    elif result.intent == "meeting_scheduling":
+        if target == "attendee or group":
+            recipient_name = answer
+        elif target == "date":
+            date_text = answer
+        elif target == "time":
+            time_text = answer
+        elif target.startswith("a valid duration"):
+            duration_text = f" for {answer}"
+        if target != "attendee or group" and entities.groups:
+            group = entities.groups[0]
+            recipient_name = (
+                "everyone" if group.casefold() == "everyone" else f"the {group} team"
+            )
+        title = entities.meeting or "Meeting"
+        probe = f"Schedule a {title} meeting"
+        if recipient_name:
+            probe += f" with {recipient_name}"
+        if date_text:
+            probe += f" on {date_text}"
+        if time_text:
+            probe += f" at {time_text}"
+        probe += duration_text
+    else:
+        if target == "recipient or group":
+            recipient_name = answer
+        elif target == "email topic":
+            entities.topic = answer
+        topic = entities.topic or ""
+        probe = f"Send an e-mail to {recipient_name} about {topic}"
+
+    return understand_assistant_command(db, probe, reference_time) or result
 
 
 def _format_date(value: Date) -> str:

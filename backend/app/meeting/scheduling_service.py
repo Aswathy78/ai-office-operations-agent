@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.email_draft_service import (
     _active_employees,
     _group_members,
+    detect_ambiguous_employee_names,
     detect_groups,
     detect_named_employees,
 )
@@ -242,6 +243,12 @@ def resolve_attendees(
     for group_name in detected_group_names:
         for member in _group_members(all_employees, group_name):
             resolved_by_id[member.id] = member
+
+    ambiguous_names = detect_ambiguous_employee_names(db, prompt)
+    if ambiguous_names:
+        name, candidates = next(iter(ambiguous_names.items()))
+        options = ", ".join(candidates)
+        return [], [], f"I found multiple employees named {name}: {options}. Which one did you mean?"
 
     # 2. Named Employees (full name or unique first name)
     for employee in detect_named_employees(db, prompt):

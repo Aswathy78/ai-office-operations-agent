@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import tempfile
 from dotenv import load_dotenv
 
 # Load environment variables from backend/.env
@@ -7,7 +9,7 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.db.database import create_tables
+from app.db.database import DATABASE_PATH, create_tables
 from app.assistant_router import router as assistant_router
 from app.auth_router import router as auth_router
 from app.email_draft_router import router as email_draft_router
@@ -44,16 +46,32 @@ app.add_middleware(
 )
 
 
-app.include_router(meeting_router)
-app.include_router(task_router)
-app.include_router(email_draft_router)
+STORY_6_3_TEST_MODE = (
+    os.getenv("APP_ENV", "").strip().casefold() == "story63-test"
+)
+
+if not STORY_6_3_TEST_MODE:
+    app.include_router(meeting_router)
+    app.include_router(task_router)
+    app.include_router(email_draft_router)
 app.include_router(auth_router)
 app.include_router(assistant_router)
 
 
 @app.on_event("startup")
 def startup():
-    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=True)
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+    if STORY_6_3_TEST_MODE:
+        database_path = DATABASE_PATH.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if not database_path.is_relative_to(temp_root):
+            raise RuntimeError(
+                "APP_ENV=story63-test requires OFFICE_OPERATIONS_DB_PATH "
+                "to point inside the operating system temporary directory."
+            )
+        create_tables()
+        return
+
     create_tables()
     try:
         from app.db.database import SessionLocal

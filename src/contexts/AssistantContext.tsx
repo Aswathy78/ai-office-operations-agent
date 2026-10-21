@@ -53,6 +53,19 @@ function getSessionStorageKey(userId?: string | null): string {
   return `${STORAGE_KEY_PREFIX}${userId || 'anonymous'}`
 }
 
+function getConversationStorageKey(userId?: string | null): string {
+  return `${getSessionStorageKey(userId)}_conversation`
+}
+
+function loadPersistedConversationId(userId?: string | null): string | null {
+  try {
+    if (typeof window === 'undefined' || !window.sessionStorage) return null
+    return window.sessionStorage.getItem(getConversationStorageKey(userId))
+  } catch {
+    return null
+  }
+}
+
 function loadPersistedMessages(userId?: string | null): AssistantChatMessage[] {
   try {
     if (typeof window === 'undefined' || !window.sessionStorage) {
@@ -76,6 +89,23 @@ function savePersistedMessages(userId: string | null | undefined, messages: Assi
   }
 }
 
+function savePersistedConversationId(
+  userId: string | null | undefined,
+  conversationId: string | null,
+): void {
+  try {
+    if (typeof window === 'undefined' || !window.sessionStorage) return
+    const key = getConversationStorageKey(userId)
+    if (conversationId) {
+      window.sessionStorage.setItem(key, conversationId)
+    } else {
+      window.sessionStorage.removeItem(key)
+    }
+  } catch {
+    // SessionStorage may be restricted in private mode or quota exceeded
+  }
+}
+
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const userId = user?.id
@@ -83,7 +113,9 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   const [isOpen, setIsOpen] = useState(false)
   const [isMinimized, setIsMinimized] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
-  const [conversationId, setConversationId] = useState<string | null>(null)
+  const [conversationId, setConversationId] = useState<string | null>(() =>
+    loadPersistedConversationId(userId),
+  )
   const [messages, setMessages] = useState<AssistantChatMessage[]>(() => loadPersistedMessages(userId))
 
   const activeAbortRef = useRef<AbortController | null>(null)
@@ -93,7 +125,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (previousUserRef.current !== userId) {
       previousUserRef.current = userId
-      setConversationId(null)
+      setConversationId(loadPersistedConversationId(userId))
       setMessages(loadPersistedMessages(userId))
     }
   }, [userId])
@@ -102,6 +134,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     savePersistedMessages(userId, messages)
   }, [userId, messages])
+
+  useEffect(() => {
+    savePersistedConversationId(userId, conversationId)
+  }, [userId, conversationId])
 
   const openWidget = useCallback(() => {
     setIsOpen(true)
@@ -128,6 +164,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     const fresh = [INITIAL_WELCOME_MESSAGE]
     setConversationId(null)
     setMessages(fresh)
+    savePersistedConversationId(userId, null)
     savePersistedMessages(userId, fresh)
   }, [userId])
 
@@ -217,7 +254,7 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
         activeAbortRef.current = null
       }
     },
-    [isStreaming, messages],
+    [conversationId, isStreaming, messages],
   )
 
   const value = useMemo(

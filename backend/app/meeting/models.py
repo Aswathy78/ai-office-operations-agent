@@ -1648,6 +1648,7 @@ class AssistantConversation(Base):
         index=True,
     )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    pending_clarification: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
