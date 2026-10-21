@@ -2628,6 +2628,52 @@ The platform supports meeting cancellation and participant management through th
 - Verified that an authorized delegate could approve the cancellation.
 - Added automated tests for meeting event changes.
 
+---
+
+## Story 6.3 – Clarification Handling
+
+### Overview
+Implemented clarification handling in the AI Office Operations Agent to resolve ambiguous employee names before proceeding with meeting scheduling and related operations.
+
+### Features Implemented
+- **Ambiguous Employee Detection:** Identifies when a user-provided name could match multiple employees in the employee directory.
+- **Clarification Questions:** Asks the user to select the intended employee when a name is ambiguous.
+- **Conversation State Management:** Preserves pending clarification information so the conversation can continue after the user responds.
+- **Clarification Resolution:** Uses the user's selection to resume the original request.
+- **Explicit Name Matching:** Allows requests containing an unambiguous full employee name to proceed without unnecessary clarification.
+- **Safe Meeting Scheduling:** Prevents the scheduling service from silently selecting an employee when clarification is required.
+
+### Example Workflow
+
+**User:**
+> Schedule a meeting with Rahul tomorrow at 10 AM.
+
+**AI Assistant:**
+> Multiple employees match "Rahul". Which employee did you mean?
+
+**User:**
+> Rahul Verma.
+
+**AI Assistant:**
+> Continues processing the original meeting request using the selected employee.
+
+### Technical Implementation
+- Updated employee name matching and assistant understanding logic.
+- Added pending clarification state support for conversations.
+- Updated meeting scheduling logic to handle ambiguous employee matches safely.
+- Added a database migration for clarification state.
+- Added backend regression tests and frontend tests for clarification behavior.
+
+### Testing and Verification
+- Focused backend test suites: 79 tests passed.
+- Verified ambiguous employee names trigger clarification.
+- Verified selecting an employee resumes the original request.
+- Verified explicit full-name requests do not trigger unnecessary clarification.
+- Tested the clarification workflow through the website.
+
+### Status
+Implementation, testing, and functional verification completed.
+
 # 📌 Current Project Status
 
 ### Epic 1 — Meeting Management[README_updated.md](https://github.com/user-attachments/files/33364215/README_updated.md)
