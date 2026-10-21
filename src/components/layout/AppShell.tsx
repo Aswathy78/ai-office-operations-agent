@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Header } from './Header'
 import { Sidebar } from './Sidebar'
+import { AssistantWidget } from '../assistant/AssistantWidget'
 
 export function AppShell({ children }: { children: ReactNode }) {
   return (
@@ -11,6 +12,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <main id="main-content" className="main-content" tabIndex={-1}>
           {children}
         </main>
+        <AssistantWidget />
       </div>
     </div>
   )

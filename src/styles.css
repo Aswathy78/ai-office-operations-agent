@@ -1214,3 +1214,494 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .calendar-sync-state small { display: block; }
 .calendar-sync-error { color: var(--danger); overflow-wrap: anywhere; }
 .calendar-sync-external { color: var(--warning); }
+
+/* =========================================================================
+   Epic 6.1 — AI Assistant Floating Widget & Agentic Command Center
+   ========================================================================= */
+
+.assistant-widget-container {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  pointer-events: none;
+}
+
+.assistant-launcher-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+}
+
+.assistant-launcher-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: linear-gradient(135deg, var(--navy), #1d4ed8);
+  color: #ffffff;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 8px 18px 8px 10px;
+  box-shadow: 0 12px 28px -4px rgba(15, 45, 82, 0.4), 0 4px 10px -2px rgba(15, 45, 82, 0.2);
+  cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.2s ease;
+  position: relative;
+  animation: assistant-robot-jump 3.2s ease-in-out infinite;
+}
+
+.assistant-launcher-btn:hover {
+  animation-play-state: paused;
+  transform: translateY(-4px) scale(1.03);
+  box-shadow: 0 16px 32px -4px rgba(15, 45, 82, 0.5), 0 6px 14px -2px rgba(15, 45, 82, 0.25);
+}
+
+.assistant-launcher-btn:focus-visible {
+  outline: 3px solid #60a5fa;
+  outline-offset: 3px;
+}
+
+.assistant-launcher-label {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: #f0f7ff;
+}
+
+.assistant-robot-shadow {
+  position: absolute;
+  bottom: -6px;
+  width: 60%;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(15, 45, 82, 0.3);
+  filter: blur(4px);
+  z-index: -1;
+  animation: assistant-shadow-pulse 3.2s ease-in-out infinite;
+}
+
+@keyframes assistant-robot-jump {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  15% {
+    transform: translateY(-12px) rotate(-3deg);
+  }
+  30% {
+    transform: translateY(0) rotate(0deg);
+  }
+  42% {
+    transform: translateY(-5px) rotate(2deg);
+  }
+  52%, 90% {
+    transform: translateY(0) rotate(0deg);
+  }
+}
+
+@keyframes assistant-shadow-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.3;
+  }
+  15% {
+    transform: scale(0.65);
+    opacity: 0.12;
+  }
+  30% {
+    transform: scale(1.15);
+    opacity: 0.4;
+  }
+  42% {
+    transform: scale(0.85);
+    opacity: 0.2;
+  }
+  52%, 90% {
+    transform: scale(1);
+    opacity: 0.3;
+  }
+}
+
+/* Chat Panel Window */
+.assistant-panel {
+  width: 380px;
+  height: 560px;
+  max-height: calc(100vh - 100px);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 20px 45px -10px rgba(15, 45, 82, 0.28), 0 0 1px 1px rgba(15, 45, 82, 0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: auto;
+  animation: assistant-panel-appear 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+  margin-bottom: 12px;
+}
+
+@keyframes assistant-panel-appear {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Panel Header */
+.assistant-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  background: linear-gradient(135deg, var(--navy), #1e3a6e);
+  color: #ffffff;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.assistant-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.assistant-header-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.12);
+  display: grid;
+  place-items: center;
+}
+
+.assistant-heading-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.assistant-heading-row h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.assistant-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  color: #a7f3d0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.assistant-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 6px #10b981;
+}
+
+.assistant-subtitle {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #bfdbfe;
+}
+
+.assistant-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.assistant-tool-btn {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #dbeafe;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.assistant-tool-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+}
+
+/* Messages Body */
+.assistant-messages-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: #f8fafc;
+}
+
+.assistant-msg-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  max-width: 90%;
+}
+
+.assistant-msg-row.user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.assistant-msg-row.assistant {
+  align-self: flex-start;
+}
+
+.assistant-msg-avatar {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  display: grid;
+  place-items: center;
+  margin-top: 2px;
+}
+
+.assistant-msg-bubble {
+  padding: 9px 13px;
+  border-radius: 14px;
+  font-size: 13.5px;
+  line-height: 1.48;
+  word-break: break-word;
+}
+
+.assistant-msg-row.user .assistant-msg-bubble {
+  background: var(--blue);
+  color: #ffffff;
+  border-bottom-right-radius: 3px;
+}
+
+.assistant-msg-row.assistant .assistant-msg-bubble {
+  background: #ffffff;
+  color: #1e293b;
+  border: 1px solid #e2e8f0;
+  border-bottom-left-radius: 3px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.assistant-msg-row.has-error .assistant-msg-bubble {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.assistant-msg-text {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Streaming cursor & typing indicator */
+.assistant-streaming-cursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background: var(--blue);
+  vertical-align: text-bottom;
+  margin-left: 2px;
+  animation: assistant-cursor-blink 0.8s infinite;
+}
+
+@keyframes assistant-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.assistant-typing-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+}
+
+.assistant-typing-indicator .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #94a3b8;
+  animation: assistant-typing-blink 1.2s ease-in-out infinite;
+}
+
+.assistant-typing-indicator .dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.assistant-typing-indicator .dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes assistant-typing-blink {
+  0%, 80%, 100% {
+    transform: scale(0.7);
+    opacity: 0.4;
+  }
+  40% {
+    transform: scale(1.1);
+    opacity: 1;
+  }
+}
+
+.assistant-scroll-anchor {
+  height: 1px;
+}
+
+/* Quick Actions Section */
+.assistant-quick-actions {
+  padding: 8px 12px 10px;
+  background: #ffffff;
+  border-top: 1px solid #edf2f7;
+}
+
+.assistant-quick-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.assistant-chips-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.assistant-chip-btn {
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e3a6e;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+}
+
+.assistant-chip-btn:hover:not(:disabled) {
+  background: var(--blue-soft);
+  border-color: #93c5fd;
+  color: var(--blue);
+}
+
+.assistant-chip-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Panel Footer Input */
+.assistant-panel-footer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border-top: 1px solid var(--border);
+  align-items: center;
+}
+
+.assistant-input {
+  flex: 1;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13px;
+  color: #1e293b;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.assistant-input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(33, 103, 213, 0.12);
+}
+
+.assistant-send-btn {
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 10px;
+  background: var(--blue);
+  color: #ffffff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.assistant-send-btn:hover:not(:disabled) {
+  background: #1a56b8;
+}
+
+.assistant-send-btn:disabled {
+  background: #cbd5e1;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+/* Accessibility: Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  .assistant-launcher-btn,
+  .assistant-robot-shadow,
+  .assistant-panel,
+  .assistant-typing-indicator .dot,
+  .assistant-streaming-cursor {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Responsive: Mobile Screens */
+@media (max-width: 640px) {
+  .assistant-widget-container {
+    right: 14px;
+    bottom: 16px;
+  }
+
+  .assistant-panel {
+    position: fixed;
+    inset: auto 12px 16px 12px;
+    width: auto;
+    height: calc(100vh - 100px);
+    max-height: 520px;
+    margin-bottom: 0;
+  }
+
+  .assistant-launcher-btn .assistant-launcher-label {
+    display: none;
+  }
+
+  .assistant-launcher-btn {
+    padding: 8px;
+    border-radius: 50%;
+  }
+}

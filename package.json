@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run src/components/email/EmailDraftPreview.test.tsx src/components/email/EmailLifecycleUpdates.test.tsx src/pages/ApprovalsPage.test.tsx src/api/meetings.test.ts src/components/meetings/TranscriptPanel.test.tsx src/components/meetings/MeetingMinutesPanel.test.tsx src/pages/MeetingReportPage.test.tsx src/pages/ChatPage.scheduling.test.tsx src/components/meetings/ScheduledMeetingCard.test.tsx"
+    "test": "vitest run src/components/email/EmailDraftPreview.test.tsx src/components/email/EmailLifecycleUpdates.test.tsx src/pages/ApprovalsPage.test.tsx src/api/meetings.test.ts src/components/meetings/TranscriptPanel.test.tsx src/components/meetings/MeetingMinutesPanel.test.tsx src/pages/MeetingReportPage.test.tsx src/pages/ChatPage.scheduling.test.tsx src/components/meetings/ScheduledMeetingCard.test.tsx src/components/assistant/AssistantWidget.test.tsx"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
