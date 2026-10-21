@@ -1,11 +1,13 @@
 /**
- * AssistantContext — Shared conversation state and widget visibility (Epic 6.1).
+ * AssistantContext — Shared conversation state and widget visibility.
  *
- * Provides:
- * - Persistent conversation history across widget open/minimize/close and page navigation.
- * - Progressive streaming message accumulation.
- * - Scoped client-side session storage (cleared on logout for security).
- * - Transparent error handling without faking AI responses.
+ * Stories covered:
+ *  6.1 — Persistent conversation history, progressive streaming, session storage.
+ *  6.4 — Execution plan state, step status, retrieval indicators, halt reasons.
+ *
+ * All Story 6.1–6.3 behaviour is preserved unchanged.
+ * Story 6.4 adds optional plan/step state that is threaded through context
+ * and cleared at the start of every new message.
  */
 
 import {
@@ -21,10 +23,20 @@ import type { ReactNode } from 'react'
 import {
   streamAssistantChat,
   type AssistantChatMessage,
+  type PlanStep,
+  type RetrievalEvent,
+  type StepDoneEvent,
+  type StepErrorEvent,
+  type StepStartEvent,
 } from '../api/assistant'
 import { useAuth } from './AuthContext'
 
+// ---------------------------------------------------------------------------
+// Context value shape
+// ---------------------------------------------------------------------------
+
 interface AssistantContextValue {
+  // Conversation
   messages: AssistantChatMessage[]
   isOpen: boolean
   isMinimized: boolean
@@ -35,9 +47,23 @@ interface AssistantContextValue {
   toggleWidget: () => void
   sendMessage: (text: string) => Promise<void>
   clearHistory: () => void
+
+  // Story 6.4: Plan & Retrieve state
+  /** Full ordered plan for the current request, or null if no plan was produced. */
+  currentPlan: PlanStep[] | null
+  /** Index of the step currently running (-1 = not started). */
+  activeStepIndex: number
+  /** Most recent retrieval event, or null. */
+  lastRetrieval: RetrievalEvent | null
+  /** Reason execution was halted, or null. */
+  haltedReason: string | null
 }
 
 const AssistantContext = createContext<AssistantContextValue | null>(null)
+
+// ---------------------------------------------------------------------------
+// Storage helpers (unchanged from 6.1)
+// ---------------------------------------------------------------------------
 
 const INITIAL_WELCOME_MESSAGE: AssistantChatMessage = {
   id: 'welcome-msg',
@@ -106,6 +132,10 @@ function savePersistedConversationId(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Provider
+// ---------------------------------------------------------------------------
+
 export function AssistantProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth()
   const userId = user?.id
@@ -118,6 +148,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
   )
   const [messages, setMessages] = useState<AssistantChatMessage[]>(() => loadPersistedMessages(userId))
 
+  // Story 6.4 plan state
+  const [currentPlan, setCurrentPlan] = useState<PlanStep[] | null>(null)
+  const [activeStepIndex, setActiveStepIndex] = useState<number>(-1)
+  const [lastRetrieval, setLastRetrieval] = useState<RetrievalEvent | null>(null)
+  const [haltedReason, setHaltedReason] = useState<string | null>(null)
+
   const activeAbortRef = useRef<AbortController | null>(null)
   const previousUserRef = useRef<string | undefined>(userId)
 
@@ -127,6 +163,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       previousUserRef.current = userId
       setConversationId(loadPersistedConversationId(userId))
       setMessages(loadPersistedMessages(userId))
+      // Clear plan state on user change
+      setCurrentPlan(null)
+      setActiveStepIndex(-1)
+      setLastRetrieval(null)
+      setHaltedReason(null)
     }
   }, [userId])
 
@@ -164,6 +205,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     const fresh = [INITIAL_WELCOME_MESSAGE]
     setConversationId(null)
     setMessages(fresh)
+    setCurrentPlan(null)
+    setActiveStepIndex(-1)
+    setLastRetrieval(null)
+    setHaltedReason(null)
     savePersistedConversationId(userId, null)
     savePersistedMessages(userId, fresh)
   }, [userId])
@@ -172,6 +217,12 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
     async (text: string) => {
       const prompt = text.trim()
       if (!prompt || isStreaming) return
+
+      // Clear plan state for the new request
+      setCurrentPlan(null)
+      setActiveStepIndex(-1)
+      setLastRetrieval(null)
+      setHaltedReason(null)
 
       const userMsgId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
       const assistantMsgId = `asst-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -246,6 +297,50 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
               ),
             )
           },
+
+          // ---- Story 6.4 callbacks ----
+          onPlan: (steps) => {
+            setCurrentPlan(steps)
+          },
+          onStepStart: (event: StepStartEvent) => {
+            setActiveStepIndex(event.index)
+            // Update the plan step status to "running"
+            setCurrentPlan((prev) =>
+              prev
+                ? prev.map((s) =>
+                    s.index === event.index ? { ...s, status: 'running' as const } : s,
+                  )
+                : prev,
+            )
+          },
+          onRetrieval: (event: RetrievalEvent) => {
+            setLastRetrieval(event)
+          },
+          onStepDone: (event: StepDoneEvent) => {
+            setCurrentPlan((prev) =>
+              prev
+                ? prev.map((s) =>
+                    s.index === event.index
+                      ? { ...s, status: 'done' as const, result_summary: event.summary }
+                      : s,
+                  )
+                : prev,
+            )
+          },
+          onStepError: (event: StepErrorEvent) => {
+            setCurrentPlan((prev) =>
+              prev
+                ? prev.map((s) =>
+                    s.index === event.index
+                      ? { ...s, status: 'failed' as const, result_summary: event.message }
+                      : s,
+                  )
+                : prev,
+            )
+          },
+          onHalted: (reason: string) => {
+            setHaltedReason(reason)
+          },
         })
       } catch {
         // streamAssistantChat already invoked onError callback
@@ -269,6 +364,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       toggleWidget,
       sendMessage,
       clearHistory,
+      currentPlan,
+      activeStepIndex,
+      lastRetrieval,
+      haltedReason,
     }),
     [
       messages,
@@ -281,6 +380,10 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
       toggleWidget,
       sendMessage,
       clearHistory,
+      currentPlan,
+      activeStepIndex,
+      lastRetrieval,
+      haltedReason,
     ],
   )
 

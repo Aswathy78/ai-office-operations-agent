@@ -1649,6 +1649,9 @@ class AssistantConversation(Base):
     )
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     pending_clarification: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Story 6.4: JSON execution checkpoint (plan, completed steps, token budget).
+    # Never overloaded with clarification state — kept in a separate column.
+    execution_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

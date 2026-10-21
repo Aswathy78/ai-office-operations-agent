@@ -1705,3 +1705,166 @@ button, a { -webkit-tap-highlight-color: transparent; }
     border-radius: 50%;
   }
 }
+
+/* =========================================================================
+   Epic 6.4 — Execution Plan Panel
+   ========================================================================= */
+
+.assistant-plan-bubble {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+  width: 100%;
+}
+
+.assistant-plan-panel {
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(239, 246, 255, 0.6);
+  font-size: 12.5px;
+  width: 100%;
+}
+
+.assistant-plan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: rgba(219, 234, 254, 0.8);
+  border: none;
+  width: 100%;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e40af;
+  gap: 6px;
+  text-align: left;
+}
+
+.assistant-plan-header:hover {
+  background: rgba(191, 219, 254, 0.9);
+}
+
+.assistant-plan-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.assistant-plan-badge {
+  background: #1d4ed8;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+
+.assistant-plan-badge.failed {
+  background: #dc2626;
+}
+
+.assistant-plan-halt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: rgba(254, 243, 199, 0.9);
+  color: #92400e;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-top: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.assistant-plan-retrieval-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: rgba(220, 252, 231, 0.8);
+  color: #166534;
+  font-size: 11px;
+  font-weight: 600;
+  border-top: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+.assistant-plan-steps {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.assistant-plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 5px 10px;
+  border-top: 1px solid rgba(59, 130, 246, 0.1);
+  transition: background 0.15s;
+}
+
+.assistant-plan-step:first-child {
+  border-top: none;
+}
+
+.assistant-plan-step.active {
+  background: rgba(219, 234, 254, 0.6);
+}
+
+.assistant-plan-step.done {
+  opacity: 0.85;
+}
+
+.assistant-plan-step.failed {
+  background: rgba(254, 242, 242, 0.7);
+}
+
+.assistant-step-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.assistant-step-desc {
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.assistant-step-result {
+  color: #64748b;
+  font-size: 11px;
+  font-style: italic;
+  word-break: break-word;
+}
+
+/* Step status icons */
+.assistant-step-icon {
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+.assistant-step-icon.done   { color: #16a34a; }
+.assistant-step-icon.failed { color: #dc2626; }
+.assistant-step-icon.running { color: #2563eb; }
+.assistant-step-icon.pending,
+.assistant-step-icon.skipped { color: #94a3b8; }
+
+@keyframes assistant-step-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.assistant-step-spin {
+  animation: assistant-step-spin 1s linear infinite;
+}
