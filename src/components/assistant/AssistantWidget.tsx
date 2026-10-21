@@ -1,30 +1,39 @@
 /**
- * AI Assistant Floating Chat Widget (Epic 6.1 / FR-30).
+ * AI Assistant Floating Chat Widget.
  *
- * Requirements:
- * - Floating, animated, jumping robot assistant widget in bottom-right corner.
- * - Accessible button label and toggle behavior.
- * - Polished chat panel with minimize and close controls.
- * - Progressive streaming reply indicator and chunk rendering.
- * - Quick-action suggestion pills.
- * - Retained conversation history across open/close and page transitions.
- * - Responsive layout for desktop and mobile with reduced-motion support.
+ * Stories:
+ *  6.1 — Floating animated robot, chat panel, streaming tokens, quick actions,
+ *         conversation history, minimize / close.
+ *  6.4 — Execution plan panel, per-step status, retrieval indicator, halt banner.
+ *
+ * The plan panel is rendered as a collapsible section inside the chat panel.
+ * It is shown as soon as the backend emits the `plan` SSE event — before any
+ * step executes — so the user always sees the ordered plan first.
  */
 
 import { type FormEvent, useEffect, useRef, useState } from 'react'
 import {
+  AlertTriangle,
+  BookOpen,
+  CheckCircle,
+  ChevronDown,
+  ChevronUp,
+  CircleDashed,
+  Loader,
   Minus,
   RotateCcw,
   SendHorizontal,
   Sparkles,
   X,
+  XCircle,
 } from 'lucide-react'
-import { ASSISTANT_QUICK_ACTIONS } from '../../api/assistant'
+import { ASSISTANT_QUICK_ACTIONS, type PlanStep } from '../../api/assistant'
 import { useAssistant } from '../../contexts/AssistantContext'
 
-/**
- * Friendly SVG Robot Mascot with glowing eyes and antenna.
- */
+// ---------------------------------------------------------------------------
+// Robot mascot (unchanged from 6.1)
+// ---------------------------------------------------------------------------
+
 export function RobotMascot({ size = 38 }: { size?: number }) {
   return (
     <svg
@@ -104,6 +113,143 @@ export function RobotMascot({ size = 38 }: { size?: number }) {
   )
 }
 
+// ---------------------------------------------------------------------------
+// Step status icon (Story 6.4)
+// ---------------------------------------------------------------------------
+
+function StepStatusIcon({ status }: { status: PlanStep['status'] }) {
+  switch (status) {
+    case 'done':
+      return <CheckCircle size={14} className="assistant-step-icon done" aria-label="Done" />
+    case 'failed':
+      return <XCircle size={14} className="assistant-step-icon failed" aria-label="Failed" />
+    case 'running':
+      return (
+        <Loader
+          size={14}
+          className="assistant-step-icon running assistant-step-spin"
+          aria-label="Running"
+        />
+      )
+    case 'skipped':
+      return <CircleDashed size={14} className="assistant-step-icon skipped" aria-label="Skipped" />
+    default:
+      return <CircleDashed size={14} className="assistant-step-icon pending" aria-label="Pending" />
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Execution Plan Panel (Story 6.4)
+// ---------------------------------------------------------------------------
+
+interface PlanPanelProps {
+  plan: PlanStep[]
+  activeStepIndex: number
+  haltedReason: string | null
+  hasRetrieval: boolean
+}
+
+function ExecutionPlanPanel({
+  plan,
+  activeStepIndex,
+  haltedReason,
+  hasRetrieval,
+}: PlanPanelProps) {
+  const [collapsed, setCollapsed] = useState(false)
+
+  const completedCount = plan.filter((s) => s.status === 'done').length
+  const failedCount = plan.filter((s) => s.status === 'failed').length
+
+  return (
+    <div
+      className="assistant-plan-panel"
+      role="region"
+      aria-label="Execution plan"
+      data-testid="assistant-plan-panel"
+    >
+      {/* Plan header */}
+      <button
+        type="button"
+        className="assistant-plan-header"
+        onClick={() => setCollapsed((c) => !c)}
+        aria-expanded={!collapsed}
+        aria-controls="assistant-plan-steps"
+      >
+        <span className="assistant-plan-title">
+          <Sparkles size={13} aria-hidden="true" />
+          Execution Plan
+          <span className="assistant-plan-badge">
+            {completedCount}/{plan.length} done
+          </span>
+          {failedCount > 0 && (
+            <span className="assistant-plan-badge failed">{failedCount} failed</span>
+          )}
+        </span>
+        {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+      </button>
+
+      {/* Halt banner */}
+      {haltedReason && (
+        <div
+          className="assistant-plan-halt"
+          role="alert"
+          data-testid="assistant-plan-halt"
+        >
+          <AlertTriangle size={13} aria-hidden="true" />
+          {haltedReason === 'step_limit'
+            ? 'Execution stopped: maximum step limit reached.'
+            : haltedReason === 'cost_cap'
+              ? 'Execution stopped: token budget exhausted.'
+              : `Execution stopped: ${haltedReason}.`}
+        </div>
+      )}
+
+      {/* Retrieval indicator */}
+      {hasRetrieval && !collapsed && (
+        <div
+          className="assistant-plan-retrieval-badge"
+          data-testid="assistant-plan-retrieval-badge"
+        >
+          <BookOpen size={12} aria-hidden="true" />
+          Company policy retrieved
+        </div>
+      )}
+
+      {/* Step list */}
+      {!collapsed && (
+        <ol
+          id="assistant-plan-steps"
+          className="assistant-plan-steps"
+          data-testid="assistant-plan-steps"
+        >
+          {plan.map((step) => {
+            const isActive = step.index === activeStepIndex && step.status === 'running'
+            return (
+              <li
+                key={step.index}
+                className={`assistant-plan-step ${step.status}${isActive ? ' active' : ''}`}
+                data-testid={`assistant-plan-step-${step.index}`}
+              >
+                <StepStatusIcon status={step.status} />
+                <div className="assistant-step-body">
+                  <span className="assistant-step-desc">{step.description}</span>
+                  {step.result_summary && step.status !== 'pending' && (
+                    <span className="assistant-step-result">{step.result_summary}</span>
+                  )}
+                </div>
+              </li>
+            )
+          })}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main widget
+// ---------------------------------------------------------------------------
+
 export function AssistantWidget() {
   const {
     messages,
@@ -115,6 +261,11 @@ export function AssistantWidget() {
     minimizeWidget,
     sendMessage,
     clearHistory,
+    // Story 6.4
+    currentPlan,
+    activeStepIndex,
+    lastRetrieval,
+    haltedReason,
   } = useAssistant()
 
   const [input, setInput] = useState('')
@@ -126,7 +277,7 @@ export function AssistantWidget() {
     if (isOpen && !isMinimized) {
       messagesEndRef.current?.scrollIntoView?.({ behavior: 'smooth' })
     }
-  }, [messages, isOpen, isMinimized])
+  }, [messages, currentPlan, isOpen, isMinimized])
 
   // Focus input on open
   useEffect(() => {
@@ -258,6 +409,27 @@ export function AssistantWidget() {
                 </div>
               )
             })}
+
+            {/* Story 6.4: Execution plan panel — rendered inside the message feed
+                so the user sees it in context, between their request and the
+                streaming response.  It appears as soon as the `plan` SSE event
+                arrives, guaranteeing it is visible before any step executes. */}
+            {currentPlan && currentPlan.length > 0 && (
+              <div className="assistant-msg-row assistant" data-testid="assistant-plan-row">
+                <div className="assistant-msg-avatar" aria-hidden="true">
+                  <RobotMascot size={24} />
+                </div>
+                <div className="assistant-msg-bubble assistant-plan-bubble">
+                  <ExecutionPlanPanel
+                    plan={currentPlan}
+                    activeStepIndex={activeStepIndex}
+                    haltedReason={haltedReason}
+                    hasRetrieval={lastRetrieval !== null}
+                  />
+                </div>
+              </div>
+            )}
+
             <div ref={messagesEndRef} className="assistant-scroll-anchor" />
           </div>
 

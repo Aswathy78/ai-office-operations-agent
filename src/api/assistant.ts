@@ -1,9 +1,14 @@
 /**
- * AI Assistant streaming API client (Epic 6.1 / FR-30).
+ * AI Assistant streaming API client (Epic 6.1 / FR-30, Story 6.4 Plan & Retrieve).
  *
  * Connects to the backend streaming endpoint (/api/v1/assistant/chat/stream)
  * via Server-Sent Events / chunked HTTP streams. Handles streaming tokens,
  * network errors, and service availability gracefully without faking AI responses.
+ *
+ * Story 6.4 additions:
+ *  - Exposes new SSE event types: plan, step_start, retrieval, step_done,
+ *    step_error, halted.
+ *  - All new callbacks are optional so existing callers are not broken.
  */
 
 import { API_BASE_URL, apiFetch } from './client'
@@ -17,6 +22,47 @@ export interface AssistantChatMessage {
   error?: boolean
 }
 
+// ---------------------------------------------------------------------------
+// Story 6.4 — Plan & Retrieve types
+// ---------------------------------------------------------------------------
+
+export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+export interface PlanStep {
+  index: number
+  description: string
+  action_type: string
+  status: StepStatus
+  result_summary: string | null
+  retrieval_query: string | null
+  retrieval_snippet: string | null
+  estimated_tokens: number
+}
+
+export interface RetrievalEvent {
+  query: string
+  snippet: string
+}
+
+export interface StepStartEvent {
+  index: number
+  label: string
+}
+
+export interface StepDoneEvent {
+  index: number
+  summary: string
+}
+
+export interface StepErrorEvent {
+  index: number
+  message: string
+}
+
+// ---------------------------------------------------------------------------
+// Streaming options
+// ---------------------------------------------------------------------------
+
 export interface StreamAssistantChatOptions {
   message: string
   conversationId?: string | null
@@ -26,6 +72,18 @@ export interface StreamAssistantChatOptions {
   onConversationId?: (id: string) => void
   onComplete?: (fullContent: string) => void
   onError?: (error: Error) => void
+  /** Called once with the full ordered plan before execution starts. */
+  onPlan?: (steps: PlanStep[]) => void
+  /** Called when a step begins executing. */
+  onStepStart?: (event: StepStartEvent) => void
+  /** Called when a step successfully retrieves company knowledge. */
+  onRetrieval?: (event: RetrievalEvent) => void
+  /** Called when a step completes successfully. */
+  onStepDone?: (event: StepDoneEvent) => void
+  /** Called when a step fails (earlier checkpoints are preserved). */
+  onStepError?: (event: StepErrorEvent) => void
+  /** Called when execution is halted due to step-limit or cost-cap. */
+  onHalted?: (reason: string) => void
 }
 
 export interface QuickAction {
@@ -66,9 +124,7 @@ export const ASSISTANT_QUICK_ACTIONS: QuickAction[] = [
  * Initiates a streaming chat request to the assistant endpoint.
  *
  * Reads streaming SSE/text chunks progressively and invokes `onChunk` for each token.
- * If the backend streaming endpoint is not yet mounted (e.g., HTTP 404/501),
- * reports an honest service-unavailable error so that missing backend work
- * is transparently surfaced rather than simulated.
+ * Story 6.4: also dispatches plan, step, retrieval, and halt events via optional callbacks.
  */
 export async function streamAssistantChat(options: StreamAssistantChatOptions): Promise<void> {
   const {
@@ -80,6 +136,12 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
     onConversationId,
     onComplete,
     onError,
+    onPlan,
+    onStepStart,
+    onRetrieval,
+    onStepDone,
+    onStepError,
+    onHalted,
   } = options
 
   const payload = {
@@ -163,15 +225,50 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
             try {
               const parsed = JSON.parse(dataStr)
               if (parsed && typeof parsed === 'object') {
+                // ---- Error event ----
                 if (parsed.error && typeof parsed.error === 'string') {
                   const sseError = new Error(parsed.error)
                   onError?.(sseError)
                   throw sseError
                 }
+
+                // ---- Conversation ID (init payload) ----
                 if (parsed.conversation_id && typeof parsed.conversation_id === 'string') {
                   onConversationId?.(parsed.conversation_id)
                 }
+
+                // ---- Story 6.4: Plan ----
+                if (Array.isArray(parsed.plan)) {
+                  onPlan?.(parsed.plan as PlanStep[])
+                }
+
+                // ---- Story 6.4: Step start ----
+                if (parsed.step_start && typeof parsed.step_start === 'object') {
+                  onStepStart?.(parsed.step_start as StepStartEvent)
+                }
+
+                // ---- Story 6.4: Retrieval ----
+                if (parsed.retrieval && typeof parsed.retrieval === 'object') {
+                  onRetrieval?.(parsed.retrieval as RetrievalEvent)
+                }
+
+                // ---- Story 6.4: Step done ----
+                if (parsed.step_done && typeof parsed.step_done === 'object') {
+                  onStepDone?.(parsed.step_done as StepDoneEvent)
+                }
+
+                // ---- Story 6.4: Step error ----
+                if (parsed.step_error && typeof parsed.step_error === 'object') {
+                  onStepError?.(parsed.step_error as StepErrorEvent)
+                }
+
+                // ---- Story 6.4: Halted ----
+                if (parsed.halted && typeof parsed.halted === 'string') {
+                  onHalted?.(parsed.halted)
+                }
               }
+
+              // ---- Token chunks (text) ----
               const token =
                 typeof parsed === 'string'
                   ? parsed
