@@ -7,6 +7,7 @@ message persistence using the application's SQLAlchemy database layer.
 
 from collections.abc import Generator
 from datetime import datetime, timezone
+import json
 import logging
 import os
 from pathlib import Path
@@ -191,6 +192,29 @@ def get_conversation_history(
         .order_by(AssistantMessage.created_at.asc())
         .all()
     )
+
+
+def load_pending_clarification(conversation: AssistantConversation) -> dict | None:
+    """Load the persisted clarification state for a conversation."""
+    if conversation.pending_clarification is None:
+        return None
+    state = json.loads(conversation.pending_clarification)
+    if not isinstance(state, dict):
+        raise ValueError("Stored assistant clarification state must be an object.")
+    return state
+
+
+def save_pending_clarification(
+    db: Session,
+    conversation: AssistantConversation,
+    state: dict | None,
+) -> None:
+    """Persist or clear pending clarification state on the conversation."""
+    conversation.pending_clarification = (
+        json.dumps(state, separators=(",", ":")) if state is not None else None
+    )
+    conversation.updated_at = datetime.now(timezone.utc)
+    db.commit()
 
 
 def list_user_conversations(

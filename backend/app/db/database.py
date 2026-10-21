@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine, event
@@ -5,7 +6,10 @@ from sqlalchemy.orm import sessionmaker
 
 from app.meeting.models import Base
 
-DATABASE_PATH = Path(__file__).resolve().parents[3] / "office_operations.db"
+DEFAULT_DATABASE_PATH = Path(__file__).resolve().parents[3] / "office_operations.db"
+DATABASE_PATH = Path(
+    os.environ.get("OFFICE_OPERATIONS_DB_PATH", str(DEFAULT_DATABASE_PATH))
+).expanduser().resolve()
 DATABASE_URL = f"sqlite:///{DATABASE_PATH.as_posix()}"
 
 engine = create_engine(

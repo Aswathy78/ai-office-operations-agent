@@ -15,6 +15,7 @@ from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import AssistantConversation, Base, EmailDraft, Employee
+from app.meeting.scheduling_service import resolve_attendees
 from app.assistant_understanding import (
     AssistantEntities,
     AssistantUnderstanding,
@@ -89,6 +90,81 @@ def test_task_assignment_command_and_variations(db_session: Session):
             assert result.entities.date.isoformat() == "2026-10-23"
         else:
             assert result.status == "understood"
+
+
+def test_duplicate_first_name_with_single_token_employee_requires_clarification(
+    db_session: Session,
+):
+    db_session.get(Employee, "emp-rahul").is_active = False
+    db_session.add_all([
+        Employee(
+            id="emp-rahul-single",
+            name="Rahul",
+            email="rahul.single@northstar.example",
+            team="Engineering",
+            is_active=True,
+        ),
+        Employee(
+            id="emp-rahul-verma",
+            name="Rahul Verma",
+            email="rahul.verma@northstar.example",
+            team="Design",
+            is_active=True,
+        ),
+    ])
+    db_session.commit()
+
+    ambiguous = understand(
+        db_session,
+        "Schedule a meeting with Rahul tomorrow at 10 AM.",
+    )
+    explicit = understand(
+        db_session,
+        "Schedule a meeting with Rahul Verma tomorrow at 10 AM.",
+    )
+    resolved_attendees, raw_emails, clarification = resolve_attendees(
+        db_session,
+        "Schedule a meeting with Rahul tomorrow at 10 AM.",
+    )
+
+    assert ambiguous is not None
+    assert ambiguous.status == "needs_clarification"
+    assert ambiguous.entities.people == []
+    assert ambiguous.entities.ambiguous_people == {
+        "Rahul": ["Rahul", "Rahul Verma"],
+    }
+    assert explicit is not None
+    assert explicit.status == "understood"
+    assert explicit.entities.people == ["Rahul Verma"]
+    assert explicit.entities.ambiguous_people == {}
+    assert resolved_attendees == []
+    assert raw_emails == []
+    assert clarification is not None
+    assert "Rahul" in clarification
+    assert "Rahul Verma" in clarification
+
+
+def test_unique_single_token_employee_name_still_resolves(
+    db_session: Session,
+):
+    db_session.add(Employee(
+        id="emp-rhea",
+        name="Rhea",
+        email="rhea@northstar.example",
+        team="Engineering",
+        is_active=True,
+    ))
+    db_session.commit()
+
+    result = understand(
+        db_session,
+        "Schedule a meeting with Rhea tomorrow at 10 AM.",
+    )
+
+    assert result is not None
+    assert result.status == "understood"
+    assert result.entities.people == ["Rhea"]
+    assert result.entities.ambiguous_people == {}
 
 
 def test_meeting_scheduling_extracts_group_date_time_and_duration(
