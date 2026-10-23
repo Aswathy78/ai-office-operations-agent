@@ -656,6 +656,69 @@ def create_draft_from_chat(
     return draft
 
 
+def create_draft(
+    db: Session,
+    actor: EmailActor,
+    *,
+    sender_name: str,
+    sender_email: str | None,
+    subject: str,
+    body: str,
+    recipient_emails: list[str],
+    groups: list[str],
+    prompt: str,
+    generation_note: str | None = None,
+) -> EmailDraft:
+    """Create a draft whose subject, body and recipients are already decided.
+
+    Used by the assistant's ``email.send`` tool (Story 6.5): the content was
+    composed and previewed earlier, so nothing is regenerated here. The draft
+    then goes through the same approval, sensitive-data and delivery workflow
+    as any chat draft. Raises ValueError when a recipient cannot be resolved.
+    """
+    by_email = {e.email.casefold(): e for e in _active_employees(db)}
+    named = [by_email[email.casefold()] for email in recipient_emails if email.casefold() in by_email]
+    raw = [email for email in recipient_emails if email.casefold() not in by_email]
+    recipients, resolved_groups, unresolved = build_recipients(
+        db, groups=groups, employees=named, emails=raw, exclude_email=sender_email,
+    )
+    if unresolved:
+        raise ValueError("Not a valid e-mail address or directory group: " + ", ".join(unresolved))
+    if not recipients:
+        raise ValueError("The e-mail has no recipients.")
+
+    now = _now()
+    draft = EmailDraft(
+        id=str(uuid.uuid4()),
+        created_by_id=actor.id,
+        created_by_name=sender_name,
+        created_by_email=sender_email,
+        created_by_role=actor.role,
+        prompt=prompt,
+        source=EMAIL_DRAFT_SOURCE_TEMPLATE,
+        template_key="assistant_tool",
+        generation_note=generation_note,
+        subject=subject.strip()[:MAX_SUBJECT_LENGTH],
+        body=body[:MAX_BODY_LENGTH],
+        recipients=recipients,
+        recipient_groups=resolved_groups,
+        unresolved_recipients=[],
+        status=EMAIL_DRAFT_STATUS_DRAFT,
+        delivery_results=[],
+        attempt_count=0,
+        acknowledged_sensitive=False,
+        created_at=now,
+        updated_at=now,
+    )
+    _refresh_checks(draft)
+    db.add(draft)
+    db.flush()
+    delivery.record_created(db, draft, actor.id)
+    db.commit()
+    db.refresh(draft)
+    return draft
+
+
 def get_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
     draft = db.get(EmailDraft, draft_id)
     if draft is None or draft.discarded_at is not None:

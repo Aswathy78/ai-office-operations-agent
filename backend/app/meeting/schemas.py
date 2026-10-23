@@ -394,12 +394,13 @@ class TaskResponse(BaseModel):
     assignee_name: str
     creator_id: str
     source: str
-    source_action_item_id: str
-    meeting_id: str
-    meeting_title: str
-    transcript_id: str
-    source_segment_index: int
-    source_timestamp_seconds: float
+    # Meeting provenance; None for tasks the AI assistant created directly (Story 6.5).
+    source_action_item_id: str | None = None
+    meeting_id: str | None = None
+    meeting_title: str | None = None
+    transcript_id: str | None = None
+    source_segment_index: int | None = None
+    source_timestamp_seconds: float | None = None
     due_at: datetime
     priority: Literal["low", "medium", "high", "urgent"]
     status: Literal["pending", "completed"]

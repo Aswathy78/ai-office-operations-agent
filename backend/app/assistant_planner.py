@@ -16,6 +16,10 @@ Design constraints
   matching against backend/docs/company_policy.md; the interface can be swapped later.
 * No duplicate service implementations.  Step execution delegates exclusively to the
   existing scheduling_service, task_service, and email_draft_service modules.
+* Story 6.5: every actionable step names the tool it runs (``tool_name``).  Tools
+  are executed through ``app.assistant_tools.execute_tool`` (schema validation,
+  scopes, idempotency, timeout, retries).  Medium/high-risk write steps wait for
+  the user's confirmation before they run.
 * Retrieval is ONLY triggered by steps that contain explicit policy-related language.
   Ordinary greetings, routine scheduling, and general chat never call the retrieval
   function.
@@ -32,7 +36,7 @@ import json
 import logging
 import os
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time as Time, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -147,11 +151,57 @@ def retrieve_company_knowledge(query: str) -> str | None:
     return None
 
 
+def search_company_knowledge(query: str, limit: int = 3) -> list[dict]:
+    """Return up to ``limit`` policy paragraphs ranked by how many query words they contain.
+
+    Same keyword-matching adapter as ``retrieve_company_knowledge`` (no vector
+    search), used by the ``document.search`` tool (Story 6.5). Each result is
+    ``{"snippet", "score", "source"}``; the list is empty when nothing matches
+    or the knowledge base is missing.
+    """
+    if not _KNOWLEDGE_BASE_PATH.exists():
+        logger.warning(
+            "Company policy knowledge base not found at %s; search skipped.",
+            _KNOWLEDGE_BASE_PATH,
+        )
+        return []
+    try:
+        content = _KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.error("Failed to read knowledge base: %s", exc)
+        return []
+
+    query_tokens = {token.lower().strip(".,;:!?\"'") for token in query.split() if len(token) > 3}
+    if not query_tokens:
+        return []
+
+    ranked: list[tuple[int, int, str]] = []
+    for position, paragraph in enumerate(content.split("\n\n")):
+        paragraph = paragraph.strip()
+        if not paragraph or paragraph.startswith("#"):
+            continue
+        lower_para = paragraph.lower()
+        score = sum(1 for token in query_tokens if token in lower_para)
+        if score:
+            ranked.append((-score, position, paragraph))
+    ranked.sort()
+    return [
+        {
+            "snippet": paragraph[:_MAX_RETRIEVAL_SNIPPET_CHARS],
+            "score": -negative_score,
+            "source": _KNOWLEDGE_BASE_PATH.name,
+        }
+        for negative_score, _, paragraph in ranked[:limit]
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Plan data model
 # ---------------------------------------------------------------------------
 
-StepStatus = Literal["pending", "running", "done", "failed", "skipped"]
+StepStatus = Literal[
+    "pending", "running", "done", "failed", "skipped", "awaiting_confirmation"
+]
 ActionType = Literal[
     "schedule_meeting",
     "assign_task",
@@ -173,6 +223,12 @@ class PlanStep:
     retrieval_query: str | None = None  # set if this step triggers retrieval
     retrieval_snippet: str | None = None  # populated after retrieval
     estimated_tokens: int = 0  # tokens this step is expected to consume
+    # Story 6.5 — the tool this step runs and how.
+    tool_name: str | None = None
+    tool_arguments: dict | None = None  # bound just before the step runs
+    requires_confirmation: bool = False
+    idempotency_key: str | None = None  # set for write steps when confirmation is requested
+    result: dict | None = None  # the tool's result once the step has run
 
 
 @dataclass
@@ -200,6 +256,9 @@ class ExecutionCheckpoint:
                     Running sum of estimated token usage across all steps executed.
     halted_reason   None while running; "step_limit" or "cost_cap" when stopped early.
     started_at      ISO-8601 timestamp when the plan began executing.
+    pending_confirmation
+                    Story 6.5: set while write steps wait for the user to confirm —
+                    ``{confirmation_id, created_at, understanding, results}``.
     """
 
     plan_steps: list[dict]
@@ -208,6 +267,7 @@ class ExecutionCheckpoint:
     total_tokens_estimated: int
     halted_reason: str | None
     started_at: str
+    pending_confirmation: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +298,13 @@ def build_execution_plan(
 
     Returns at most MAX_PLAN_STEPS steps.
 
-    Supported action types map to existing application services:
-      schedule_meeting  → meeting.scheduling_service
-      assign_task       → task_service
-      draft_email       → email_draft_service
+    Each actionable step names the tool it runs (Story 6.5); the tool, not the
+    step, decides the required scopes, risk tier, timeout and retry policy:
+      meeting_scheduling → directory.lookup_employees, calendar.check_availability,
+                           meeting.schedule
+      task_assignment    → directory.lookup_employees, task.create
+      send_email         → directory.lookup_employees, email.preview,
+                           document.search, email.send
 
     An extra "summarise_response" step is appended to every plan to produce
     the final plain-language response streamed back to the user.
@@ -253,6 +316,18 @@ def build_execution_plan(
         )
 
     steps: list[PlanStep] = []
+
+    def add(description: str, action_type: ActionType, tool_name: str, estimated: int,
+            retrieval_query: str | None = None) -> None:
+        steps.append(PlanStep(
+            index=len(steps),
+            description=description,
+            action_type=action_type,
+            tool_name=tool_name,
+            requires_confirmation=_tool_requires_confirmation(tool_name),
+            retrieval_query=retrieval_query,
+            estimated_tokens=estimated,
+        ))
 
     if understanding.intent == "meeting_scheduling":
         entities = understanding.entities
@@ -271,32 +346,22 @@ def build_execution_plan(
             else ""
         )
 
-        steps.append(PlanStep(
-            index=0,
-            description=(
-                f"Check attendee availability for {attendee} on {date_str} at {time_str}"
-            ),
-            action_type="schedule_meeting",
-            estimated_tokens=estimate_tokens(
-                f"Check availability {attendee} {date_str} {time_str}"
-            ),
-        ))
-        steps.append(PlanStep(
-            index=1,
-            description=(
-                f"Schedule '{title}' with {attendee} on {date_str} at {time_str}{duration}"
-            ),
-            action_type="schedule_meeting",
-            estimated_tokens=estimate_tokens(
-                f"Schedule meeting {attendee} {date_str} {time_str} {title}"
-            ),
-        ))
-        steps.append(PlanStep(
-            index=2,
-            description="Send calendar invitations to all attendees",
-            action_type="schedule_meeting",
-            estimated_tokens=50,
-        ))
+        add(
+            f"Look up {attendee} in the employee directory",
+            "schedule_meeting", "directory.lookup_employees",
+            estimate_tokens(f"Look up {attendee}"),
+        )
+        add(
+            f"Check attendee availability for {attendee} on {date_str} at {time_str}",
+            "schedule_meeting", "calendar.check_availability",
+            estimate_tokens(f"Check availability {attendee} {date_str} {time_str}"),
+        )
+        add(
+            f"Schedule '{title}' with {attendee} on {date_str} at {time_str}{duration} "
+            "and send calendar invitations",
+            "schedule_meeting", "meeting.schedule",
+            estimate_tokens(f"Schedule meeting {attendee} {date_str} {time_str} {title}"),
+        )
 
     elif understanding.intent == "task_assignment":
         entities = understanding.entities
@@ -306,24 +371,17 @@ def build_execution_plan(
             f" by {entities.date.isoformat()}" if entities.date else ""
         )
 
-        steps.append(PlanStep(
-            index=0,
-            description=f"Verify that '{assignee}' is an active employee",
-            action_type="assign_task",
-            estimated_tokens=estimate_tokens(f"Verify employee {assignee}"),
-        ))
-        steps.append(PlanStep(
-            index=1,
-            description=f"Create task '{task}' assigned to {assignee}{due}",
-            action_type="assign_task",
-            estimated_tokens=estimate_tokens(f"Assign task {task} {assignee} {due}"),
-        ))
-        steps.append(PlanStep(
-            index=2,
-            description=f"Send assignment notification email to {assignee}",
-            action_type="assign_task",
-            estimated_tokens=50,
-        ))
+        add(
+            f"Verify that '{assignee}' is an active employee",
+            "assign_task", "directory.lookup_employees",
+            estimate_tokens(f"Verify employee {assignee}"),
+        )
+        add(
+            f"Create task '{task}' assigned to {assignee}{due} "
+            "and send the assignment notification e-mail",
+            "assign_task", "task.create",
+            estimate_tokens(f"Assign task {task} {assignee} {due}"),
+        )
 
     elif understanding.intent == "send_email":
         entities = understanding.entities
@@ -331,37 +389,27 @@ def build_execution_plan(
         recipient = recipients[0] if recipients else "the specified recipient"
         topic = entities.topic or "the requested topic"
 
-        steps.append(PlanStep(
-            index=0,
-            description=f"Resolve recipients for '{recipient}'",
-            action_type="draft_email",
-            estimated_tokens=estimate_tokens(f"Resolve recipients {recipient}"),
-        ))
-        steps.append(PlanStep(
-            index=1,
-            description=(
-                f"Draft email to {recipient} about \"{topic}\" "
-                "and run sensitive-data scan"
-            ),
-            action_type="draft_email",
-            estimated_tokens=estimate_tokens(f"Draft email {recipient} {topic}"),
-        ))
-        steps.append(PlanStep(
-            index=2,
-            description=(
-                "Check if approval is required (threshold: >10 recipients "
-                "or external addresses per company email approval policy)"
-            ),
-            action_type="draft_email",
+        add(
+            f"Resolve recipients for '{recipient}'",
+            "draft_email", "directory.lookup_employees",
+            estimate_tokens(f"Resolve recipients {recipient}"),
+        )
+        add(
+            f"Draft email to {recipient} about \"{topic}\" "
+            "and run sensitive-data scan",
+            "draft_email", "email.preview",
+            estimate_tokens(f"Draft email {recipient} {topic}"),
+        )
+        add(
+            "Check if approval is required (threshold: >10 recipients "
+            "or external addresses per company email approval policy)",
+            "draft_email", "document.search", 80,
             retrieval_query="email approval threshold policy",
-            estimated_tokens=80,
-        ))
-        steps.append(PlanStep(
-            index=3,
-            description="Queue email draft for review or delivery",
-            action_type="draft_email",
-            estimated_tokens=50,
-        ))
+        )
+        add(
+            "Queue email draft for review or delivery",
+            "draft_email", "email.send", 50,
+        )
 
     # Always end with a summarise step so the LLM produces a plain-language reply.
     summary_index = len(steps)
@@ -394,6 +442,7 @@ def save_execution_checkpoint(
     total_tokens_estimated: int,
     halted_reason: str | None,
     started_at: str,
+    pending_confirmation: dict | None = None,
 ) -> None:
     """Persist the current execution state to AssistantConversation.execution_state.
 
@@ -409,6 +458,7 @@ def save_execution_checkpoint(
         total_tokens_estimated=total_tokens_estimated,
         halted_reason=halted_reason,
         started_at=started_at,
+        pending_confirmation=pending_confirmation,
     )
     try:
         conversation.execution_state = json.dumps(
@@ -436,6 +486,7 @@ def load_execution_checkpoint(
             total_tokens_estimated=data.get("total_tokens_estimated", 0),
             halted_reason=data.get("halted_reason"),
             started_at=data.get("started_at", ""),
+            pending_confirmation=data.get("pending_confirmation"),
         )
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.error("Corrupted execution checkpoint; discarding: %s", exc)
@@ -453,6 +504,32 @@ def clear_execution_checkpoint(
         db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to clear execution checkpoint: %s", exc, exc_info=True)
+
+
+def clear_pending_confirmation(
+    db: Session,
+    conversation: AssistantConversation,
+) -> None:
+    """Drop write steps that were waiting for confirmation (Story 6.5).
+
+    The steps are marked "skipped" so a later "confirm" can never run them.
+    The rest of the checkpoint is kept for the record. Never raises; logs on failure.
+    """
+    checkpoint = load_execution_checkpoint(conversation)
+    if checkpoint is None or not checkpoint.pending_confirmation:
+        return
+    for step in checkpoint.plan_steps:
+        if step.get("status") == "awaiting_confirmation":
+            step["status"] = "skipped"
+    checkpoint.pending_confirmation = None
+    try:
+        conversation.execution_state = json.dumps(
+            asdict(checkpoint), separators=(",", ":"), default=str
+        )
+        conversation.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Failed to clear pending confirmation: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -482,33 +559,243 @@ class StepExecutionError(Exception):
     """Raised when a plan step fails.  The caller preserves earlier checkpoints."""
 
 
+def _tool_requires_confirmation(tool_name: str) -> bool:
+    from app.assistant_tools import get_registry
+
+    return get_registry().get(tool_name).requires_confirmation
+
+
+def assistant_email_draft_mode() -> str:
+    """Drafting mode for chat e-mails: "template" (default) or "auto" (LLM first)."""
+    mode = os.environ.get("ASSISTANT_EMAIL_DRAFT_MODE", "template").strip().casefold()
+    return mode if mode in ("template", "auto") else "template"
+
+
+DEFAULT_MEETING_MINUTES = 30
+DEFAULT_TASK_DUE_DAYS = 7
+TASK_DUE_LOCAL_TIME = (17, 0)
+
+
+def _organization_datetime(day, hour: int, minute: int) -> datetime:
+    from app.meeting.scheduling_service import get_organization_timezone
+
+    local = datetime.combine(day, Time(hour, minute), tzinfo=get_organization_timezone())
+    return local.astimezone(timezone.utc)
+
+
+def _task_due_at(understanding: AssistantUnderstanding) -> datetime:
+    """The requested date at 17:00 organization time, or a week from today."""
+    from app.meeting.scheduling_service import get_organization_timezone
+
+    day = understanding.entities.date
+    if day is None:
+        today = datetime.now(timezone.utc).astimezone(get_organization_timezone()).date()
+        day = today + timedelta(days=DEFAULT_TASK_DUE_DAYS)
+    return _organization_datetime(day, *TASK_DUE_LOCAL_TIME)
+
+
+def prepare_tool_arguments(
+    step: PlanStep,
+    understanding: AssistantUnderstanding,
+    results: dict[str, dict],
+) -> dict:
+    """Bind a step's tool arguments from the understanding and earlier tool results.
+
+    ``results`` maps tool names to the results of steps that already ran, so for
+    example the meeting attendees are the employees the directory step resolved.
+    """
+    entities = understanding.entities
+    tool = step.tool_name
+    if tool == "directory.lookup_employees":
+        arguments: dict = {}
+        if entities.people:
+            arguments["names"] = list(dict.fromkeys(entities.people))
+        if entities.groups:
+            arguments["groups"] = list(dict.fromkeys(entities.groups))
+        return arguments
+
+    resolved = results.get("directory.lookup_employees", {}).get("employees", [])
+    named_emails = [
+        employee["email"] for employee in resolved
+        if str(employee.get("matched_by", "")).startswith("name:")
+    ]
+
+    if tool in ("calendar.check_availability", "meeting.schedule"):
+        start = _organization_datetime(entities.date, entities.time.hour, entities.time.minute)
+        duration = entities.duration_minutes or DEFAULT_MEETING_MINUTES
+        emails = list(dict.fromkeys(employee["email"] for employee in resolved))
+        if tool == "calendar.check_availability":
+            return {
+                "attendee_emails": emails,
+                "start_at": start.isoformat(),
+                "end_at": (start + timedelta(minutes=duration)).isoformat(),
+            }
+        return {
+            "title": entities.meeting or "Meeting",
+            "start_at": start.isoformat(),
+            "duration_minutes": duration,
+            "attendee_emails": emails,
+            "agenda": "Scheduled via the AI Office Assistant.",
+        }
+
+    if tool == "task.create":
+        if not resolved:
+            raise StepExecutionError("The task assignee was not resolved in the directory.")
+        return {
+            "assignee_email": resolved[0]["email"],
+            "title": entities.task,
+            "due_at": _task_due_at(understanding).isoformat(),
+            "priority": "medium",
+        }
+
+    if tool in ("email.preview", "email.send"):
+        arguments = {}
+        if named_emails:
+            arguments["recipient_emails"] = named_emails
+        if entities.groups:
+            arguments["groups"] = list(dict.fromkeys(entities.groups))
+        if tool == "email.preview":
+            return {**arguments, "topic": entities.topic, "mode": assistant_email_draft_mode()}
+        preview = results.get("email.preview")
+        if not preview:
+            raise StepExecutionError("The e-mail has not been drafted yet.")
+        return {
+            **arguments,
+            "subject": preview["subject"],
+            "body": preview["body"],
+            "request": f"E-mail about {entities.topic}",
+        }
+
+    if tool == "document.search":
+        return {"query": step.retrieval_query or step.description, "limit": 3}
+
+    raise StepExecutionError(f"No argument binding is defined for the tool {tool!r}.")
+
+
+def _names(people: list[dict]) -> str:
+    return ", ".join(person["name"] for person in people) or "nobody"
+
+
+def summarize_tool_result(tool_name: str, result: dict) -> str:
+    """Turn a tool result into a one-line step summary.
+
+    Raises StepExecutionError when the result means the plan cannot go on
+    (an unknown attendee, a busy calendar, unresolved e-mail recipients).
+    """
+    if tool_name == "directory.lookup_employees":
+        if result.get("ambiguous"):
+            name, candidates = next(iter(result["ambiguous"].items()))
+            raise StepExecutionError(
+                f"Several employees match '{name}': {', '.join(candidates)}."
+            )
+        if result.get("unresolved"):
+            raise StepExecutionError(
+                "Not found in the employee directory: " + ", ".join(result["unresolved"]) + "."
+            )
+        return f"Found {len(result['employees'])} employee(s): {_names(result['employees'])}."
+
+    if tool_name == "calendar.check_availability":
+        if not result["available"]:
+            busy = "; ".join(
+                f"{c['attendee_name'] or c['attendee_email']} is busy with "
+                f"'{c['conflicting_event_title']}'"
+                for c in result["conflicts"]
+            )
+            slots = ", ".join(slot["start_at"] for slot in result["alternative_slots"])
+            raise StepExecutionError(
+                f"{busy}. " + (f"Free slots: {slots}." if slots else "No free slot was found.")
+            )
+        return f"All {len(result['attendee_emails'])} attendee(s) are free."
+
+    if tool_name == "meeting.schedule":
+        summary = (
+            f"Scheduled '{result['title']}' at {result['start_at']} "
+            f"(meeting {result['meeting_id']}); invitations sent to "
+            f"{len(result['invitations_sent'])} attendee(s)."
+        )
+        if result["invitation_failures"]:
+            summary += " Invitations failed for: " + ", ".join(result["invitation_failures"]) + "."
+        return summary
+
+    if tool_name == "email.preview":
+        if result["unresolved_recipients"]:
+            raise StepExecutionError(
+                "Could not resolve e-mail recipients: "
+                + ", ".join(result["unresolved_recipients"]) + "."
+            )
+        summary = f"Drafted \"{result['subject']}\" for {len(result['recipients'])} recipient(s)."
+        if result["approval_required"]:
+            summary += " Approval will be required: " + " ".join(result["approval_reasons"])
+        if result["sensitive_findings"]:
+            labels = sorted({finding["label"] for finding in result["sensitive_findings"]})
+            summary += " Possible sensitive data: " + ", ".join(labels) + "."
+        return summary
+
+    if tool_name == "document.search":
+        count = result["count"]
+        return (
+            f"Found {count} matching policy passage(s)." if count
+            else "No matching policy passage was found."
+        )
+
+    if tool_name == "email.send":
+        outcome = result["outcome"]
+        if outcome == "queued":
+            return (
+                f"E-mail \"{result['subject']}\" queued for delivery to "
+                f"{result['recipient_count']} recipient(s) (draft {result['draft_id']})."
+            )
+        if outcome == "pending_approval":
+            return (
+                f"E-mail \"{result['subject']}\" submitted for approval "
+                f"(draft {result['draft_id']}): " + " ".join(result["approval_reasons"])
+            )
+        if outcome == "needs_review":
+            return (
+                f"E-mail \"{result['subject']}\" saved as a draft for your review because it "
+                "may contain sensitive data: " + ", ".join(result["sensitive_labels"]) + "."
+            )
+        return f"E-mail \"{result['subject']}\" is {result['status']} (draft {result['draft_id']})."
+
+    if tool_name == "task.create":
+        assignee = result["assignee"]["name"] if result.get("assignee") else "the assignee"
+        return (
+            f"Created task '{result['title']}' for {assignee}, due {result['due_at']} "
+            f"(task {result['task_id']}). Assignment e-mail: {result['assignment_email_status']}."
+        )
+
+    return f"Completed {tool_name}."
+
+
 def execute_plan_step(
     step: PlanStep,
     understanding: AssistantUnderstanding,
     db: Session,
     user_id: str,
+    *,
+    principal=None,
+    results: dict[str, dict] | None = None,
+    conversation_id: str | None = None,
+    confirmed: bool = False,
 ) -> str:
-    """Execute one plan step by calling the appropriate existing service.
+    """Execute one plan step and return a short human-readable summary.
 
-    Returns a short human-readable summary string on success.
-    Raises StepExecutionError on failure.  Earlier checkpoints are never
-    overwritten on failure — the caller is responsible for that.
+    Story 6.5: a step that names a tool runs it through
+    ``app.assistant_tools.execute_tool`` as ``principal``, so the change really
+    happens (a task row is created, a meeting is booked, an e-mail is queued) and
+    is recorded in the tool-execution ledger.  The tool result is stored in
+    ``step.result`` and in ``results`` for later steps.
 
-    Note on dryrun vs execution
-    ---------------------------
-    Meeting scheduling and task creation require many parameters that are
-    only partially available from the understanding (e.g. organiser email,
-    calendar provider config).  In Story 6.4 the executor produces a
-    validated, human-readable description of what *would* happen rather
-    than calling the live service.  The live service integration is the
-    responsibility of Story 6.5 (Execute).  This is consistent with the
-    existing assistant behaviour: Story 6.1–6.3 state "I haven't made any
-    changes."
+    Steps without a tool (e.g. plans built by older code) are only validated
+    against the understanding and report "Validated: ..." — they change nothing.
 
     The retrieval step is handled inline in the router because it produces
     an SSE event; summarise_response is also handled in the router because it
     streams tokens.  Those two action types raise StepExecutionError here so
     the router catches them and handles them directly.
+
+    Raises StepExecutionError on failure.  Earlier checkpoints are never
+    overwritten on failure — the caller is responsible for that.
     """
     if step.action_type == "summarise_response":
         raise StepExecutionError(
@@ -519,6 +806,28 @@ def execute_plan_step(
         raise StepExecutionError(
             "retrieve_knowledge steps are handled inline by the router."
         )
+
+    if step.tool_name is not None and principal is not None:
+        from app.assistant_tools import ToolError, execute_tool
+
+        results = results if results is not None else {}
+        if step.tool_arguments is None:
+            step.tool_arguments = prepare_tool_arguments(step, understanding, results)
+        try:
+            outcome = execute_tool(
+                db,
+                principal,
+                step.tool_name,
+                step.tool_arguments,
+                idempotency_key=step.idempotency_key,
+                conversation_id=conversation_id,
+                confirmed=confirmed,
+            )
+        except ToolError as exc:
+            raise StepExecutionError(exc.message) from exc
+        step.result = outcome.result or {}
+        results[step.tool_name] = step.result
+        return summarize_tool_result(step.tool_name, step.result)
 
     entities = understanding.entities
 
@@ -537,9 +846,6 @@ def execute_plan_step(
         time_str = entities.time.strftime("%H:%M")
         title = entities.meeting or "Meeting"
         duration = entities.duration_minutes or 30
-
-        # Dry-run description (see note above).  Story 6.5 will replace this
-        # with a live call to scheduling_service.schedule_meeting().
         return (
             f"Validated: schedule '{title}' with {attendee} on {date_str} "
             f"at {time_str} for {duration} min."
@@ -555,7 +861,6 @@ def execute_plan_step(
         due = (
             f" by {entities.date.isoformat()}" if entities.date else ""
         )
-        # Dry-run description.  Story 6.5 will call task_service.
         return f"Validated: assign '{task}' to {assignee}{due}."
 
     if step.action_type == "draft_email":
@@ -563,7 +868,6 @@ def execute_plan_step(
         if not recipients:
             raise StepExecutionError("Email recipient is missing from the understanding.")
         topic = entities.topic or "(no topic)"
-        # Dry-run description.  Story 6.5 will call email_draft_service.
         return f"Validated: draft email to {recipients[0]} about \"{topic}\"."
 
     raise StepExecutionError(

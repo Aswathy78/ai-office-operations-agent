@@ -282,7 +282,7 @@ def _apply_reassignment(
     task.calendar_sequence = (task.calendar_sequence or 0) + 1
     _audit(db, task, actor, ACTION_REASSIGN, TASK_AUDIT_OUTCOME_APPLIED, detail)
 
-    meeting = db.get(Meeting, task.meeting_id)
+    meeting = db.get(Meeting, task.meeting_id) if task.meeting_id else None
     source = f"Source meeting: {meeting.title}\n" if meeting else ""
     assigned_subject, assigned_body = render_assignment_email(
         task,

@@ -1859,6 +1859,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .assistant-step-icon.running { color: #2563eb; }
 .assistant-step-icon.pending,
 .assistant-step-icon.skipped { color: #94a3b8; }
+/* Story 6.5: write step waiting for the user to reply "confirm" */
+.assistant-step-icon.awaiting { color: #d97706; }
 
 @keyframes assistant-step-spin {
   from { transform: rotate(0deg); }

@@ -62,7 +62,8 @@ def _task_query(db: Session):
     return (
         db.query(Task, Employee, Meeting)
         .join(Employee, Task.assignee_id == Employee.id)
-        .join(Meeting, Task.meeting_id == Meeting.id)
+        # Outer join: assistant-created tasks (Story 6.5) have no source meeting.
+        .outerjoin(Meeting, Task.meeting_id == Meeting.id)
         .order_by(Task.due_at, Task.created_at)
     )
 
@@ -116,7 +117,7 @@ def _calendar_sync_response(sync: TaskCalendarSync | None) -> TaskCalendarSyncRe
 def _task_response(
     task: Task,
     employee: Employee,
-    meeting: Meeting,
+    meeting: Meeting | None,
     pending_reassignment: TaskReassignmentRequestResponse | None = None,
     calendar_sync: TaskCalendarSync | None = None,
 ) -> TaskResponse:
@@ -129,7 +130,7 @@ def _task_response(
         source=task.source,
         source_action_item_id=task.source_action_item_id,
         meeting_id=task.meeting_id,
-        meeting_title=meeting.title,
+        meeting_title=meeting.title if meeting else None,
         transcript_id=task.transcript_id,
         source_segment_index=task.source_segment_index,
         source_timestamp_seconds=task.source_timestamp_seconds,
@@ -155,7 +156,7 @@ def _task_response(
 
 def _task_responses(
     db: Session,
-    rows: list[tuple[Task, Employee, Meeting]],
+    rows: list[tuple[Task, Employee, Meeting | None]],
 ) -> list[TaskResponse]:
     task_ids = [task.id for task, _, _ in rows]
     pending: dict[str, TaskReassignmentRequest] = {}
@@ -187,7 +188,7 @@ def _task_responses(
     ]
 
 
-def _task_row(db: Session, task_id: str) -> tuple[Task, Employee, Meeting] | None:
+def _task_row(db: Session, task_id: str) -> tuple[Task, Employee, Meeting | None] | None:
     return _task_query(db).filter(Task.id == task_id).one_or_none()
 
 
@@ -221,10 +222,13 @@ def get_task_calendar(
     events = []
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for task, _, meeting in rows:
-        description = _escape_ical_text(
-            f"Priority: {task.priority}; Source meeting: {meeting.title}; "
+        source = (
+            f"Source meeting: {meeting.title}; "
             f"Transcript timestamp: {task.source_timestamp_seconds:.2f}s"
+            if meeting is not None
+            else "Source: AI Office Assistant"
         )
+        description = _escape_ical_text(f"Priority: {task.priority}; {source}")
         events.extend(
             [
                 "BEGIN:VEVENT",

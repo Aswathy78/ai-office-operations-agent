@@ -9,6 +9,10 @@
  *  - Exposes new SSE event types: plan, step_start, retrieval, step_done,
  *    step_error, halted.
  *  - All new callbacks are optional so existing callers are not broken.
+ *
+ * Story 6.5 additions:
+ *  - Plan steps name the tool they run; write steps may wait for the user to
+ *    reply "confirm" (awaiting_confirmation event) before they execute.
  */
 
 import { API_BASE_URL, apiFetch } from './client'
@@ -26,7 +30,13 @@ export interface AssistantChatMessage {
 // Story 6.4 — Plan & Retrieve types
 // ---------------------------------------------------------------------------
 
-export type StepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+export type StepStatus =
+  | 'pending'
+  | 'running'
+  | 'done'
+  | 'failed'
+  | 'skipped'
+  | 'awaiting_confirmation'
 
 export interface PlanStep {
   index: number
@@ -37,6 +47,10 @@ export interface PlanStep {
   retrieval_query: string | null
   retrieval_snippet: string | null
   estimated_tokens: number
+  /** Story 6.5: the tool this step runs and whether it waits for confirmation. */
+  tool_name?: string | null
+  tool_arguments?: Record<string, unknown> | null
+  requires_confirmation?: boolean
 }
 
 export interface RetrievalEvent {
@@ -57,6 +71,14 @@ export interface StepDoneEvent {
 export interface StepErrorEvent {
   index: number
   message: string
+}
+
+export interface AwaitingConfirmationEvent {
+  index: number
+  label: string
+  tool_name: string | null
+  risk_tier: string | null
+  arguments: Record<string, unknown> | null
 }
 
 // ---------------------------------------------------------------------------
@@ -84,6 +106,8 @@ export interface StreamAssistantChatOptions {
   onStepError?: (event: StepErrorEvent) => void
   /** Called when execution is halted due to step-limit or cost-cap. */
   onHalted?: (reason: string) => void
+  /** Story 6.5: a write step is waiting for the user to reply "confirm". */
+  onAwaitingConfirmation?: (event: AwaitingConfirmationEvent) => void
 }
 
 export interface QuickAction {
@@ -142,6 +166,7 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
     onStepDone,
     onStepError,
     onHalted,
+    onAwaitingConfirmation,
   } = options
 
   const payload = {
@@ -255,6 +280,14 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
                 // ---- Story 6.4: Step done ----
                 if (parsed.step_done && typeof parsed.step_done === 'object') {
                   onStepDone?.(parsed.step_done as StepDoneEvent)
+                }
+
+                // ---- Story 6.5: Write step waiting for confirmation ----
+                if (
+                  parsed.awaiting_confirmation &&
+                  typeof parsed.awaiting_confirmation === 'object'
+                ) {
+                  onAwaitingConfirmation?.(parsed.awaiting_confirmation as AwaitingConfirmationEvent)
                 }
 
                 // ---- Story 6.4: Step error ----

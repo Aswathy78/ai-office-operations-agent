@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import DATABASE_PATH, create_tables
 from app.assistant_router import router as assistant_router
+from app.assistant_tools_router import router as assistant_tools_router
 from app.auth_router import router as auth_router
 from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
@@ -56,6 +57,7 @@ if not STORY_6_3_TEST_MODE:
     app.include_router(email_draft_router)
 app.include_router(auth_router)
 app.include_router(assistant_router)
+app.include_router(assistant_tools_router)
 
 
 @app.on_event("startup")

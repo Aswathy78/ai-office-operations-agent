@@ -1,0 +1,1145 @@
+"""Built-in tools the AI assistant can select and execute (Story 6.5).
+
+Each handler calls the existing application services, so a tool call has the
+same effect as the equivalent action in the UI:
+
+  meeting.schedule              calendar provider create_event + meeting invitations
+  meeting.list_upcoming         meeting service
+  email.preview                 e-mail drafting, approval rules and sensitive-data scan
+  email.send                    e-mail draft workflow (approval or queue -> dispatcher)
+  calendar.check_availability   calendar provider free/busy + alternative slots
+  task.create                   tasks table, task audit log, assignment e-mail, calendar sync
+  task.list                     tasks table
+  document.search               company knowledge base (keyword retrieval)
+  notification.send_task_notice task notifications + mail provider
+  directory.lookup_employees    employee directory and teams
+  database.query_records        allow-listed, role-filtered read-only record queries
+  workflow.run                  reminder, e-mail dispatch and calendar sync workflows
+
+Write tools use the idempotency key twice: the executor's ledger replays a repeated
+call, and the handler derives record-level keys from it (e.g. ``Task.idempotency_key``)
+so even a re-run after a failure never creates a second copy.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import hashlib
+import smtplib
+import uuid
+
+from sqlalchemy import func
+
+from app.assistant_tools import (
+    NO_RETRY,
+    READ_RETRY,
+    RetryPolicy,
+    ToolConflictError,
+    ToolContext,
+    ToolExecutionError,
+    ToolNotFound,
+    ToolPermissionDenied,
+    ToolRegistry,
+    ToolSpec,
+    ToolTransientError,
+    parse_datetime_argument,
+)
+from app.meeting.calendar_provider import (
+    CalendarConflictError,
+    CalendarProviderError,
+    get_calendar_provider,
+)
+from app.meeting.models import (
+    ACTION_ITEM_PRIORITIES,
+    AssistantToolExecution,
+    EMAIL_DRAFT_STATUS_APPROVAL,
+    EMAIL_DRAFT_STATUS_DRAFT,
+    EMAIL_DRAFT_STATUSES,
+    EmailDraft,
+    Employee,
+    Meeting,
+    MeetingParticipant,
+    TASK_AUDIT_OUTCOME_APPLIED,
+    TASK_STATUS_PENDING,
+    TASK_STATUSES,
+    TOOL_EXECUTION_STATUSES,
+    Task,
+    TaskAuditLog,
+    TaskNotification,
+)
+
+ELEVATED_ROLES = frozenset({"hr_operations", "admin"})
+_MAX_LIST = 100
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _scoped_key(prefix: str, context: ToolContext, max_length: int) -> str:
+    """A record-level idempotency key unique to this actor and tool-call key."""
+    digest = hashlib.sha256(
+        f"{context.principal.user_id}:{context.idempotency_key}".encode("utf-8")
+    ).hexdigest()
+    return f"{prefix}:{digest}"[:max_length]
+
+
+def _employee_summary(employee: Employee) -> dict:
+    return {
+        "id": employee.id,
+        "name": employee.name,
+        "email": employee.email,
+        "team": employee.team,
+        "is_active": employee.is_active,
+    }
+
+
+def _same_team(left: str | None, right: str | None) -> bool:
+    return bool(left and right and left.strip().casefold() == right.strip().casefold())
+
+
+def _require_team_scope(context: ToolContext, employee: Employee, verb: str) -> None:
+    """HR / Operations and admins act on anyone; managers only on their own team."""
+    principal = context.principal
+    if principal.role in ELEVATED_ROLES:
+        return
+    if principal.role == "manager" and _same_team(employee.team, principal.team):
+        return
+    raise ToolPermissionDenied(
+        f"Managers can only {verb} employees in their own team "
+        f"({principal.team or 'no team'}); {employee.name} is in "
+        f"{employee.team or 'no team'}."
+    )
+
+
+def _active_employee_by_email(context: ToolContext, email: str) -> Employee | None:
+    return (
+        context.db.query(Employee)
+        .filter(func.lower(Employee.email) == email.strip().casefold())
+        .one_or_none()
+    )
+
+
+def _string_list(max_items: int, item: dict) -> dict:
+    return {"type": "array", "items": item, "maxItems": max_items, "uniqueItems": True}
+
+
+_EMAIL = {"type": "string", "format": "email", "maxLength": 255}
+_RECIPIENT_REQUIRED = [
+    {"required": ["recipient_emails"], "description": "recipient_emails is given"},
+    {"required": ["groups"], "description": "groups is given"},
+]
+
+
+def _window_validator(arguments: dict) -> list[dict]:
+    start = parse_datetime_argument(arguments["start_at"])
+    end = parse_datetime_argument(arguments["end_at"])
+    if end <= start:
+        return [{"path": "$.end_at", "message": "must be after start_at"}]
+    if end - start > timedelta(hours=24):
+        return [{"path": "$.end_at", "message": "the window may be at most 24 hours"}]
+    return []
+
+
+def _future_validator(field: str, label: str):
+    def validate(arguments: dict) -> list[dict]:
+        if parse_datetime_argument(arguments[field]) <= _now() - timedelta(minutes=1):
+            return [{"path": f"$.{field}", "message": f"{label} must be in the future"}]
+        return []
+
+    return validate
+
+
+# ---------------------------------------------------------------------------
+# Employee directory
+# ---------------------------------------------------------------------------
+
+
+def lookup_employees(context: ToolContext, arguments: dict) -> dict:
+    from app.email_draft_service import _active_employees, _group_members
+    from app.meeting.employee_matching import match_employee_name
+
+    db = context.db
+    directory = _active_employees(db)
+    found: dict[str, dict] = {}
+    unresolved: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
+
+    def add(employee: Employee, matched_by: str) -> None:
+        found.setdefault(employee.id, {**_employee_summary(employee), "matched_by": matched_by})
+
+    for name in arguments.get("names", []):
+        exact = [e for e in directory if e.name.casefold() == name.strip().casefold()]
+        if len(exact) == 1:
+            add(exact[0], f"name:{name}")
+            continue
+        if len(exact) > 1:
+            ambiguous[name] = [e.name for e in exact]
+            continue
+        match = match_employee_name(db, name)
+        if match.status == "unique_match" and match.employee_id:
+            employee = db.get(Employee, match.employee_id)
+            if employee is not None:
+                add(employee, f"name:{name}")
+                continue
+        if match.status == "ambiguous_match":
+            ambiguous[name] = list(match.candidate_names)
+        else:
+            unresolved.append(name)
+
+    for email in arguments.get("emails", []):
+        employee = _active_employee_by_email(context, email)
+        if employee is not None and employee.is_active:
+            add(employee, f"email:{email}")
+        else:
+            unresolved.append(email)
+
+    groups: list[dict] = []
+    for group in arguments.get("groups", []):
+        members = _group_members(directory, group)
+        if not members:
+            unresolved.append(group)
+            continue
+        groups.append({"name": group, "count": len(members)})
+        for member in members:
+            add(member, f"group:{group}")
+
+    return {
+        "employees": list(found.values()),
+        "groups": groups,
+        "unresolved": unresolved,
+        "ambiguous": ambiguous,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Calendar
+# ---------------------------------------------------------------------------
+
+
+def check_availability(context: ToolContext, arguments: dict) -> dict:
+    from app.meeting.scheduling_service import find_alternative_slots
+
+    start = parse_datetime_argument(arguments["start_at"])
+    end = parse_datetime_argument(arguments["end_at"])
+    emails = list(dict.fromkeys(e.strip().casefold() for e in arguments["attendee_emails"]))
+    try:
+        provider = get_calendar_provider()
+        availability = provider.check_availability(context.db, emails, start, end)
+    except CalendarProviderError as exc:
+        raise ToolTransientError(f"The calendar provider is unavailable: {exc}") from exc
+
+    alternatives = []
+    if availability.has_conflicts:
+        duration = int((end - start).total_seconds() // 60)
+        alternatives = [
+            {"start_at": _iso(slot_start), "end_at": _iso(slot_end)}
+            for slot_start, slot_end in find_alternative_slots(
+                context.db, start, duration, emails, provider=provider, limit=3
+            )
+        ]
+    return {
+        "available": not availability.has_conflicts,
+        "attendee_emails": emails,
+        "start_at": _iso(start),
+        "end_at": _iso(end),
+        "conflicts": [
+            {
+                "attendee_email": conflict.attendee_email,
+                "attendee_name": conflict.attendee_name,
+                "conflicting_event_title": conflict.conflicting_event_title,
+                "conflicting_start_at": _iso(conflict.conflicting_start_at),
+                "conflicting_end_at": _iso(conflict.conflicting_end_at),
+            }
+            for conflict in availability.conflicts
+        ],
+        "alternative_slots": alternatives,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Meetings
+# ---------------------------------------------------------------------------
+
+
+def schedule_meeting(context: ToolContext, arguments: dict) -> dict:
+    from app.meeting.scheduling_service import (
+        find_alternative_slots,
+        get_organization_timezone,
+        send_meeting_invitations,
+    )
+
+    db = context.db
+    start = parse_datetime_argument(arguments["start_at"])
+    end = start + timedelta(minutes=arguments["duration_minutes"])
+    emails = list(dict.fromkeys(e.strip().casefold() for e in arguments["attendee_emails"]))
+    provider = get_calendar_provider()
+
+    # Resume: a previous attempt with this idempotency key may already have created it.
+    meeting_id = context.progress.get("meeting_id")
+    event = provider.get_event(db, meeting_id) if meeting_id else None
+    if event is None:
+        try:
+            event = provider.create_event(
+                db=db,
+                title=arguments["title"].strip(),
+                start_at=start,
+                end_at=end,
+                organizer_id=context.principal.user_id,
+                attendee_emails=emails,
+                agenda=arguments.get("agenda") or "Scheduled by the AI Office Assistant.",
+            )
+        except CalendarConflictError as exc:
+            slots = find_alternative_slots(
+                db, start, arguments["duration_minutes"], emails, provider=provider, limit=3
+            )
+            suggestions = ", ".join(_iso(slot_start) for slot_start, _ in slots) or "none found"
+            raise ToolConflictError(f"{exc} Next free slots: {suggestions}.") from exc
+        except CalendarProviderError as exc:
+            raise ToolTransientError(f"The calendar provider is unavailable: {exc}") from exc
+        context.save_progress(meeting_id=event.id)
+
+    already_invited = set(context.progress.get("invitations_sent", []))
+    employees = {
+        employee.email.casefold(): employee
+        for employee in db.query(Employee).filter(func.lower(Employee.email).in_(emails)).all()
+    }
+    pending = [email for email in emails if email not in already_invited]
+    sent, failures = send_meeting_invitations(
+        meeting=event,
+        organizer_name=context.principal.name,
+        attendees=[employees[email] for email in pending if email in employees],
+        timezone_name=str(get_organization_timezone()),
+        raw_emails=[email for email in pending if email not in employees],
+    )
+    invited = sorted(already_invited | {email.casefold() for email in sent})
+    context.save_progress(invitations_sent=invited)
+
+    # Read the event back so the result reflects what the calendar actually holds.
+    stored = provider.get_event(db, event.id)
+    if stored is None:
+        raise ToolExecutionError("The meeting could not be read back from the calendar.")
+    return {
+        "meeting_id": stored.id,
+        "title": stored.title,
+        "start_at": _iso(stored.start_at),
+        "end_at": _iso(stored.end_at),
+        "join_url": stored.join_url,
+        "attendee_emails": stored.attendee_emails,
+        "invitations_sent": invited,
+        "invitation_failures": failures,
+        "provider": stored.provider_name,
+    }
+
+
+def list_upcoming_meetings(context: ToolContext, arguments: dict) -> dict:
+    from app.meeting.service import get_user_meetings
+
+    now = _now()
+    meetings = get_user_meetings(
+        context.db,
+        user_id=context.principal.user_id,
+        email=context.principal.email,
+        start_at=now,
+        end_at=now + timedelta(days=arguments.get("days_ahead", 14)),
+    )
+    unique = {m.id: m for m in meetings if m.status not in ("cancelled", "completed")}
+    ordered = sorted(unique.values(), key=lambda m: m.start_at)[: arguments.get("limit", 20)]
+    return {
+        "meetings": [
+            {
+                "id": m.id,
+                "title": m.title,
+                "start_at": _iso(m.start_at),
+                "end_at": _iso(m.end_at),
+                "status": m.status,
+                "join_url": m.join_url,
+                "is_organizer": m.organizer_id == context.principal.user_id,
+            }
+            for m in ordered
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# E-mail
+# ---------------------------------------------------------------------------
+
+
+def _split_recipients(context: ToolContext, emails: list[str]):
+    named, raw = [], []
+    for email in emails:
+        employee = _active_employee_by_email(context, email)
+        if employee is not None and employee.is_active:
+            named.append(employee)
+        else:
+            raw.append(email)
+    return named, raw
+
+
+def preview_email(context: ToolContext, arguments: dict) -> dict:
+    from app.email_draft_service import (
+        build_recipients,
+        compose_draft,
+        evaluate_approval,
+        scan_sensitive,
+    )
+
+    named, raw = _split_recipients(context, arguments.get("recipient_emails", []))
+    recipients, groups, unresolved = build_recipients(
+        context.db,
+        groups=arguments.get("groups", []),
+        employees=named,
+        emails=raw,
+        exclude_email=context.principal.email,
+    )
+    prompt = f"Send an e-mail about {arguments['topic']}."
+    if arguments.get("instructions"):
+        prompt += f" {arguments['instructions']}"
+    content = compose_draft(
+        prompt,
+        mode=arguments.get("mode", "template"),
+        sender=context.principal.name,
+        recipients=recipients,
+        groups=groups,
+    )
+    approval_required, approval_reasons = evaluate_approval(recipients)
+    findings = scan_sensitive(content["subject"], content["body"])
+    return {
+        "subject": content["subject"],
+        "body": content["body"],
+        "source": content["source"],
+        "generation_note": content["generation_note"],
+        "recipients": recipients,
+        "recipient_groups": groups,
+        "unresolved_recipients": unresolved,
+        "approval_required": approval_required,
+        "approval_reasons": approval_reasons,
+        "sensitive_findings": findings,
+    }
+
+
+_EMAIL_OUTCOMES = {
+    EMAIL_DRAFT_STATUS_DRAFT: "needs_review",
+    EMAIL_DRAFT_STATUS_APPROVAL: "pending_approval",
+    "queued": "queued",
+    "sending": "queued",
+    "sent": "sent",
+    "retry": "retrying",
+    "failed": "failed",
+}
+
+
+def send_email(context: ToolContext, arguments: dict) -> dict:
+    from app import email_delivery_service as delivery
+    from app.email_draft_service import (
+        EmailActor,
+        EmailDraftConflict,
+        EmailDraftDenied,
+        create_draft,
+        send_draft,
+        submit_for_approval,
+    )
+
+    db = context.db
+    principal = context.principal
+    actor = EmailActor(id=principal.user_id, role=principal.role, team=principal.team)
+    acknowledge = bool(arguments.get("acknowledge_sensitive", False))
+
+    draft_id = context.progress.get("draft_id")
+    draft = db.get(EmailDraft, draft_id) if draft_id else None
+    if draft is None:
+        try:
+            draft = create_draft(
+                db,
+                actor,
+                sender_name=principal.name,
+                sender_email=principal.email,
+                subject=arguments["subject"],
+                body=arguments["body"],
+                recipient_emails=arguments.get("recipient_emails", []),
+                groups=arguments.get("groups", []),
+                prompt=arguments.get("request") or f"AI assistant e-mail: {arguments['subject']}",
+                generation_note="Prepared and sent by the AI Office Assistant on your confirmation.",
+            )
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        context.save_progress(draft_id=draft.id)
+
+    try:
+        if draft.status == EMAIL_DRAFT_STATUS_DRAFT:
+            if draft.approval_required and draft.approval_decision != "approved":
+                draft = submit_for_approval(db, draft.id, actor)
+            elif not (draft.sensitive_findings and not acknowledge):
+                draft = send_draft(
+                    db, draft.id, actor, confirm=True, acknowledge_sensitive=acknowledge
+                )
+    except EmailDraftConflict as exc:
+        raise ToolConflictError(str(exc)) from exc
+    except EmailDraftDenied as exc:
+        raise ToolPermissionDenied(str(exc)) from exc
+
+    db.refresh(draft)
+    return {
+        "draft_id": draft.id,
+        "status": draft.status,
+        "outcome": _EMAIL_OUTCOMES.get(draft.status, draft.status),
+        "subject": draft.subject,
+        "recipient_count": len(draft.recipients),
+        "recipients": [r["email"] for r in draft.recipients],
+        "approval_required": draft.approval_required,
+        "approval_reasons": draft.approval_reasons,
+        "sensitive_labels": sorted({f["label"] for f in draft.sensitive_findings}),
+        "events": [
+            {"to_status": e.to_status, "detail": e.detail, "created_at": _iso(e.created_at)}
+            for e in delivery.list_events(db, draft.id)
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tasks
+# ---------------------------------------------------------------------------
+
+
+def _task_summary(task: Task, assignee: Employee | None, meeting_title: str | None = None) -> dict:
+    return {
+        "task_id": task.id,
+        "title": task.title,
+        "assignee": _employee_summary(assignee) if assignee else None,
+        "creator_id": task.creator_id,
+        "source": task.source,
+        "due_at": _iso(task.due_at),
+        "priority": task.priority,
+        "status": task.status,
+        "assignment_email_status": task.assignment_email_status,
+        "meeting_id": task.meeting_id,
+        "meeting_title": meeting_title,
+    }
+
+
+def create_task(context: ToolContext, arguments: dict) -> dict:
+    from app.task_calendar_sync_service import request_sync
+    from app.task_service import attempt_assignment_email
+
+    db = context.db
+    if "assignee_id" in arguments:
+        assignee = db.get(Employee, arguments["assignee_id"])
+    else:
+        assignee = _active_employee_by_email(context, arguments["assignee_email"])
+    if assignee is None:
+        raise ToolNotFound("The assignee is not in the employee directory.")
+    if not assignee.is_active:
+        raise ToolExecutionError(f"{assignee.name} is not an active employee.")
+    _require_team_scope(context, assignee, "assign tasks to")
+
+    key = _scoped_key("assistant", context, 100)
+    task = db.query(Task).filter(Task.idempotency_key == key).one_or_none()
+    if task is None:
+        now = _now()
+        task = Task(
+            id=str(uuid.uuid4()),
+            title=arguments["title"].strip(),
+            assignee_id=assignee.id,
+            creator_id=context.principal.user_id,
+            source="assistant",
+            idempotency_key=key,
+            due_at=parse_datetime_argument(arguments["due_at"]),
+            priority=arguments.get("priority", "medium"),
+            status=TASK_STATUS_PENDING,
+            assignment_email_status="pending",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(task)
+        db.add(TaskAuditLog(
+            id=str(uuid.uuid4()),
+            task_id=task.id,
+            actor_id=context.principal.user_id,
+            actor_role=context.principal.role,
+            action="create",
+            outcome=TASK_AUDIT_OUTCOME_APPLIED,
+            detail=(
+                f"Created by the AI assistant for {assignee.name}, due "
+                f"{_iso(task.due_at)} (tool execution {context.execution_id})."
+            ),
+        ))
+        db.commit()
+    context.save_progress(task_id=task.id)
+
+    if arguments.get("notify_assignee", True):
+        task = attempt_assignment_email(db, task.id)
+
+    try:
+        from app.task_calendar_scheduler import wake
+
+        request_sync(db, task.id, "Task created by the AI assistant")
+        wake()
+    except Exception:  # noqa: BLE001 - the scheduler's reconcile pass catches it up
+        db.rollback()
+
+    stored = db.get(Task, task.id)
+    if stored is None:
+        raise ToolExecutionError("The task could not be read back after it was created.")
+    return _task_summary(stored, assignee)
+
+
+def list_tasks(context: ToolContext, arguments: dict) -> dict:
+    db = context.db
+    principal = context.principal
+    query = (
+        db.query(Task, Employee, Meeting)
+        .join(Employee, Task.assignee_id == Employee.id)
+        .outerjoin(Meeting, Task.meeting_id == Meeting.id)
+    )
+    email = arguments.get("assignee_email")
+    if principal.role == "employee":
+        if email and email.casefold() != principal.email.casefold():
+            raise ToolPermissionDenied("Employees can only list their own tasks.")
+        query = query.filter(func.lower(Employee.email) == principal.email.casefold())
+    elif principal.role == "manager":
+        if email:
+            assignee = _active_employee_by_email(context, email)
+            if assignee is None:
+                raise ToolNotFound(f"No employee has the e-mail {email}.")
+            _require_team_scope(context, assignee, "list tasks of")
+            query = query.filter(Employee.id == assignee.id)
+        else:
+            query = query.filter(func.lower(Employee.team) == (principal.team or "").casefold())
+    elif email:
+        query = query.filter(func.lower(Employee.email) == email.casefold())
+    if arguments.get("status"):
+        query = query.filter(Task.status == arguments["status"])
+    rows = query.order_by(Task.due_at, Task.created_at).limit(arguments.get("limit", 20)).all()
+    return {
+        "tasks": [
+            _task_summary(task, employee, meeting.title if meeting else None)
+            for task, employee, meeting in rows
+        ]
+    }
+
+
+# ---------------------------------------------------------------------------
+# Documents / RAG
+# ---------------------------------------------------------------------------
+
+
+def search_documents(context: ToolContext, arguments: dict) -> dict:
+    import app.assistant_planner as assistant_planner
+
+    results = assistant_planner.search_company_knowledge(
+        arguments["query"], limit=arguments.get("limit", 3)
+    )
+    return {"query": arguments["query"], "results": results, "count": len(results)}
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+def send_task_notice(context: ToolContext, arguments: dict) -> dict:
+    from app.task_service import deliver_email
+
+    db = context.db
+    task = db.get(Task, arguments["task_id"])
+    if task is None:
+        raise ToolNotFound("Task not found.")
+    assignee = db.get(Employee, task.assignee_id)
+    if assignee is None or not assignee.email:
+        raise ToolExecutionError("The task's assignee has no e-mail address.")
+    if task.creator_id != context.principal.user_id:
+        _require_team_scope(context, assignee, "notify")
+
+    key = _scoped_key("assistant-notice", context, 200)
+    notification = (
+        db.query(TaskNotification).filter(TaskNotification.idempotency_key == key).one_or_none()
+    )
+    if notification is None:
+        subject = arguments.get("subject") or f"Update on your task: {task.title}"
+        body = (
+            f"Hello {assignee.name},\n\n"
+            f"{arguments['message'].strip()}\n\n"
+            f"Task: {task.title}\n"
+            f"Due: {_iso(task.due_at)}\n\n"
+            f"Sent by {context.principal.name} through the AI Office Assistant.\n"
+        )
+        notification = TaskNotification(
+            id=str(uuid.uuid4()),
+            task_id=task.id,
+            recipient_employee_id=assignee.id,
+            kind="assistant_notice",
+            subject=subject,
+            body=body,
+            idempotency_key=key,
+            status="pending",
+        )
+        db.add(notification)
+        db.commit()
+
+    if notification.status != "sent":
+        try:
+            deliver_email(assignee.email, notification.subject, notification.body)
+        except (OSError, smtplib.SMTPException, ValueError) as exc:
+            notification.status = "failed"
+            notification.error = str(exc)[:1000]
+            db.commit()
+            # Retried by the policy; the same notification row is reused.
+            raise ToolTransientError(f"The notification could not be delivered: {exc}") from exc
+        notification.status = "sent"
+        notification.error = None
+        db.commit()
+
+    return {
+        "notification_id": notification.id,
+        "task_id": task.id,
+        "recipient": _employee_summary(assignee),
+        "subject": notification.subject,
+        "status": notification.status,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Database (read-only, allow-listed entities, role-filtered rows)
+# ---------------------------------------------------------------------------
+
+
+def query_records(context: ToolContext, arguments: dict) -> dict:
+    db = context.db
+    principal = context.principal
+    elevated = principal.role in ELEVATED_ROLES
+    entity = arguments["entity"]
+    limit = arguments.get("limit", 20)
+    status_filter = arguments.get("status")
+    since = (
+        parse_datetime_argument(arguments["created_after"])
+        if arguments.get("created_after")
+        else None
+    )
+
+    if entity == "tasks":
+        query = db.query(Task, Employee).join(Employee, Task.assignee_id == Employee.id)
+        if not elevated:
+            query = query.filter(
+                (func.lower(Employee.team) == (principal.team or "").casefold())
+                | (Task.creator_id == principal.user_id)
+            )
+        if status_filter:
+            query = query.filter(Task.status == status_filter)
+        if since:
+            query = query.filter(Task.created_at >= since)
+        rows = query.order_by(Task.created_at.desc()).limit(limit).all()
+        records = [_task_summary(task, employee) for task, employee in rows]
+    elif entity == "meetings":
+        query = db.query(Meeting)
+        if not elevated:
+            participant_ids = db.query(MeetingParticipant.meeting_id).filter(
+                (MeetingParticipant.user_id == principal.user_id)
+                | (func.lower(MeetingParticipant.email) == principal.email.casefold())
+            )
+            query = query.filter(
+                (Meeting.organizer_id == principal.user_id) | Meeting.id.in_(participant_ids)
+            )
+        if status_filter:
+            query = query.filter(Meeting.status == status_filter)
+        if since:
+            query = query.filter(Meeting.start_at >= since.replace(tzinfo=None))
+        records = [
+            {
+                "id": m.id,
+                "title": m.title,
+                "organizer_id": m.organizer_id,
+                "start_at": _iso(m.start_at),
+                "end_at": _iso(m.end_at),
+                "status": m.status,
+            }
+            for m in query.order_by(Meeting.start_at.desc()).limit(limit).all()
+        ]
+    elif entity == "email_drafts":
+        query = db.query(EmailDraft).filter(EmailDraft.discarded_at.is_(None))
+        if not elevated:
+            # Managers approve e-mails, so they also see the approval queue.
+            query = query.filter(
+                (EmailDraft.created_by_id == principal.user_id)
+                | (EmailDraft.status == EMAIL_DRAFT_STATUS_APPROVAL)
+            )
+        if status_filter:
+            query = query.filter(EmailDraft.status == status_filter)
+        if since:
+            query = query.filter(EmailDraft.created_at >= since)
+        records = [
+            {
+                "id": d.id,
+                "subject": d.subject,
+                "status": d.status,
+                "created_by_id": d.created_by_id,
+                "recipient_count": len(d.recipients),
+                "approval_required": d.approval_required,
+                "created_at": _iso(d.created_at),
+            }
+            for d in query.order_by(EmailDraft.created_at.desc()).limit(limit).all()
+        ]
+    else:  # tool_executions
+        query = db.query(AssistantToolExecution)
+        if not elevated:
+            query = query.filter(AssistantToolExecution.actor_id == principal.user_id)
+        if status_filter:
+            query = query.filter(AssistantToolExecution.status == status_filter)
+        if since:
+            query = query.filter(AssistantToolExecution.created_at >= since)
+        records = [
+            {
+                "id": e.id,
+                "tool_name": e.tool_name,
+                "actor_id": e.actor_id,
+                "status": e.status,
+                "risk_tier": e.risk_tier,
+                "attempts": e.attempts,
+                "created_at": _iso(e.created_at),
+            }
+            for e in query.order_by(AssistantToolExecution.created_at.desc()).limit(limit).all()
+        ]
+    return {"entity": entity, "count": len(records), "records": records}
+
+
+def _query_records_validator(arguments: dict) -> list[dict]:
+    allowed = {
+        "tasks": TASK_STATUSES,
+        "meetings": ("scheduled", "active", "instant", "completed", "cancelled"),
+        "email_drafts": EMAIL_DRAFT_STATUSES,
+        "tool_executions": TOOL_EXECUTION_STATUSES,
+    }[arguments["entity"]]
+    status_filter = arguments.get("status")
+    if status_filter and status_filter not in allowed:
+        return [{
+            "path": "$.status",
+            "message": f"must be one of {', '.join(allowed)} for {arguments['entity']}",
+        }]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Workflow engine
+# ---------------------------------------------------------------------------
+
+
+def run_workflow(context: ToolContext, arguments: dict) -> dict:
+    workflow = arguments["workflow"]
+    if workflow == "task_reminders":
+        from app.task_reminder_service import run_task_reminders
+
+        summary = run_task_reminders(context.db).as_dict()
+    elif workflow == "email_dispatch":
+        from app.email_delivery_service import process_due_emails
+
+        summary = process_due_emails(context.db).as_dict()
+    else:
+        from app.task_calendar_sync_service import run_sync_pass
+
+        summary = run_sync_pass(context.db, poll=True).as_dict()
+    return {"workflow": workflow, "summary": summary, "ran_at": _iso(_now())}
+
+
+# ---------------------------------------------------------------------------
+# Registration
+# ---------------------------------------------------------------------------
+
+
+def register_builtin_tools(registry: ToolRegistry) -> None:
+    registry.register(ToolSpec(
+        name="directory.lookup_employees",
+        category="employee_directory",
+        description="Resolve names, e-mail addresses or teams to active employees.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "names": _string_list(50, {"type": "string", "minLength": 1, "maxLength": 255}),
+                "emails": _string_list(50, _EMAIL),
+                "groups": _string_list(10, {"type": "string", "minLength": 1, "maxLength": 100}),
+            },
+            "anyOf": [
+                {"required": ["names"], "description": "names is given"},
+                {"required": ["emails"], "description": "emails is given"},
+                {"required": ["groups"], "description": "groups is given"},
+            ],
+        },
+        required_scopes=frozenset({"directory.read"}),
+        risk_tier="read",
+        timeout_seconds=5,
+        retry_policy=READ_RETRY,
+        handler=lookup_employees,
+    ))
+    registry.register(ToolSpec(
+        name="calendar.check_availability",
+        category="calendar",
+        description="Check attendees' calendars for conflicts and suggest free slots.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["attendee_emails", "start_at", "end_at"],
+            "properties": {
+                "attendee_emails": {**_string_list(50, _EMAIL), "minItems": 1},
+                "start_at": {"type": "string", "format": "date-time"},
+                "end_at": {"type": "string", "format": "date-time"},
+            },
+        },
+        required_scopes=frozenset({"calendar.read"}),
+        risk_tier="read",
+        timeout_seconds=15,
+        retry_policy=READ_RETRY,
+        handler=check_availability,
+        validator=_window_validator,
+    ))
+    registry.register(ToolSpec(
+        name="meeting.schedule",
+        category="meeting",
+        description="Create a meeting in the calendar and e-mail invitations to attendees.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title", "start_at", "duration_minutes", "attendee_emails"],
+            "properties": {
+                "title": {"type": "string", "minLength": 1, "maxLength": 255},
+                "start_at": {"type": "string", "format": "date-time"},
+                "duration_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+                "attendee_emails": {**_string_list(100, _EMAIL), "minItems": 1},
+                "agenda": {"type": "string", "maxLength": 5000},
+            },
+        },
+        required_scopes=frozenset({"meetings.write"}),
+        risk_tier="medium",
+        timeout_seconds=30,
+        # Invitations are e-mail; never resend them automatically.
+        retry_policy=NO_RETRY,
+        handler=schedule_meeting,
+        validator=_future_validator("start_at", "the meeting start"),
+    ))
+    registry.register(ToolSpec(
+        name="meeting.list_upcoming",
+        category="meeting",
+        description="List the caller's upcoming meetings.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "days_ahead": {"type": "integer", "minimum": 1, "maximum": 90},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+        },
+        required_scopes=frozenset({"meetings.read"}),
+        risk_tier="read",
+        timeout_seconds=5,
+        retry_policy=READ_RETRY,
+        handler=list_upcoming_meetings,
+    ))
+    recipients = {
+        "recipient_emails": _string_list(100, _EMAIL),
+        "groups": _string_list(10, {"type": "string", "minLength": 1, "maxLength": 100}),
+    }
+    registry.register(ToolSpec(
+        name="email.preview",
+        category="email",
+        description=(
+            "Compose an e-mail and report recipients, approval requirement and "
+            "sensitive-data findings without saving or sending anything."
+        ),
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["topic"],
+            "properties": {
+                **recipients,
+                "topic": {"type": "string", "minLength": 1, "maxLength": 500},
+                "instructions": {"type": "string", "maxLength": 2000},
+                "mode": {"type": "string", "enum": ["template", "auto"]},
+            },
+            "anyOf": _RECIPIENT_REQUIRED,
+        },
+        required_scopes=frozenset({"email.compose"}),
+        risk_tier="read",
+        timeout_seconds=40,
+        retry_policy=READ_RETRY,
+        handler=preview_email,
+    ))
+    registry.register(ToolSpec(
+        name="email.send",
+        category="email",
+        description=(
+            "Create an e-mail draft and send it through the e-mail workflow: queued for "
+            "delivery, or submitted for approval when company policy requires it."
+        ),
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["subject", "body"],
+            "properties": {
+                **recipients,
+                "subject": {"type": "string", "minLength": 1, "maxLength": 255},
+                "body": {"type": "string", "minLength": 1, "maxLength": 20000},
+                "acknowledge_sensitive": {"type": "boolean"},
+                "request": {"type": "string", "maxLength": 4000},
+            },
+            "anyOf": _RECIPIENT_REQUIRED,
+        },
+        required_scopes=frozenset({"email.send"}),
+        risk_tier="high",
+        timeout_seconds=30,
+        retry_policy=NO_RETRY,
+        handler=send_email,
+    ))
+    registry.register(ToolSpec(
+        name="task.create",
+        category="task",
+        description="Create a task for an employee, record it and e-mail the assignee.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["title", "due_at"],
+            "properties": {
+                "assignee_email": _EMAIL,
+                "assignee_id": {"type": "string", "minLength": 1, "maxLength": 36},
+                "title": {"type": "string", "minLength": 1, "maxLength": 500},
+                "due_at": {"type": "string", "format": "date-time"},
+                "priority": {"type": "string", "enum": list(ACTION_ITEM_PRIORITIES)},
+                "notify_assignee": {"type": "boolean"},
+            },
+            "anyOf": [
+                {"required": ["assignee_email"], "description": "assignee_email is given"},
+                {"required": ["assignee_id"], "description": "assignee_id is given"},
+            ],
+        },
+        required_scopes=frozenset({"tasks.write"}),
+        risk_tier="medium",
+        timeout_seconds=30,
+        retry_policy=NO_RETRY,
+        handler=create_task,
+        validator=_future_validator("due_at", "the due date"),
+    ))
+    registry.register(ToolSpec(
+        name="task.list",
+        category="task",
+        description="List tasks the caller may see (own, team, or everyone for HR / admins).",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "assignee_email": _EMAIL,
+                "status": {"type": "string", "enum": list(TASK_STATUSES)},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIST},
+            },
+        },
+        required_scopes=frozenset({"tasks.read"}),
+        risk_tier="read",
+        timeout_seconds=5,
+        retry_policy=READ_RETRY,
+        handler=list_tasks,
+    ))
+    registry.register(ToolSpec(
+        name="document.search",
+        category="document",
+        description="Search the company policy knowledge base (keyword retrieval).",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 3, "maxLength": 500},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 5},
+            },
+        },
+        required_scopes=frozenset({"documents.read"}),
+        risk_tier="read",
+        timeout_seconds=5,
+        retry_policy=READ_RETRY,
+        handler=search_documents,
+    ))
+    registry.register(ToolSpec(
+        name="notification.send_task_notice",
+        category="notification",
+        description="E-mail a short notice about a task to its assignee.",
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["task_id", "message"],
+            "properties": {
+                "task_id": {"type": "string", "minLength": 1, "maxLength": 36},
+                "message": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "subject": {"type": "string", "minLength": 1, "maxLength": 255},
+            },
+        },
+        required_scopes=frozenset({"notifications.send"}),
+        risk_tier="low",
+        timeout_seconds=20,
+        # Safe to retry: each attempt reuses the same notification row.
+        retry_policy=RetryPolicy(
+            max_attempts=3, backoff_seconds=(1.0, 5.0), retry_on=(ToolTransientError,)
+        ),
+        handler=send_task_notice,
+    ))
+    registry.register(ToolSpec(
+        name="database.query_records",
+        category="database",
+        description=(
+            "Read recent tasks, meetings, e-mail drafts or tool executions the caller "
+            "may see. Read-only; no free-form SQL."
+        ),
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["entity"],
+            "properties": {
+                "entity": {
+                    "type": "string",
+                    "enum": ["tasks", "meetings", "email_drafts", "tool_executions"],
+                },
+                "status": {"type": "string", "minLength": 1, "maxLength": 30},
+                "created_after": {"type": "string", "format": "date-time"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MAX_LIST},
+            },
+        },
+        required_scopes=frozenset({"database.read"}),
+        risk_tier="read",
+        timeout_seconds=10,
+        retry_policy=READ_RETRY,
+        handler=query_records,
+        validator=_query_records_validator,
+    ))
+    registry.register(ToolSpec(
+        name="workflow.run",
+        category="workflow",
+        description=(
+            "Run one pass of a background workflow now: task reminders, e-mail "
+            "dispatch, or task calendar sync."
+        ),
+        input_schema={
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["workflow"],
+            "properties": {
+                "workflow": {
+                    "type": "string",
+                    "enum": ["task_reminders", "email_dispatch", "task_calendar_sync"],
+                },
+            },
+        },
+        required_scopes=frozenset({"workflow.run"}),
+        risk_tier="high",
+        timeout_seconds=120,
+        retry_policy=NO_RETRY,
+        handler=run_workflow,
+    ))
+

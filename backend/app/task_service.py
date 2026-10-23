@@ -174,16 +174,24 @@ def render_assignment_email(
         f"{frontend_base_url}/tasks?"
         f"{urlencode({'task_id': task.id})}"
     )
-    meeting_query = urlencode(
-        {
-            "transcript_id": task.transcript_id,
-            "segment": task.source_segment_index,
-        }
-    )
-    meeting_url = (
-        f"{frontend_base_url}/meetings/{quote(task.meeting_id, safe='')}/report"
-        f"?{meeting_query}"
-    )
+    if task.meeting_id:
+        meeting_query = urlencode(
+            {
+                "transcript_id": task.transcript_id,
+                "segment": task.source_segment_index,
+            }
+        )
+        meeting_url = (
+            f"{frontend_base_url}/meetings/{quote(task.meeting_id, safe='')}/report"
+            f"?{meeting_query}"
+        )
+        source = (
+            f"Source meeting: {meeting_title}\n"
+            f"Meeting link: {meeting_url}\n"
+        )
+    else:
+        # Tasks the AI assistant created directly have no source meeting.
+        source = "Source: assigned through the AI Office Assistant\n"
     subject = f"Task assigned: {task.title}"
     context = f"{assignment_context.strip()}\n" if assignment_context else ""
     body = (
@@ -193,8 +201,7 @@ def render_assignment_email(
         f"Due: {task.due_at.isoformat()}\n"
         f"Priority: {task.priority}\n"
         f"Task: {task_url}\n"
-        f"Source meeting: {meeting_title}\n"
-        f"Meeting link: {meeting_url}\n"
+        f"{source}"
     )
     return subject, body
 
@@ -219,8 +226,8 @@ def attempt_assignment_email(
     if task is None:
         raise ValueError("Task not found.")
     employee = db.get(Employee, task.assignee_id)
-    meeting = db.get(Meeting, task.meeting_id)
-    if employee is None or meeting is None:
+    meeting = db.get(Meeting, task.meeting_id) if task.meeting_id else None
+    if employee is None or (task.meeting_id and meeting is None):
         raise ValueError("Task assignee or source meeting no longer exists.")
 
     idempotency_key = assignment_notification_key(task)
@@ -231,7 +238,7 @@ def attempt_assignment_email(
     )
     notification_created = notification is None
     if notification_created:
-        subject, body = render_assignment_email(task, employee, meeting.title)
+        subject, body = render_assignment_email(task, employee, meeting.title if meeting else "")
         notification = TaskNotification(
             id=str(uuid.uuid4()),
             task_id=task.id,

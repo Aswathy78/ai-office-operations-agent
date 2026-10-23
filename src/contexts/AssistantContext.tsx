@@ -341,6 +341,18 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           onHalted: (reason: string) => {
             setHaltedReason(reason)
           },
+          // ---- Story 6.5 ----
+          onAwaitingConfirmation: (event) => {
+            setCurrentPlan((prev) =>
+              prev
+                ? prev.map((s) =>
+                    s.index === event.index
+                      ? { ...s, status: 'awaiting_confirmation' as const }
+                      : s,
+                  )
+                : prev,
+            )
+          },
         })
       } catch {
         // streamAssistantChat already invoked onError callback

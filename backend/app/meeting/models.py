@@ -786,24 +786,26 @@ class Task(Base):
     )
     creator_id: Mapped[str] = mapped_column(String(36), nullable=False)
     source: Mapped[str] = mapped_column(String(40), nullable=False)
-    source_action_item_id: Mapped[str] = mapped_column(
+    # Meeting provenance is set for "meeting_action_item" tasks and empty for tasks
+    # the AI assistant creates directly (source "assistant", Story 6.5).
+    source_action_item_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("meeting_action_items.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
     idempotency_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    meeting_id: Mapped[str] = mapped_column(
+    meeting_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("meetings.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
-    transcript_id: Mapped[str] = mapped_column(
+    transcript_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("meeting_transcripts.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
     )
-    source_segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
-    source_timestamp_seconds: Mapped[float] = mapped_column(nullable=False)
+    source_segment_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_timestamp_seconds: Mapped[float | None] = mapped_column(nullable=True)
     due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     priority: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(
@@ -1695,3 +1697,67 @@ class AssistantMessage(Base):
         "AssistantConversation",
         back_populates="messages",
     )
+
+
+# Story 6.5: one row per assistant tool call, also the idempotency ledger for writes.
+TOOL_EXECUTION_STATUS_RUNNING = "running"
+TOOL_EXECUTION_STATUS_SUCCEEDED = "succeeded"
+TOOL_EXECUTION_STATUS_FAILED = "failed"
+TOOL_EXECUTION_STATUS_TIMED_OUT = "timed_out"
+TOOL_EXECUTION_STATUSES = (
+    TOOL_EXECUTION_STATUS_RUNNING,
+    TOOL_EXECUTION_STATUS_SUCCEEDED,
+    TOOL_EXECUTION_STATUS_FAILED,
+    TOOL_EXECUTION_STATUS_TIMED_OUT,
+)
+
+
+class AssistantToolExecution(Base):
+    """An AI assistant tool call and its outcome (Story 6.5).
+
+    Write tools must carry an idempotency key; ``(actor_id, idempotency_key)`` is
+    unique, so repeating a call returns the stored result instead of acting twice.
+    """
+
+    __tablename__ = "assistant_tool_executions"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in TOOL_EXECUTION_STATUSES)})",
+            name="ck_assistant_tool_executions_status",
+        ),
+        UniqueConstraint(
+            "actor_id",
+            "idempotency_key",
+            name="uq_assistant_tool_executions_actor_key",
+        ),
+        Index("ix_assistant_tool_executions_actor_created", "actor_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Intentionally not a foreign key: deleting a conversation keeps the audit trail.
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    risk_tier: Mapped[str] = mapped_column(String(20), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    arguments_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default=TOOL_EXECUTION_STATUS_RUNNING,
+    )
+    # Partial progress a handler saved (e.g. the id of a record it already
+    # created) so a re-run after a failure or timeout resumes instead of duplicating.
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -8,12 +8,13 @@ export interface TaskRecord {
   assignee_name: string
   creator_id: string
   source: string
-  source_action_item_id: string
-  meeting_id: string
-  meeting_title: string
-  transcript_id: string
-  source_segment_index: number
-  source_timestamp_seconds: number
+  /** Meeting provenance; null for tasks the AI assistant created directly (Story 6.5). */
+  source_action_item_id: string | null
+  meeting_id: string | null
+  meeting_title: string | null
+  transcript_id: string | null
+  source_segment_index: number | null
+  source_timestamp_seconds: number | null
   due_at: string
   priority: 'low' | 'medium' | 'high' | 'urgent'
   status: 'pending' | 'completed'

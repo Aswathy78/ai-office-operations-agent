@@ -133,6 +133,14 @@ function StepStatusIcon({ status }: { status: PlanStep['status'] }) {
       )
     case 'skipped':
       return <CircleDashed size={14} className="assistant-step-icon skipped" aria-label="Skipped" />
+    case 'awaiting_confirmation':
+      return (
+        <CircleDashed
+          size={14}
+          className="assistant-step-icon awaiting"
+          aria-label="Waiting for your confirmation"
+        />
+      )
     default:
       return <CircleDashed size={14} className="assistant-step-icon pending" aria-label="Pending" />
   }

@@ -331,7 +331,7 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
     assignee = db.get(Employee, task.assignee_id)
     if assignee is None or not assignee.email:
         return
-    meeting = db.get(Meeting, task.meeting_id)
+    meeting = db.get(Meeting, task.meeting_id) if task.meeting_id else None
 
     stage = current_stage(task.due_at, now)
     if stage is not None:

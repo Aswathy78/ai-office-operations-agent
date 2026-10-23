@@ -2674,6 +2674,59 @@ Implemented clarification handling in the AI Office Operations Agent to resolve 
 ### Status
 Implementation, testing, and functional verification completed.
 
+---
+
+## Story 6.5 – Select Tools & Execute
+
+### Overview
+The assistant now selects a registered tool for every plan step and really executes it: tasks are created, meetings are booked, e-mails go through the e-mail approval/delivery workflow. Nothing is only described any more. Read tools run immediately; medium/high-risk writes wait until the user replies **"confirm"**.
+
+### Tools
+| Category | Tool | Risk | Scope |
+|---|---|---|---|
+| Meeting | `meeting.schedule`, `meeting.list_upcoming` | medium / read | `meetings.write`, `meetings.read` |
+| Email | `email.preview`, `email.send` | read / high | `email.compose`, `email.send` |
+| Calendar | `calendar.check_availability` | read | `calendar.read` |
+| Task | `task.create`, `task.list` | medium / read | `tasks.write`, `tasks.read` |
+| Document / RAG | `document.search` | read | `documents.read` |
+| Notification | `notification.send_task_notice` | low | `notifications.send` |
+| Employee Directory | `directory.lookup_employees` | read | `directory.read` |
+| Database | `database.query_records` (allow-listed, read-only, role-filtered) | read | `database.read` |
+| Workflow Engine | `workflow.run` (task reminders, e-mail dispatch, calendar sync) | high | `workflow.run` |
+
+Employees get the read scopes plus `meetings.write`, `email.compose` and `email.send` (as before in chat). Managers (team leads), HR / Operations and admins also get `tasks.write`, `notifications.send`, `database.read` and `workflow.run`; managers can only assign or notify within their own team.
+
+### Rules enforced for every call (`backend/app/assistant_tools.py`)
+- Arguments are validated against the tool's declared JSON schema (plus cross-field rules such as end after start); invalid calls are rejected with `422` and nothing runs.
+- Each tool declares its required scopes, risk tier, timeout and retry policy; the registry refuses a tool that does not.
+- Every write needs an idempotency key. Repeating a key with the same arguments returns the first result (`replayed: true`); reusing it for different arguments is `409`. Keys are scoped per user.
+- Handlers run with a per-attempt timeout (`504` when exceeded; a late finish is still recorded) and retry only the errors their policy lists.
+- Every call is recorded in `assistant_tool_executions` (arguments, status, attempts, result, duration).
+
+### API
+- `GET /api/v1/assistant/tools` — tools, schemas, scopes, risk tiers, timeouts, retry policies, and whether the caller may use each.
+- `POST /api/v1/assistant/tools/{tool_name}/execute` — body `{arguments, idempotency_key?, confirm?, conversation_id?}` (or `Idempotency-Key` header). Medium/high-risk tools need `"confirm": true`.
+- `GET /api/v1/assistant/tools/executions`, `GET /api/v1/assistant/tools/executions/{id}` — the caller's execution history.
+- Chat SSE adds `awaiting_confirmation` and `confirmed` events. Reply `confirm` / `yes` to run, `cancel` to discard; any other message also discards the pending action. Confirmations expire after `ASSISTANT_CONFIRMATION_TTL_MINUTES` (default 30).
+
+### Database
+Migration `20261022_02` creates `assistant_tool_executions` and makes the meeting provenance columns of `tasks` nullable, so assistant-created tasks (`source = "assistant"`) appear in the task workspace without a source meeting. Back up `office_operations.db` and run:
+
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m alembic upgrade head
+```
+
+### Configuration
+- `ASSISTANT_EMAIL_DRAFT_MODE` — `template` (default) or `auto` (try the LLM first) for e-mails drafted in chat.
+- `ASSISTANT_CONFIRMATION_TTL_MINUTES` — how long a pending confirmation stays valid (default 30).
+
+### Testing
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m pytest tests/test_assistant_tool_execution.py tests/test_assistant_plan_retrieve.py tests/test_assistant_understanding.py tests/test_assistant_chat_api.py -q
+```
+
 # 📌 Current Project Status
 
 ### Epic 1 — Meeting Management[README_updated.md](https://github.com/user-attachments/files/33364215/README_updated.md)

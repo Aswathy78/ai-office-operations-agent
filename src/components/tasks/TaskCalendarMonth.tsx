@@ -424,7 +424,7 @@ export function TaskCalendarMonth({
                 {selectedTask.assignee_team ? ` (${selectedTask.assignee_team})` : ''}
               </dd>
             </div>
-            <div><dt>Meeting</dt><dd>{selectedTask.meeting_title}</dd></div>
+            <div><dt>Meeting</dt><dd>{selectedTask.meeting_title ?? 'None (AI assistant)'}</dd></div>
             <div><dt>Creator</dt><dd>{selectedTask.creator_id}</dd></div>
             <div><dt>Source</dt><dd>{selectedTask.source}</dd></div>
             <div>
@@ -435,8 +435,9 @@ export function TaskCalendarMonth({
             <div>
               <dt>Transcript segment</dt>
               <dd>
-                {selectedTask.source_segment_index} at{' '}
-                {formatSourceTimestamp(selectedTask.source_timestamp_seconds)}
+                {selectedTask.source_segment_index === null
+                  ? 'None'
+                  : `${selectedTask.source_segment_index} at ${formatSourceTimestamp(selectedTask.source_timestamp_seconds ?? 0)}`}
               </dd>
             </div>
             <div>
@@ -449,13 +450,15 @@ export function TaskCalendarMonth({
               Reassignment awaiting approval to {selectedTask.pending_reassignment.to_assignee_name}.
             </p>
           )}
-          <Link
-            className="task-calendar-source-link"
-            to={`/meetings/${encodeURIComponent(selectedTask.meeting_id)}/report?transcript_id=${encodeURIComponent(selectedTask.transcript_id)}&segment=${selectedTask.source_segment_index}`}
-          >
-            Open source meeting: {selectedTask.meeting_title} -{' '}
-            {formatSourceTimestamp(selectedTask.source_timestamp_seconds)}
-          </Link>
+          {selectedTask.meeting_id && selectedTask.transcript_id && (
+            <Link
+              className="task-calendar-source-link"
+              to={`/meetings/${encodeURIComponent(selectedTask.meeting_id)}/report?transcript_id=${encodeURIComponent(selectedTask.transcript_id)}&segment=${selectedTask.source_segment_index}`}
+            >
+              Open source meeting: {selectedTask.meeting_title} -{' '}
+              {formatSourceTimestamp(selectedTask.source_timestamp_seconds ?? 0)}
+            </Link>
+          )}
         </section>
       )}
 

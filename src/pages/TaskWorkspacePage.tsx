@@ -388,11 +388,15 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
                     </div>
                   </td>
                   <td>
-                    <Link
-                      to={`/meetings/${encodeURIComponent(task.meeting_id)}/report?transcript_id=${encodeURIComponent(task.transcript_id)}&segment=${task.source_segment_index}`}
-                    >
-                      {task.meeting_title} - {formatSourceTimestamp(task.source_timestamp_seconds)}
-                    </Link>
+                    {task.meeting_id && task.transcript_id ? (
+                      <Link
+                        to={`/meetings/${encodeURIComponent(task.meeting_id)}/report?transcript_id=${encodeURIComponent(task.transcript_id)}&segment=${task.source_segment_index}`}
+                      >
+                        {task.meeting_title} - {formatSourceTimestamp(task.source_timestamp_seconds ?? 0)}
+                      </Link>
+                    ) : (
+                      <span>AI assistant</span>
+                    )}
                   </td>
                   <td>
                     {task.assignment_email_status === 'sent' ? (
