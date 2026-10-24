@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import DATABASE_PATH, create_tables
+from app.assistant_approvals_router import router as assistant_approvals_router
 from app.assistant_router import router as assistant_router
 from app.assistant_tools_router import router as assistant_tools_router
 from app.auth_router import router as auth_router
@@ -25,6 +26,19 @@ from app.task_reminder_scheduler import (
     start_task_reminder_scheduler,
     stop_task_reminder_scheduler,
 )
+
+
+def start_transcription_worker() -> bool:
+    # Imported lazily: the worker module pulls in the transcription stack.
+    from app.meeting.transcription_worker import start_transcription_worker as start
+
+    return start()
+
+
+def stop_transcription_worker() -> None:
+    from app.meeting.transcription_worker import stop_transcription_worker as stop
+
+    stop()
 
 
 app = FastAPI(
@@ -58,6 +72,7 @@ if not STORY_6_3_TEST_MODE:
 app.include_router(auth_router)
 app.include_router(assistant_router)
 app.include_router(assistant_tools_router)
+app.include_router(assistant_approvals_router)
 
 
 @app.on_event("startup")
@@ -85,6 +100,7 @@ def startup():
     start_task_reminder_scheduler()
     start_email_dispatcher()
     start_task_calendar_scheduler()
+    start_transcription_worker()
 
 
 @app.on_event("shutdown")
@@ -92,6 +108,7 @@ def shutdown():
     stop_task_reminder_scheduler()
     stop_email_dispatcher()
     stop_task_calendar_scheduler()
+    stop_transcription_worker()
 
 
 @app.get("/")

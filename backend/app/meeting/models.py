@@ -1761,3 +1761,118 @@ class AssistantToolExecution(Base):
         default=lambda: datetime.now(timezone.utc),
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+# Story 6.6: approvals for assistant writes that are not low risk.
+ACTION_APPROVAL_STATUS_PENDING = "pending"
+ACTION_APPROVAL_STATUS_REJECTED = "rejected"
+ACTION_APPROVAL_STATUS_CANCELLED = "cancelled"
+ACTION_APPROVAL_STATUS_EXPIRED = "expired"
+ACTION_APPROVAL_STATUS_EXECUTED = "executed"
+ACTION_APPROVAL_STATUS_FAILED = "failed"
+ACTION_APPROVAL_STATUSES = (
+    ACTION_APPROVAL_STATUS_PENDING,
+    ACTION_APPROVAL_STATUS_REJECTED,
+    ACTION_APPROVAL_STATUS_CANCELLED,
+    ACTION_APPROVAL_STATUS_EXPIRED,
+    ACTION_APPROVAL_STATUS_EXECUTED,
+    ACTION_APPROVAL_STATUS_FAILED,
+)
+RISK_LEVELS = ("low", "medium", "high")
+
+
+class AssistantActionApproval(Base):
+    """An assistant write paused with "Approval Required" (Story 6.6).
+
+    ``approver_kind`` is "requester" for medium risk (the requester confirms) and
+    "approver" for high risk (someone else with approval rights decides). On
+    approval the action runs with the requester's own permissions.
+    """
+
+    __tablename__ = "assistant_action_approvals"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in ACTION_APPROVAL_STATUSES)})",
+            name="ck_assistant_action_approvals_status",
+        ),
+        CheckConstraint(
+            "risk_level IN ('low', 'medium', 'high')",
+            name="ck_assistant_action_approvals_risk_level",
+        ),
+        CheckConstraint(
+            "approver_kind IN ('requester', 'approver')",
+            name="ck_assistant_action_approvals_approver_kind",
+        ),
+        UniqueConstraint(
+            "requester_id",
+            "idempotency_key",
+            name="uq_assistant_action_approvals_requester_key",
+        ),
+        Index("ix_assistant_action_approvals_status_created", "status", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    requester_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    requester_role: Mapped[str] = mapped_column(String(30), nullable=False)
+    requester_team: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    arguments_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    risk_level: Mapped[str] = mapped_column(String(10), nullable=False)
+    risk_reasons: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    approver_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=ACTION_APPROVAL_STATUS_PENDING
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    decided_by_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AssistantAuditEvent(Base):
+    """One permission, conflict, risk or approval decision about an assistant tool call (Story 6.6)."""
+
+    __tablename__ = "assistant_audit_events"
+    __table_args__ = (
+        Index("ix_assistant_audit_events_actor_created", "actor_id", "created_at"),
+        Index("ix_assistant_audit_events_approval", "approval_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Who caused the event: the requester, or the approver for approval decisions.
+    actor_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    actor_role: Mapped[str] = mapped_column(String(30), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    # permission_denied, conflict_blocked, invalid_arguments, auto_approved,
+    # approval_requested, approved, rejected, cancelled, expired, executed,
+    # execution_failed, replayed
+    event: Mapped[str] = mapped_column(String(40), nullable=False)
+    risk_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

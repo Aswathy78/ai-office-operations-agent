@@ -42,6 +42,7 @@ from app.assistant_tools import (
     ToolRegistry,
     ToolSpec,
     ToolTransientError,
+    max_risk,
     parse_datetime_argument,
 )
 from app.meeting.calendar_provider import (
@@ -450,6 +451,7 @@ def send_email(context: ToolContext, arguments: dict) -> dict:
         EmailDraftConflict,
         EmailDraftDenied,
         create_draft,
+        decide_draft,
         send_draft,
         submit_for_approval,
     )
@@ -479,11 +481,27 @@ def send_email(context: ToolContext, arguments: dict) -> dict:
             raise ToolExecutionError(str(exc)) from exc
         context.save_progress(draft_id=draft.id)
 
+    approver = context.approved_by
+    if approver is not None:
+        # A high-risk request approved by someone else (Story 6.6): that review
+        # covers the sensitive-data warning too.
+        acknowledge = True
     try:
         if draft.status == EMAIL_DRAFT_STATUS_DRAFT:
             if draft.approval_required and draft.approval_decision != "approved":
                 draft = submit_for_approval(db, draft.id, actor)
-            elif not (draft.sensitive_findings and not acknowledge):
+                if approver is not None:
+                    # Record it in the e-mail approval workflow under the approver's
+                    # own identity; decide_draft enforces approver roles.
+                    draft = decide_draft(
+                        db, draft.id,
+                        EmailActor(id=approver["id"], role=approver["role"], team=approver.get("team")),
+                        decision="approve",
+                        note=f"Approved through assistant approval {approver['approval_id']}.",
+                    )
+            if draft.status == EMAIL_DRAFT_STATUS_DRAFT and (
+                draft.approval_decision == "approved" or not draft.approval_required
+            ) and not (draft.sensitive_findings and not acknowledge):
                 draft = send_draft(
                     db, draft.id, actor, confirm=True, acknowledge_sensitive=acknowledge
                 )
@@ -921,7 +939,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             },
         },
         required_scopes=frozenset({"meetings.write"}),
-        risk_tier="medium",
+        **_GUARD_HOOKS["meeting.schedule"],
         timeout_seconds=30,
         # Invitations are e-mail; never resend them automatically.
         retry_policy=NO_RETRY,
@@ -996,7 +1014,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             "anyOf": _RECIPIENT_REQUIRED,
         },
         required_scopes=frozenset({"email.send"}),
-        risk_tier="high",
+        **_GUARD_HOOKS["email.send"],
         timeout_seconds=30,
         retry_policy=NO_RETRY,
         handler=send_email,
@@ -1023,7 +1041,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             ],
         },
         required_scopes=frozenset({"tasks.write"}),
-        risk_tier="medium",
+        **_GUARD_HOOKS["task.create"],
         timeout_seconds=30,
         retry_policy=NO_RETRY,
         handler=create_task,
@@ -1082,7 +1100,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             },
         },
         required_scopes=frozenset({"notifications.send"}),
-        risk_tier="low",
+        **_GUARD_HOOKS["notification.send_task_notice"],
         timeout_seconds=20,
         # Safe to retry: each attempt reuses the same notification row.
         retry_policy=RetryPolicy(
@@ -1137,9 +1155,381 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             },
         },
         required_scopes=frozenset({"workflow.run"}),
-        risk_tier="high",
+        **_GUARD_HOOKS["workflow.run"],
         timeout_seconds=120,
         retry_policy=NO_RETRY,
         handler=run_workflow,
     ))
 
+
+
+# ---------------------------------------------------------------------------
+# Story 6.6 write guard: permission rules, conflicts, risk and call summaries
+# ---------------------------------------------------------------------------
+
+LARGE_MEETING = 5
+VERY_LARGE_MEETING = 20
+LONG_MEETING_MINUTES = 120
+DUPLICATE_EMAIL_WINDOW = timedelta(minutes=15)
+DUPLICATE_NOTICE_WINDOW = timedelta(hours=1)
+
+
+def _assignee(db, arguments: dict) -> Employee | None:
+    if "assignee_id" in arguments:
+        return db.get(Employee, arguments["assignee_id"])
+    return (
+        db.query(Employee)
+        .filter(func.lower(Employee.email) == arguments["assignee_email"].strip().casefold())
+        .one_or_none()
+    )
+
+
+def _team_denial(principal, employee: Employee, verb: str) -> list[str]:
+    if principal.role in ELEVATED_ROLES:
+        return []
+    if principal.role == "manager" and _same_team(employee.team, principal.team):
+        return []
+    return [
+        f"Managers can only {verb} employees in their own team "
+        f"({principal.team or 'no team'}); {employee.name} is in {employee.team or 'no team'}."
+    ]
+
+
+def _directory_emails(db) -> set[str]:
+    return {
+        email.casefold()
+        for (email,) in db.query(Employee.email).filter(Employee.is_active.is_(True)).all()
+    }
+
+
+# -- task.create --------------------------------------------------------------
+
+
+def authorize_task_create(db, principal, arguments: dict) -> list[str]:
+    assignee = _assignee(db, arguments)
+    return _team_denial(principal, assignee, "assign tasks to") if assignee else []
+
+
+def conflicts_task_create(db, principal, arguments: dict) -> list[dict]:
+    assignee = _assignee(db, arguments)
+    if assignee is None:
+        return [{"code": "unknown_assignee", "message": "The assignee is not in the employee directory."}]
+    if not assignee.is_active:
+        return [{"code": "inactive_assignee", "message": f"{assignee.name} is not an active employee."}]
+    duplicate = (
+        db.query(Task)
+        .filter(
+            Task.assignee_id == assignee.id,
+            Task.status == TASK_STATUS_PENDING,
+            func.lower(Task.title) == arguments["title"].strip().casefold(),
+        )
+        .first()
+    )
+    if duplicate is not None:
+        return [{
+            "code": "duplicate_task",
+            "message": (
+                f"{assignee.name} already has an open task \"{duplicate.title}\" "
+                f"due {_iso(duplicate.due_at)}."
+            ),
+        }]
+    return []
+
+
+def risk_task_create(db, principal, arguments: dict) -> tuple[str, list[str]]:
+    level, reasons = "low", []
+    assignee = _assignee(db, arguments)
+    if arguments.get("priority") in ("high", "urgent"):
+        level = "medium"
+        reasons.append(f"priority is {arguments['priority']}")
+    if parse_datetime_argument(arguments["due_at"]) - _now() < timedelta(hours=24):
+        level = "medium"
+        reasons.append("due within 24 hours")
+    if assignee is not None and not _same_team(assignee.team, principal.team):
+        level = "high"
+        reasons.append(f"{assignee.name} is outside your team ({assignee.team or 'no team'})")
+    return level, reasons
+
+
+def describe_task_create(arguments: dict) -> str:
+    who = arguments.get("assignee_email") or arguments.get("assignee_id")
+    return (
+        f"Create task \"{arguments['title']}\" for {who}, due {arguments['due_at']} "
+        f"({arguments.get('priority', 'medium')} priority)"
+    )
+
+
+# -- meeting.schedule -----------------------------------------------------------
+
+
+def _meeting_window(arguments: dict) -> tuple[datetime, datetime, list[str]]:
+    start = parse_datetime_argument(arguments["start_at"])
+    end = start + timedelta(minutes=arguments["duration_minutes"])
+    emails = list(dict.fromkeys(e.strip().casefold() for e in arguments["attendee_emails"]))
+    return start, end, emails
+
+
+def conflicts_meeting_schedule(db, principal, arguments: dict) -> list[dict]:
+    from app.meeting.scheduling_service import find_alternative_slots
+
+    start, end, emails = _meeting_window(arguments)
+    people = list(dict.fromkeys(emails + [principal.email.casefold()]))
+    try:
+        provider = get_calendar_provider()
+        availability = provider.check_availability(db, people, start, end)
+    except CalendarProviderError as exc:
+        return [{"code": "calendar_unavailable", "message": f"The calendar is unavailable: {exc}"}]
+    if not availability.has_conflicts:
+        return []
+    slots = find_alternative_slots(
+        db, start, arguments["duration_minutes"], people, provider=provider, limit=3
+    )
+    suggestion = (
+        " Free slots: " + ", ".join(_iso(slot_start) for slot_start, _ in slots) + "."
+        if slots else ""
+    )
+    return [
+        {
+            "code": "calendar_conflict",
+            "message": (
+                f"{c.attendee_name or c.attendee_email} is busy with "
+                f"'{c.conflicting_event_title}' from {_iso(c.conflicting_start_at)} "
+                f"to {_iso(c.conflicting_end_at)}." + suggestion
+            ),
+        }
+        for c in availability.conflicts
+    ]
+
+
+def risk_meeting_schedule(db, principal, arguments: dict) -> tuple[str, list[str]]:
+    from app.meeting.scheduling_service import (
+        _fits_attendee_working_hours,
+        get_organization_timezone,
+    )
+
+    start, end, emails = _meeting_window(arguments)
+    directory = _directory_emails(db)
+    external = [email for email in emails if email not in directory]
+    level, reasons = "low", []
+    if external:
+        level = "high"
+        reasons.append("external attendee(s): " + ", ".join(external))
+    if len(emails) > VERY_LARGE_MEETING:
+        level = "high"
+        reasons.append(f"{len(emails)} attendees (more than {VERY_LARGE_MEETING})")
+    elif len(emails) > LARGE_MEETING:
+        level = max_risk(level, "medium")
+        reasons.append(f"{len(emails)} attendees (more than {LARGE_MEETING})")
+    if arguments["duration_minutes"] > LONG_MEETING_MINUTES:
+        level = max_risk(level, "medium")
+        reasons.append(f"longer than {LONG_MEETING_MINUTES} minutes")
+    employees = {
+        employee.email.casefold(): employee
+        for employee in db.query(Employee).filter(func.lower(Employee.email).in_(emails)).all()
+    }
+    if employees and not _fits_attendee_working_hours(
+        start, end, list(employees), employees, get_organization_timezone()
+    ):
+        level = max_risk(level, "medium")
+        reasons.append("outside the working hours of at least one attendee")
+    return level, reasons
+
+
+def describe_meeting_schedule(arguments: dict) -> str:
+    return (
+        f"Schedule \"{arguments['title']}\" at {arguments['start_at']} for "
+        f"{arguments['duration_minutes']} min with {', '.join(arguments['attendee_emails'])}"
+    )
+
+
+# -- email.send ------------------------------------------------------------------
+
+
+def _email_recipients(db, principal, arguments: dict):
+    from app.email_draft_service import _active_employees, build_recipients
+
+    by_email = {e.email.casefold(): e for e in _active_employees(db)}
+    emails = arguments.get("recipient_emails", [])
+    return build_recipients(
+        db,
+        groups=arguments.get("groups", []),
+        employees=[by_email[e.casefold()] for e in emails if e.casefold() in by_email],
+        emails=[e for e in emails if e.casefold() not in by_email],
+        exclude_email=principal.email,
+    )
+
+
+def authorize_email_send(db, principal, arguments: dict) -> list[str]:
+    from app.email_draft_service import EVERYONE_GROUP
+
+    everyone = any(g.casefold() == EVERYONE_GROUP.casefold() for g in arguments.get("groups", []))
+    if everyone and principal.role == "employee":
+        return ["Only managers, HR / Operations or admins can e-mail everyone through the assistant."]
+    return []
+
+
+def conflicts_email_send(db, principal, arguments: dict) -> list[dict]:
+    recipients, _, unresolved = _email_recipients(db, principal, arguments)
+    if unresolved:
+        return [{
+            "code": "unresolved_recipients",
+            "message": "Not a valid e-mail address or directory group: " + ", ".join(unresolved) + ".",
+        }]
+    if not recipients:
+        return [{"code": "no_recipients", "message": "The e-mail has no recipients."}]
+    wanted = sorted(r["email"].casefold() for r in recipients)
+    recent = (
+        db.query(EmailDraft)
+        .filter(
+            EmailDraft.created_by_id == principal.user_id,
+            EmailDraft.discarded_at.is_(None),
+            EmailDraft.status != EMAIL_DRAFT_STATUS_DRAFT,
+            EmailDraft.created_at >= _now() - DUPLICATE_EMAIL_WINDOW,
+            func.lower(EmailDraft.subject) == arguments["subject"].strip().casefold(),
+        )
+        .all()
+    )
+    for draft in recent:
+        if sorted(r["email"].casefold() for r in draft.recipients) == wanted:
+            return [{
+                "code": "duplicate_email",
+                "message": (
+                    f"You already sent \"{draft.subject}\" to the same recipients "
+                    f"in the last {int(DUPLICATE_EMAIL_WINDOW.total_seconds() // 60)} minutes "
+                    f"(it is {draft.status})."
+                ),
+            }]
+    return []
+
+
+def risk_email_send(db, principal, arguments: dict) -> tuple[str, list[str]]:
+    from app.email_draft_service import approval_recipient_threshold, scan_sensitive
+
+    recipients, _, _ = _email_recipients(db, principal, arguments)
+    level, reasons = "medium", ["an e-mail cannot be recalled once delivered"]
+    external = [r["email"] for r in recipients if not r["internal"]]
+    if external:
+        level = "high"
+        reasons.append("external recipient(s): " + ", ".join(external))
+    threshold = approval_recipient_threshold()
+    if len(recipients) > threshold:
+        level = "high"
+        reasons.append(f"{len(recipients)} recipients (more than {threshold})")
+    findings = scan_sensitive(arguments["subject"], arguments["body"])
+    if findings:
+        level = "high"
+        reasons.append("possible sensitive data: " + ", ".join(sorted({f["label"] for f in findings})))
+    return level, reasons
+
+
+def describe_email_send(arguments: dict) -> str:
+    to = arguments.get("recipient_emails", []) + [f"{g} team" for g in arguments.get("groups", [])]
+    return f"Send e-mail \"{arguments['subject']}\" to {', '.join(to)}"
+
+
+# -- notification.send_task_notice ----------------------------------------------
+
+
+def authorize_task_notice(db, principal, arguments: dict) -> list[str]:
+    task = db.get(Task, arguments["task_id"])
+    if task is None or task.creator_id == principal.user_id:
+        return []
+    assignee = db.get(Employee, task.assignee_id)
+    return _team_denial(principal, assignee, "notify") if assignee else []
+
+
+def conflicts_task_notice(db, principal, arguments: dict) -> list[dict]:
+    task = db.get(Task, arguments["task_id"])
+    if task is None:
+        return [{"code": "unknown_task", "message": "Task not found."}]
+    if task.status != TASK_STATUS_PENDING:
+        return [{"code": "task_closed", "message": f"The task \"{task.title}\" is already {task.status}."}]
+    message = arguments["message"].strip()
+    recent = (
+        db.query(TaskNotification)
+        .filter(
+            TaskNotification.task_id == task.id,
+            TaskNotification.kind == "assistant_notice",
+            TaskNotification.status == "sent",
+            TaskNotification.created_at >= _now() - DUPLICATE_NOTICE_WINDOW,
+        )
+        .all()
+    )
+    if any(message in notice.body for notice in recent):
+        return [{"code": "duplicate_notice", "message": "The same notice was sent for this task in the last hour."}]
+    return []
+
+
+def risk_task_notice(db, principal, arguments: dict) -> tuple[str, list[str]]:
+    from app.email_draft_service import scan_sensitive
+
+    findings = scan_sensitive(arguments.get("subject", ""), arguments["message"])
+    if findings:
+        return "high", ["possible sensitive data: " + ", ".join(sorted({f["label"] for f in findings}))]
+    return "low", []
+
+
+def describe_task_notice(arguments: dict) -> str:
+    return f"Send a notice about task {arguments['task_id']}: \"{arguments['message'][:80]}\""
+
+
+# -- workflow.run ------------------------------------------------------------------
+
+
+def authorize_workflow_run(db, principal, arguments: dict) -> list[str]:
+    if arguments["workflow"] == "email_dispatch" and principal.role not in ELEVATED_ROLES:
+        return ["Only HR / Operations or admins can dispatch the queued e-mails of every employee."]
+    return []
+
+
+def conflicts_workflow_run(db, principal, arguments: dict) -> list[dict]:
+    from app.assistant_tools import arguments_hash
+
+    running = (
+        db.query(AssistantToolExecution)
+        .filter(
+            AssistantToolExecution.tool_name == "workflow.run",
+            AssistantToolExecution.arguments_hash == arguments_hash(arguments),
+            AssistantToolExecution.status == "running",
+        )
+        .first()
+    )
+    if running is not None:
+        return [{"code": "workflow_running", "message": f"The {arguments['workflow']} workflow is already running."}]
+    return []
+
+
+def risk_workflow_run(db, principal, arguments: dict) -> tuple[str, list[str]]:
+    return "high", ["runs for every employee, not just you"]
+
+
+def describe_workflow_run(arguments: dict) -> str:
+    return f"Run the {arguments['workflow'].replace('_', ' ')} workflow now"
+
+
+_GUARD_HOOKS = {
+    "task.create": dict(
+        risk_tier="low", authorize=authorize_task_create,
+        detect_conflicts=conflicts_task_create, assess_risk=risk_task_create,
+        describe_call=describe_task_create,
+    ),
+    "meeting.schedule": dict(
+        risk_tier="low", detect_conflicts=conflicts_meeting_schedule,
+        assess_risk=risk_meeting_schedule, describe_call=describe_meeting_schedule,
+    ),
+    "email.send": dict(
+        risk_tier="medium", authorize=authorize_email_send,
+        detect_conflicts=conflicts_email_send, assess_risk=risk_email_send,
+        describe_call=describe_email_send,
+    ),
+    "notification.send_task_notice": dict(
+        risk_tier="low", authorize=authorize_task_notice,
+        detect_conflicts=conflicts_task_notice, assess_risk=risk_task_notice,
+        describe_call=describe_task_notice,
+    ),
+    "workflow.run": dict(
+        risk_tier="high", authorize=authorize_workflow_run,
+        detect_conflicts=conflicts_workflow_run, assess_risk=risk_workflow_run,
+        describe_call=describe_workflow_run,
+    ),
+}

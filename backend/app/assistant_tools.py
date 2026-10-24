@@ -17,6 +17,21 @@ arguments, enforces idempotency through the ``assistant_tool_executions`` ledger
 runs the handler with the timeout and retry policy, and records the outcome.
 Handlers delegate to the existing application services; they never just describe
 what would happen.
+
+Story 6.6 — before every write ``execute_tool`` also runs the write guard:
+
+1. Permission: scopes, then the tool's resource rules (``authorize``), e.g. a
+   manager may only assign tasks inside their own team.
+2. Conflicts: the tool's ``detect_conflicts`` (busy calendar slot, duplicate task
+   or e-mail, workflow already running) plus an identical request already
+   waiting for approval.
+3. Risk: Low, Medium or High from the tool's baseline and ``assess_risk``.
+
+Low-risk writes run at once. Medium-risk writes pause as "Approval Required"
+until the requester confirms; high-risk writes until someone else with approval
+rights approves (``app.assistant_approvals``). Approved actions run through this
+same function again — every check is repeated — with the requester's own
+principal. Every decision and outcome is written to ``assistant_audit_events``.
 """
 
 from __future__ import annotations
@@ -25,7 +40,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import logging
@@ -39,6 +54,12 @@ from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
 from app.meeting.models import (
+    ACTION_APPROVAL_STATUS_EXECUTED,
+    ACTION_APPROVAL_STATUS_EXPIRED,
+    ACTION_APPROVAL_STATUS_FAILED,
+    ACTION_APPROVAL_STATUS_PENDING,
+    AssistantActionApproval,
+    AssistantAuditEvent,
     AssistantToolExecution,
     TOOL_EXECUTION_STATUS_FAILED,
     TOOL_EXECUTION_STATUS_RUNNING,
@@ -51,6 +72,13 @@ logger = logging.getLogger(__name__)
 RiskTier = Literal["read", "low", "medium", "high"]
 RISK_TIERS: tuple[str, ...] = ("read", "low", "medium", "high")
 CONFIRMATION_RISK_TIERS = frozenset({"medium", "high"})
+RiskLevel = Literal["low", "medium", "high"]
+_RISK_ORDER = {"low": 0, "medium": 1, "high": 2}
+OUTCOME_APPROVAL_REQUIRED = "approval_required"
+
+
+def max_risk(*levels: str) -> str:
+    return max(levels, key=lambda level: _RISK_ORDER[level])
 
 TOOL_CATEGORIES = (
     "meeting",
@@ -121,6 +149,10 @@ class UnknownToolError(ToolError):
 class ToolPermissionDenied(ToolError):
     status_code = 403
 
+    def __init__(self, message: str, reasons: list[str] | None = None):
+        super().__init__(message)
+        self.reasons = reasons or [message]
+
 
 class ToolNotFound(ToolError):
     """A record the call refers to does not exist."""
@@ -156,6 +188,20 @@ class ToolExecutionError(ToolError):
 
 class ToolConflictError(ToolExecutionError):
     """The operation conflicts with the current state (e.g. a busy calendar slot)."""
+
+    status_code = 409
+
+
+class ToolConflictBlocked(ToolConflictError):
+    """The write guard found conflicts before anything ran (Story 6.6)."""
+
+    def __init__(self, message: str, conflicts: list[dict]):
+        super().__init__(message)
+        self.conflicts = conflicts
+
+
+class ToolApprovalError(ToolError):
+    """The approval cannot be used: closed, expired, mismatched or insufficient."""
 
     status_code = 409
 
@@ -386,6 +432,9 @@ class ToolContext:
     deadline: float
     # Progress saved by an earlier attempt of the same idempotent call.
     progress: dict = field(default_factory=dict)
+    # Story 6.6: who approved a high-risk call ({id, role, team, approval_id}).
+    # The handler still acts as ``principal``; this only lets it record the decision.
+    approved_by: dict | None = None
 
     def save_progress(self, **values: Any) -> None:
         """Durably record partial progress so a re-run resumes instead of duplicating."""
@@ -402,6 +451,11 @@ class ToolContext:
 
 ToolHandler = Callable[[ToolContext, dict], dict]
 ToolValidator = Callable[[dict], list[dict]]
+# Story 6.6 write-guard hooks; each receives (db, principal, arguments).
+ToolAuthorizer = Callable[[Session, AuthenticatedPrincipal, dict], list[str]]
+ToolConflictDetector = Callable[[Session, AuthenticatedPrincipal, dict], list[dict]]
+ToolRiskAssessor = Callable[[Session, AuthenticatedPrincipal, dict], tuple[str, list[str]]]
+ToolDescriber = Callable[[dict], str]
 
 
 @dataclass(frozen=True)
@@ -411,12 +465,21 @@ class ToolSpec:
     description: str
     input_schema: dict
     required_scopes: frozenset[str]
+    # "read", or the baseline risk of a write before assess_risk adds factors.
     risk_tier: RiskTier
     timeout_seconds: float
     retry_policy: RetryPolicy
     handler: ToolHandler
     # Cross-field rules a JSON schema cannot express (e.g. end after start).
     validator: ToolValidator | None = None
+    # Resource-level permission rules; returns the reasons the call is denied.
+    authorize: ToolAuthorizer | None = None
+    # Returns ``{"code", "message"}`` conflicts that block the write.
+    detect_conflicts: ToolConflictDetector | None = None
+    # Returns (risk level, reasons); the effective risk is never below risk_tier.
+    assess_risk: ToolRiskAssessor | None = None
+    # One-line description of a call for approval requests and the audit log.
+    describe_call: ToolDescriber | None = None
 
     @property
     def is_write(self) -> bool:
@@ -428,7 +491,16 @@ class ToolSpec:
 
     @property
     def requires_confirmation(self) -> bool:
+        """True when even the baseline risk needs an approval before running."""
         return self.risk_tier in CONFIRMATION_RISK_TIERS
+
+    def summarize_call(self, arguments: dict) -> str:
+        if self.describe_call is not None:
+            try:
+                return self.describe_call(arguments)
+            except (KeyError, TypeError, ValueError):
+                pass
+        return f"{self.name} {json.dumps(arguments, sort_keys=True, default=str)[:300]}"
 
     def describe(self, scopes: frozenset[str] | None = None) -> dict:
         data = {
@@ -438,6 +510,7 @@ class ToolSpec:
             "input_schema": self.input_schema,
             "required_scopes": sorted(self.required_scopes),
             "risk_tier": self.risk_tier,
+            "baseline_risk": None if self.risk_tier == "read" else self.risk_tier,
             "is_write": self.is_write,
             "requires_idempotency_key": self.requires_idempotency_key,
             "requires_confirmation": self.requires_confirmation,
@@ -522,14 +595,18 @@ _sleep = time.sleep
 
 @dataclass
 class ToolExecutionOutcome:
-    execution_id: str
+    execution_id: str | None
     tool_name: str
+    # "succeeded", or "approval_required" when the write was paused (Story 6.6).
     status: str
     result: dict | None
     replayed: bool
     attempts: int
     duration_ms: int | None
     idempotency_key: str | None
+    risk_level: str | None = None
+    risk_reasons: list[str] = field(default_factory=list)
+    approval: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -541,6 +618,9 @@ class ToolExecutionOutcome:
             "attempts": self.attempts,
             "duration_ms": self.duration_ms,
             "idempotency_key": self.idempotency_key,
+            "risk_level": self.risk_level,
+            "risk_reasons": self.risk_reasons,
+            "approval": self.approval,
         }
 
 
@@ -683,6 +763,7 @@ def _run_attempt(
     conversation_id: str | None,
     attempt: int,
     progress: dict,
+    approved_by: dict | None = None,
 ) -> dict:
     """One handler attempt in its own session (runs on a worker thread)."""
     with Session(bind=engine) as worker_db:
@@ -696,6 +777,7 @@ def _run_attempt(
             attempt=attempt,
             deadline=time.monotonic() + spec.timeout_seconds,
             progress=dict(progress),
+            approved_by=approved_by,
         )
         try:
             result = spec.handler(context, arguments)
@@ -724,6 +806,258 @@ def _finish_late(engine, execution_id: str, future) -> None:
         late_db.commit()
 
 
+# ---------------------------------------------------------------------------
+# Story 6.6: audit log, write guard and approval requests
+# ---------------------------------------------------------------------------
+
+
+def record_audit(
+    db: Session,
+    *,
+    actor: AuthenticatedPrincipal | None = None,
+    actor_id: str | None = None,
+    actor_role: str | None = None,
+    tool_name: str,
+    event: str,
+    detail: str,
+    risk_level: str | None = None,
+    approval_id: str | None = None,
+    execution_id: str | None = None,
+    conversation_id: str | None = None,
+    data: dict | None = None,
+) -> None:
+    """Append one decision or outcome to ``assistant_audit_events`` (never raises)."""
+    try:
+        db.add(AssistantAuditEvent(
+            id=str(uuid.uuid4()),
+            actor_id=actor.user_id if actor else actor_id,
+            actor_role=actor.role if actor else actor_role,
+            tool_name=tool_name,
+            event=event,
+            risk_level=risk_level,
+            approval_id=approval_id,
+            execution_id=execution_id,
+            conversation_id=conversation_id,
+            detail=detail[:4000],
+            data=_json_safe(data or {}),
+        ))
+        db.commit()
+    except Exception:  # noqa: BLE001 - auditing must never break the request
+        db.rollback()
+        logger.exception("Could not write assistant audit event %s for %s", event, tool_name)
+
+
+@dataclass
+class GuardDecision:
+    """Result of the write guard for one call."""
+
+    risk_level: str
+    risk_reasons: list[str]
+    denials: list[str]
+    conflicts: list[dict]
+
+    @property
+    def approver_kind(self) -> str | None:
+        if self.risk_level == "high":
+            return "approver"
+        if self.risk_level == "medium":
+            return "requester"
+        return None
+
+
+def evaluate_write(
+    db: Session,
+    spec: ToolSpec,
+    principal: AuthenticatedPrincipal,
+    arguments: dict,
+    *,
+    ignore_approval_id: str | None = None,
+) -> GuardDecision:
+    """Run the permission, conflict and risk checks for a write (no side effects)."""
+    denials = list(spec.authorize(db, principal, arguments)) if spec.authorize else []
+    conflicts: list[dict] = []
+    if not denials:
+        if spec.detect_conflicts:
+            conflicts.extend(spec.detect_conflicts(db, principal, arguments))
+        digest = arguments_hash(arguments)
+        duplicate = (
+            db.query(AssistantActionApproval)
+            .filter(
+                AssistantActionApproval.requester_id == principal.user_id,
+                AssistantActionApproval.tool_name == spec.name,
+                AssistantActionApproval.arguments_hash == digest,
+                AssistantActionApproval.status == ACTION_APPROVAL_STATUS_PENDING,
+                AssistantActionApproval.expires_at > datetime.now(timezone.utc),
+            )
+            .all()
+        )
+        for approval in duplicate:
+            if approval.id != ignore_approval_id:
+                conflicts.append({
+                    "code": "pending_approval",
+                    "message": (
+                        "An identical request is already waiting for approval "
+                        f"(request {approval.id})."
+                    ),
+                })
+                break
+
+    level, reasons = spec.risk_tier, [f"{spec.name} is a {spec.risk_tier}-risk action"]
+    if spec.assess_risk is not None and not denials:
+        assessed, factors = spec.assess_risk(db, principal, arguments)
+        level = max_risk(level, assessed)
+        reasons = reasons + list(factors)
+    return GuardDecision(level, reasons, denials, conflicts)
+
+
+def approval_ttl(risk_level: str) -> timedelta:
+    """Medium: the requester's confirmation window; high: time for an approver to act."""
+    if risk_level == "high":
+        hours = _env_int("ASSISTANT_APPROVAL_TTL_HOURS", 72)
+        return timedelta(hours=max(1, hours))
+    return timedelta(minutes=max(1, _env_int("ASSISTANT_CONFIRMATION_TTL_MINUTES", 30)))
+
+
+def _env_int(name: str, default: int) -> int:
+    import os
+
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _as_aware(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def approval_as_dict(approval: AssistantActionApproval) -> dict:
+    return {
+        "id": approval.id,
+        "tool_name": approval.tool_name,
+        "status": approval.status,
+        "summary": approval.summary,
+        "risk_level": approval.risk_level,
+        "risk_reasons": approval.risk_reasons,
+        "approver_kind": approval.approver_kind,
+        "requester_id": approval.requester_id,
+        "expires_at": _as_aware(approval.expires_at).isoformat(),
+    }
+
+
+def _request_approval(
+    db: Session,
+    spec: ToolSpec,
+    principal: AuthenticatedPrincipal,
+    arguments: dict,
+    digest: str,
+    idempotency_key: str,
+    conversation_id: str | None,
+    decision: GuardDecision,
+) -> AssistantActionApproval:
+    """Get or create the pending approval for this call (one per requester and key)."""
+    existing = (
+        db.query(AssistantActionApproval)
+        .filter(
+            AssistantActionApproval.requester_id == principal.user_id,
+            AssistantActionApproval.idempotency_key == idempotency_key,
+        )
+        .one_or_none()
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        if existing.tool_name != spec.name or existing.arguments_hash != digest:
+            raise IdempotencyConflict(
+                "This idempotency key was already used for a different operation. "
+                "Use a new key for a new operation."
+            )
+        if existing.status == ACTION_APPROVAL_STATUS_PENDING and _as_aware(existing.expires_at) <= now:
+            existing.status = ACTION_APPROVAL_STATUS_EXPIRED
+            existing.updated_at = now
+            db.commit()
+            record_audit(db, actor=principal, tool_name=spec.name, event="expired",
+                         risk_level=existing.risk_level, approval_id=existing.id,
+                         detail="The approval request expired before anyone approved it.")
+        if existing.status != ACTION_APPROVAL_STATUS_PENDING:
+            note = f" Note: {existing.decision_note}" if existing.decision_note else ""
+            raise ToolApprovalError(
+                f"This request was already {existing.status}.{note} "
+                "Send it again with a new idempotency key to start over."
+            )
+        return existing
+
+    approval = AssistantActionApproval(
+        id=str(uuid.uuid4()),
+        tool_name=spec.name,
+        requester_id=principal.user_id,
+        requester_role=principal.role,
+        requester_team=principal.team,
+        conversation_id=conversation_id,
+        idempotency_key=idempotency_key,
+        arguments=_json_safe(arguments),
+        arguments_hash=digest,
+        summary=spec.summarize_call(arguments),
+        risk_level=decision.risk_level,
+        risk_reasons=decision.risk_reasons,
+        approver_kind=decision.approver_kind,
+        status=ACTION_APPROVAL_STATUS_PENDING,
+        expires_at=now + approval_ttl(decision.risk_level),
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(approval)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return _request_approval(
+            db, spec, principal, arguments, digest, idempotency_key, conversation_id, decision
+        )
+    who = "your confirmation" if approval.approver_kind == "requester" else (
+        "approval by HR / Operations, an admin, or your team's manager"
+    )
+    record_audit(
+        db, actor=principal, tool_name=spec.name, event="approval_requested",
+        risk_level=approval.risk_level, approval_id=approval.id,
+        conversation_id=conversation_id,
+        detail=f"{approval.summary} — {approval.risk_level} risk, waiting for {who}.",
+        data={"risk_reasons": approval.risk_reasons},
+    )
+    return approval
+
+
+def _check_approval(
+    db: Session,
+    spec: ToolSpec,
+    principal: AuthenticatedPrincipal,
+    digest: str,
+    approval_id: str,
+    decision: GuardDecision,
+) -> AssistantActionApproval:
+    """The approval must be decided, pending execution, and match this exact call."""
+    approval = db.get(AssistantActionApproval, approval_id)
+    if approval is None:
+        raise ToolApprovalError("The approval request does not exist.")
+    if (
+        approval.requester_id != principal.user_id
+        or approval.tool_name != spec.name
+        or approval.arguments_hash != digest
+    ):
+        raise ToolApprovalError("The approval does not match this request.")
+    if approval.status != ACTION_APPROVAL_STATUS_PENDING or approval.decided_by is None:
+        raise ToolApprovalError(f"The approval is not usable (status {approval.status}).")
+    if _as_aware(approval.expires_at) <= datetime.now(timezone.utc):
+        raise ToolApprovalError("The approval expired; send the request again.")
+    if _RISK_ORDER[decision.risk_level] > _RISK_ORDER[approval.risk_level]:
+        raise ToolApprovalError(
+            f"The risk rose from {approval.risk_level} to {decision.risk_level} since "
+            "the request was made ("
+            + "; ".join(decision.risk_reasons[1:] or decision.risk_reasons)
+            + "). Send the request again for a new approval."
+        )
+    return approval
+
+
 def execute_tool(
     db: Session,
     principal: AuthenticatedPrincipal,
@@ -732,25 +1066,157 @@ def execute_tool(
     *,
     idempotency_key: str | None = None,
     conversation_id: str | None = None,
-    confirmed: bool = False,
+    approval_id: str | None = None,
 ) -> ToolExecutionOutcome:
-    """Validate and run one tool call, honouring scopes, idempotency, timeout and retries.
+    """Validate, guard and run one tool call as ``principal``.
 
-    Raises a ``ToolError`` subclass when the call is rejected or fails. A write
-    repeated with the same idempotency key and arguments returns the first
-    result (``replayed=True``) without running again.
+    Reads run after the scope and schema checks. Writes also pass the write
+    guard: a denied or conflicting call raises (and is audited); a medium- or
+    high-risk call returns ``status="approval_required"`` with the pending
+    approval and runs nothing, unless ``approval_id`` names a decided approval
+    for exactly this call. There is no flag that skips these checks.
+
+    A write repeated with the same idempotency key and arguments returns the
+    first result (``replayed=True``) without running again.
     """
-    spec = validate_tool_call(
-        principal, tool_name, arguments, idempotency_key=idempotency_key
-    )
-    if spec.requires_confirmation and not confirmed:
-        raise ToolConfirmationRequired(
-            f"The {spec.risk_tier}-risk tool {tool_name!r} needs explicit confirmation."
+    try:
+        spec = validate_tool_call(
+            principal, tool_name, arguments, idempotency_key=idempotency_key
         )
+    except ToolPermissionDenied as exc:
+        record_audit(db, actor=principal, tool_name=tool_name, event="permission_denied",
+                     conversation_id=conversation_id, detail=exc.message,
+                     data={"reasons": exc.reasons})
+        raise
+    except ToolArgumentError as exc:
+        spec_or_none = get_registry()._tools.get(tool_name)
+        if spec_or_none is not None and spec_or_none.is_write:
+            record_audit(db, actor=principal, tool_name=tool_name, event="invalid_arguments",
+                         conversation_id=conversation_id, detail=exc.message,
+                         data={"errors": exc.errors})
+        raise
     if not spec.is_write:
         # Reads are never replayed; the key is only meaningful for writes.
-        idempotency_key = None
+        return _run_with_ledger(db, spec, principal, arguments, None, conversation_id)
 
+    digest = arguments_hash(arguments)
+    previous = (
+        db.query(AssistantToolExecution)
+        .filter(
+            AssistantToolExecution.actor_id == principal.user_id,
+            AssistantToolExecution.idempotency_key == idempotency_key,
+        )
+        .one_or_none()
+    )
+    if previous is not None and previous.status == TOOL_EXECUTION_STATUS_SUCCEEDED:
+        if previous.tool_name != spec.name or previous.arguments_hash != digest:
+            raise IdempotencyConflict(
+                "This idempotency key was already used for a different operation. "
+                "Use a new key for a new operation."
+            )
+        record_audit(db, actor=principal, tool_name=spec.name, event="replayed",
+                     execution_id=previous.id, conversation_id=conversation_id,
+                     detail="Repeated request; returned the earlier result without acting again.")
+        return _outcome(previous, replayed=True)
+
+    decision = evaluate_write(db, spec, principal, arguments, ignore_approval_id=approval_id)
+    if decision.denials:
+        message = "Permission denied: " + " ".join(decision.denials)
+        record_audit(db, actor=principal, tool_name=spec.name, event="permission_denied",
+                     approval_id=approval_id, conversation_id=conversation_id,
+                     detail=message, data={"reasons": decision.denials})
+        raise ToolPermissionDenied(message, decision.denials)
+    if decision.conflicts:
+        message = "Blocked by a conflict: " + " ".join(c["message"] for c in decision.conflicts)
+        record_audit(db, actor=principal, tool_name=spec.name, event="conflict_blocked",
+                     risk_level=decision.risk_level, approval_id=approval_id,
+                     conversation_id=conversation_id, detail=message,
+                     data={"conflicts": decision.conflicts})
+        raise ToolConflictBlocked(message, decision.conflicts)
+
+    approval: AssistantActionApproval | None = None
+    if decision.risk_level != "low":
+        if approval_id is None:
+            approval = _request_approval(
+                db, spec, principal, arguments, digest, idempotency_key,
+                conversation_id, decision,
+            )
+            return ToolExecutionOutcome(
+                execution_id=None,
+                tool_name=spec.name,
+                status=OUTCOME_APPROVAL_REQUIRED,
+                result=None,
+                replayed=False,
+                attempts=0,
+                duration_ms=None,
+                idempotency_key=idempotency_key,
+                risk_level=decision.risk_level,
+                risk_reasons=decision.risk_reasons,
+                approval=approval_as_dict(approval),
+            )
+        approval = _check_approval(db, spec, principal, digest, approval_id, decision)
+    else:
+        record_audit(db, actor=principal, tool_name=spec.name, event="auto_approved",
+                     risk_level="low", conversation_id=conversation_id,
+                     detail=f"{spec.summarize_call(arguments)} — low risk within your "
+                            "permissions; running without approval.",
+                     data={"risk_reasons": decision.risk_reasons})
+
+    try:
+        approved_by = None
+        if approval is not None and approval.approver_kind == "approver":
+            approved_by = {
+                "id": approval.decided_by,
+                "role": approval.decided_by_role,
+                "team": None,
+                "approval_id": approval.id,
+            }
+        outcome = _run_with_ledger(
+            db, spec, principal, arguments, idempotency_key, conversation_id,
+            approved_by=approved_by,
+        )
+    except ToolError as exc:
+        if approval is not None:
+            approval.status = ACTION_APPROVAL_STATUS_FAILED
+            approval.error = exc.message[:2000]
+            approval.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        record_audit(db, actor=principal, tool_name=spec.name, event="execution_failed",
+                     risk_level=decision.risk_level,
+                     approval_id=approval.id if approval else None,
+                     conversation_id=conversation_id, detail=exc.message)
+        raise
+
+    outcome.risk_level = decision.risk_level
+    outcome.risk_reasons = decision.risk_reasons
+    if approval is not None:
+        approval.status = ACTION_APPROVAL_STATUS_EXECUTED
+        approval.execution_id = outcome.execution_id
+        approval.result = outcome.result
+        approval.error = None
+        approval.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        outcome.approval = approval_as_dict(approval)
+    record_audit(db, actor=principal, tool_name=spec.name, event="executed",
+                 risk_level=decision.risk_level,
+                 approval_id=approval.id if approval else None,
+                 execution_id=outcome.execution_id, conversation_id=conversation_id,
+                 detail=f"{spec.summarize_call(arguments)} — done with the permissions of "
+                        f"{principal.name} ({principal.role}).")
+    return outcome
+
+
+def _run_with_ledger(
+    db: Session,
+    spec: ToolSpec,
+    principal: AuthenticatedPrincipal,
+    arguments: dict,
+    idempotency_key: str | None,
+    conversation_id: str | None,
+    approved_by: dict | None = None,
+) -> ToolExecutionOutcome:
+    """Claim the ledger row and run the handler with the timeout and retry policy."""
+    tool_name = spec.name
     digest = arguments_hash(arguments)
     row, replay = _claim_ledger_row(
         db, spec, principal, arguments, digest, idempotency_key, conversation_id
@@ -774,7 +1240,7 @@ def execute_tool(
         db.commit()
         future = _EXECUTOR.submit(
             _run_attempt, spec, engine, principal, arguments, execution_id,
-            idempotency_key, conversation_id, attempt, progress,
+            idempotency_key, conversation_id, attempt, progress, approved_by,
         )
         try:
             result = future.result(timeout=spec.timeout_seconds)

@@ -184,6 +184,9 @@ function TranscriptSegmentRow({
   )
 }
 
+// About two minutes of retries (one every 3 seconds) before giving up.
+const MAX_POLL_FAILURES = 40
+
 export function TranscriptPanel({
   meetingId,
   organizerId,
@@ -208,6 +211,8 @@ export function TranscriptPanel({
   const [historyError, setHistoryError] = useState('')
   const [historyLoaded, setHistoryLoaded] = useState(false)
   const [historyRequestVersion, setHistoryRequestVersion] = useState(0)
+  // Consecutive failed polls; a failure retries instead of stopping polling for good.
+  const [pollFailures, setPollFailures] = useState(0)
   const [focusedSegment, setFocusedSegment] = useState<{
     index: number
     requestId: number
@@ -247,6 +252,7 @@ export function TranscriptPanel({
     setTranscript(null)
     setLoading(true)
     setLoadError('')
+    setPollFailures(0)
     const transcriptRequest = requestTranscript()
     void transcriptRequest
       .then((result) => {
@@ -336,8 +342,14 @@ export function TranscriptPanel({
   const isProcessing = status === 'processing'
   const isFailed = status === 'failed'
 
+  // Keep polling while the transcript is pending/processing, and for a while when
+  // the first load failed (the transcript row appears only once the recording upload
+  // finishes). A failed poll keeps the last transcript on screen and retries.
+  const waitingForFirstLoad = transcript === null && Boolean(loadError) && pollFailures < MAX_POLL_FAILURES
   useEffect(() => {
-    if (!isOpen || loading || (!isPending && !isProcessing)) return
+    if (!isOpen || loading) return
+    if (!isPending && !isProcessing && !waitingForFirstLoad) return
+    if (pollFailures >= MAX_POLL_FAILURES) return
     let active = true
     const timer = setTimeout(() => {
       const transcriptRequest = requestTranscript()
@@ -346,12 +358,13 @@ export function TranscriptPanel({
           if (active) {
             setTranscript(result)
             setLoadError('')
+            setPollFailures(0)
           }
         })
         .catch((error: unknown) => {
           if (active) {
-            setTranscript(null)
-            setLoadError(safeErrorMessage(error))
+            if (transcript === null) setLoadError(safeErrorMessage(error))
+            setPollFailures((count) => count + 1)
           }
         })
     }, 3000)
@@ -360,7 +373,7 @@ export function TranscriptPanel({
       active = false
       clearTimeout(timer)
     }
-  }, [isOpen, isPending, isProcessing, loading, requestTranscript, transcript])
+  }, [isOpen, isPending, isProcessing, loading, pollFailures, requestTranscript, transcript, waitingForFirstLoad])
 
   async function saveSegment(index: number, text: string, speaker: string): Promise<boolean> {
     if (!transcript) return false

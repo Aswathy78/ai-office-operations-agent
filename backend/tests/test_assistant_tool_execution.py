@@ -14,8 +14,13 @@ Timeout / retry  Transient failures are retried per policy; slow handlers time o
 Execution  Tools really change the system: tasks, audit rows and assignment
            e-mails, meetings and invitations, e-mail drafts through the approval /
            delivery workflow, task notices, workflow runs.
-Chat       The agent selects tools from the request, runs reads, waits for
-           "confirm" before writes, then executes them exactly once.
+Chat       The agent selects tools from the request, runs reads, runs low-risk
+           writes, waits for "confirm" before medium-risk writes, then executes
+           them exactly once.
+
+Story 6.6 changed the approval rules (see test_assistant_write_guard.py):
+medium/high-risk writes now pause as "approval_required" instead of needing a
+``confirm`` flag, and task/meeting writes are low risk by default.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import app.assistant_planner as assistant_planner
 import app.assistant_service as assistant_service
 import app.assistant_tools as assistant_tools
 from app import email_providers
+from app.assistant_approvals import decide_approval
 from app.assistant_tools import (
     IdempotencyConflict,
     NO_RETRY,
@@ -193,6 +199,17 @@ def _execute(client: TestClient, tool: str, arguments: dict, key: str | None = N
     return client.post(f"/api/v1/assistant/tools/{tool}/execute", json=body)
 
 
+def _approve(client: TestClient, response) -> dict:
+    """Approve the pending request in an approval_required response and return the result."""
+    assert response.status_code == 202, response.text
+    approval_id = response.json()["approval"]["id"]
+    decided = client.post(
+        f"/api/v1/assistant/approvals/{approval_id}/decide", json={"decision": "approve"}
+    )
+    assert decided.status_code == 200, decided.text
+    return decided.json()
+
+
 def _events(response) -> list[dict]:
     return [
         json.loads(line.removeprefix("data:").strip())
@@ -275,7 +292,7 @@ class TestToolContract:
         tools = {tool["name"]: tool for tool in response.json()["tools"]}
         task_create = tools["task.create"]
         assert task_create["required_scopes"] == ["tasks.write"]
-        assert task_create["risk_tier"] == "medium"
+        assert task_create["risk_tier"] == "low"
         assert task_create["requires_idempotency_key"] is True
         assert task_create["timeout_seconds"] > 0
         assert "max_attempts" in task_create["retry_policy"]
@@ -368,7 +385,7 @@ class TestPermissionsAndIdempotency:
         response = _execute(as_employee, "task.create", self._task_args(),
                             key="key-employee-01", confirm=True)
         assert response.status_code == 403
-        assert "tasks.write" in response.json()["detail"]
+        assert "tasks.write" in response.json()["detail"]["message"]
         assert db_session.query(Task).count() == 0
 
     def test_manager_cannot_assign_outside_own_team(self, as_manager, db_session, mail):
@@ -385,9 +402,11 @@ class TestPermissionsAndIdempotency:
         assert response.json()["detail"]["errors"][0]["path"] == "idempotency_key"
         assert db_session.query(Task).count() == 0
 
-    def test_medium_risk_write_requires_confirmation(self, as_manager, db_session):
-        response = _execute(as_manager, "task.create", self._task_args(), key="key-noconfirm")
-        assert response.status_code == 428
+    def test_medium_risk_write_requires_approval(self, as_manager, db_session):
+        response = _execute(as_manager, "task.create", self._task_args(priority="urgent"),
+                            key="key-noconfirm", confirm=True)
+        assert response.status_code == 202
+        assert response.json()["status"] == "approval_required"
         assert db_session.query(Task).count() == 0
 
     def test_same_key_replays_instead_of_duplicating(self, as_manager, db_session, mail):
@@ -419,11 +438,10 @@ class TestPermissionsAndIdempotency:
             user_id="emp-alice", account_id="acc-alice", email="alice@northstar.example",
             name="Alice Smith", role="manager", team="Engineering", jti="jti-alice",
         )
-        args = self._task_args()
-        execute_tool(db_session, manager, "task.create", args,
-                     idempotency_key="shared-key-001", confirmed=True)
-        execute_tool(db_session, other_manager, "task.create", args,
-                     idempotency_key="shared-key-001", confirmed=True)
+        execute_tool(db_session, manager, "task.create", self._task_args(),
+                     idempotency_key="shared-key-001")
+        execute_tool(db_session, other_manager, "task.create", self._task_args(title="Other"),
+                     idempotency_key="shared-key-001")
         assert db_session.query(Task).count() == 2
 
 
@@ -541,7 +559,7 @@ class TestRealExecution:
         response = _execute(
             as_manager, "task.create",
             {"assignee_email": "bob@northstar.example", "title": "Prepare sprint demo",
-             "due_at": due, "priority": "high"},
+             "due_at": due, "priority": "low"},
             key="key-task-real-01", confirm=True,
         )
         assert response.status_code == 200, response.text
@@ -551,7 +569,7 @@ class TestRealExecution:
         assert task is not None
         assert task.source == "assistant"
         assert task.assignee_id == "emp-bob" and task.creator_id == "emp-mgr"
-        assert task.priority == "high" and task.meeting_id is None
+        assert task.priority == "low" and task.meeting_id is None
         assert task.assignment_email_status == "sent"
         audit = db_session.query(TaskAuditLog).filter_by(task_id=task.id).one()
         assert audit.action == "create" and audit.outcome == "applied"
@@ -622,8 +640,8 @@ class TestRealExecution:
              "body": "Hi Bob,\n\nThe release is out.\n\nPriya"},
             key="key-email-send-1", confirm=True,
         )
-        assert response.status_code == 200, response.text
-        result = response.json()["result"]
+        assert db_session.query(EmailDraft).count() == 0  # medium risk: paused first
+        result = _approve(as_manager, response)["execution"]["result"]
         assert result["outcome"] == "queued"
         draft = db_session.get(EmailDraft, result["draft_id"])
         assert draft.status == "queued" and draft.created_by_id == "emp-mgr"
@@ -645,10 +663,10 @@ class TestRealExecution:
              "body": "Hello partner."},
             key="key-email-ext-01", confirm=True,
         )
-        assert response.status_code == 200, response.text
-        result = response.json()["result"]
-        assert result["outcome"] == "pending_approval"
-        assert db_session.get(EmailDraft, result["draft_id"]).status == "approval"
+        assert response.status_code == 202, response.text
+        approval = response.json()["approval"]
+        assert approval["risk_level"] == "high" and approval["approver_kind"] == "approver"
+        assert db_session.query(EmailDraft).count() == 0
         assert mail.calls == []
 
     def test_email_preview_does_not_persist(self, as_employee, db_session):
@@ -748,15 +766,29 @@ class TestRealExecution:
         assert raw_sql.status_code == 422
 
     def test_workflow_run_dispatches_queued_email(self, as_manager, db_session, mail):
-        draft_id = _execute(
+        draft_id = _approve(as_manager, _execute(
             as_manager, "email.send",
             {"recipient_emails": ["alice@northstar.example"], "subject": "Ping", "body": "Ping."},
-            key="key-wf-email-01", confirm=True,
-        ).json()["result"]["draft_id"]
-        response = _execute(as_manager, "workflow.run", {"workflow": "email_dispatch"},
-                            key="key-wf-run-0001", confirm=True)
-        assert response.status_code == 200, response.text
-        assert response.json()["result"]["summary"]["sent"] == 1
+            key="key-wf-email-01",
+        ))["execution"]["result"]["draft_id"]
+        # Managers may not dispatch everyone's e-mail; HR / Operations may, once
+        # an admin approves the high-risk run.
+        denied = _execute(as_manager, "workflow.run", {"workflow": "email_dispatch"},
+                          key="key-wf-run-0000")
+        assert denied.status_code == 403
+        hr = AuthenticatedPrincipal(
+            user_id="emp-hana", account_id="acc-hana", email="hana@northstar.example",
+            name="Hana Ortiz", role="hr_operations", team="Finance", jti="jti-hana",
+        )
+        admin = AuthenticatedPrincipal(
+            user_id="emp-maya", account_id="acc-maya", email="maya@northstar.example",
+            name="Maya Thompson", role="admin", team="Design", jti="jti-maya",
+        )
+        paused = execute_tool(db_session, hr, "workflow.run", {"workflow": "email_dispatch"},
+                              idempotency_key="key-wf-run-0001")
+        assert paused.status == "approval_required"
+        result = decide_approval(db_session, paused.approval["id"], admin, "approve")
+        assert result.outcome.result["summary"]["sent"] == 1
         assert db_session.get(EmailDraft, draft_id).status == "sent"
 
     def test_employee_cannot_run_workflows(self, as_employee):
@@ -782,22 +814,17 @@ class TestRealExecution:
 
 
 class TestChatExecution:
-    def test_manager_task_request_waits_then_executes_once(
+    def test_manager_low_risk_task_runs_autonomously_once(
         self, as_manager, db_session, mail, no_llm
     ):
-        events, conversation_id = _chat(as_manager, "Assign the quarterly report to Bob by Friday")
+        due = (datetime.now(timezone.utc) + timedelta(days=10)).date().isoformat()
+        events, conversation_id = _chat(as_manager, f"Assign the quarterly report to Bob by {due}")
         plan = _of(events, "plan")[0]
         assert [step["tool_name"] for step in plan] == [
             "directory.lookup_employees", "task.create", None,
         ]
-        waiting = _of(events, "awaiting_confirmation")
-        assert waiting[0]["tool_name"] == "task.create"
-        assert waiting[0]["arguments"]["assignee_email"] == "bob@northstar.example"
-        assert "confirm" in _tokens(events)
-        assert db_session.query(Task).count() == 0  # nothing written yet
-
-        events, _ = _chat(as_manager, "confirm", conversation_id)
-        assert _of(events, "confirmed")
+        # Low risk within the manager's own team: no approval needed.
+        assert not _of(events, "awaiting_confirmation")
         assert not _of(events, "step_error")
         task = db_session.query(Task).one()
         assert task.title == "quarterly report" and task.assignee_id == "emp-bob"
@@ -805,24 +832,26 @@ class TestChatExecution:
         assert mail.recipients() == ["bob@northstar.example"]
         assert "Created task 'quarterly report' for Bob Lee" in _tokens(events)
 
-        # Saying "confirm" again cannot run the write a second time.
+        # Saying "confirm" afterwards cannot run the write a second time.
         _chat(as_manager, "confirm", conversation_id)
         assert db_session.query(Task).count() == 1
         execution = db_session.query(AssistantToolExecution).filter_by(tool_name="task.create").one()
         assert execution.idempotency_key.startswith(f"chat:{conversation_id}:")
         assert execution.conversation_id == conversation_id
 
-    def test_chat_meeting_is_booked_after_confirmation(
+    def test_chat_meeting_is_booked_without_approval_when_low_risk(
         self, as_employee, db_session, mail, no_llm
     ):
+        # Every day is a working day for both, so the risk does not depend on the weekday.
+        for employee_id in ("emp-alice", "emp-bob"):
+            employee = db_session.get(Employee, employee_id)
+            employee.working_days = [0, 1, 2, 3, 4, 5, 6]
+            employee.working_hours_start, employee.working_hours_end = "00:00", "23:59"
+        db_session.commit()
         events, conversation_id = _chat(
             as_employee, "Schedule a meeting with Alice tomorrow at 10 AM"
         )
-        assert _of(events, "step_done")  # directory lookup and availability ran
-        assert _of(events, "awaiting_confirmation")[0]["tool_name"] == "meeting.schedule"
-        assert db_session.query(Meeting).count() == 0
-
-        events, _ = _chat(as_employee, "yes", conversation_id)
+        assert not _of(events, "awaiting_confirmation")
         meeting = db_session.query(Meeting).one()
         assert meeting.organizer_id == "emp-bob"
         assert mail.recipients() == ["alice@northstar.example"]
@@ -846,22 +875,22 @@ class TestChatExecution:
         assert draft.status == "sent" and mail.recipients() == ["maya@northstar.example"]
 
     def test_cancel_discards_the_pending_action(self, as_manager, db_session, mail, no_llm):
-        _, conversation_id = _chat(as_manager, "Assign the audit to Bob by Friday")
+        _, conversation_id = _chat(as_manager, "Send an email to Maya about the audit")
         events, _ = _chat(as_manager, "cancel", conversation_id)
         assert "No operation was performed" in _tokens(events)
         _chat(as_manager, "confirm", conversation_id)
-        assert db_session.query(Task).count() == 0
+        assert db_session.query(EmailDraft).count() == 0
 
     def test_new_message_drops_the_pending_action(self, as_manager, db_session, mail, no_llm):
-        _, conversation_id = _chat(as_manager, "Assign the audit to Bob by Friday")
+        _, conversation_id = _chat(as_manager, "Send an email to Maya about the audit")
         _chat(as_manager, "What can you do?", conversation_id)
         _chat(as_manager, "confirm", conversation_id)
-        assert db_session.query(Task).count() == 0
+        assert db_session.query(EmailDraft).count() == 0
 
     def test_expired_confirmation_runs_nothing(
         self, as_manager, db_session, mail, no_llm, monkeypatch
     ):
-        _, conversation_id = _chat(as_manager, "Assign the audit to Bob by Friday")
+        _, conversation_id = _chat(as_manager, "Send an email to Maya about the audit")
         conversation = db_session.get(AssistantConversation, conversation_id)
         db_session.refresh(conversation)
         state = json.loads(conversation.execution_state)
@@ -873,7 +902,7 @@ class TestChatExecution:
 
         events, _ = _chat(as_manager, "confirm", conversation_id)
         assert "expired" in _tokens(events)
-        assert db_session.query(Task).count() == 0
+        assert db_session.query(EmailDraft).count() == 0
 
     def test_employee_task_request_is_refused_without_asking(
         self, as_employee, db_session, no_llm

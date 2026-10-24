@@ -29,6 +29,12 @@ vi.mock('../api/meetings', () => ({
   decideRescheduleRequest: vi.fn(),
 }))
 
+vi.mock('../api/assistantApprovals', () => ({
+  getAgentApprovals: vi.fn().mockResolvedValue([]),
+  decideAgentApproval: vi.fn(),
+  cancelAgentApproval: vi.fn(),
+}))
+
 vi.mock('../api/emailDrafts', () => ({
   EMAIL_STATUS_POLL_MS: 2000,
   decideEmailDraft: vi.fn(),

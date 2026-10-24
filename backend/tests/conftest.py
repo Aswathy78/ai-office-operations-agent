@@ -8,6 +8,7 @@ from fastapi import HTTPException, Request
 os.environ["TASK_REMINDER_SCHEDULER_ENABLED"] = "false"
 os.environ["EMAIL_DISPATCHER_ENABLED"] = "false"
 os.environ["TASK_CALENDAR_SYNC_ENABLED"] = "false"
+os.environ["TRANSCRIPTION_WORKER_ENABLED"] = "false"
 
 
 @pytest.fixture(autouse=True)
@@ -17,6 +18,7 @@ def _no_background_reminder_scheduler(monkeypatch):
     monkeypatch.setattr(main, "start_task_reminder_scheduler", lambda: False)
     monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
     monkeypatch.setattr(main, "start_task_calendar_scheduler", lambda: False)
+    monkeypatch.setattr(main, "start_transcription_worker", lambda: False)
 
 
 @pytest.fixture(autouse=True)

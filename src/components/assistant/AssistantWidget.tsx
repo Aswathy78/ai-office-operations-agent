@@ -141,6 +141,14 @@ function StepStatusIcon({ status }: { status: PlanStep['status'] }) {
           aria-label="Waiting for your confirmation"
         />
       )
+    case 'approval_required':
+      return (
+        <CircleDashed
+          size={14}
+          className="assistant-step-icon approval"
+          aria-label="Waiting for approval"
+        />
+      )
     default:
       return <CircleDashed size={14} className="assistant-step-icon pending" aria-label="Pending" />
   }

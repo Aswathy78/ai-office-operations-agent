@@ -13,6 +13,11 @@
  * Story 6.5 additions:
  *  - Plan steps name the tool they run; write steps may wait for the user to
  *    reply "confirm" (awaiting_confirmation event) before they execute.
+ *
+ * Story 6.6 additions:
+ *  - Every write is permission-, conflict- and risk-checked. Medium risk waits
+ *    for "confirm" (awaiting_confirmation); high risk waits for another approver
+ *    (approval_required event) and is decided on the Approvals page.
  */
 
 import { API_BASE_URL, apiFetch } from './client'
@@ -37,6 +42,7 @@ export type StepStatus =
   | 'failed'
   | 'skipped'
   | 'awaiting_confirmation'
+  | 'approval_required'
 
 export interface PlanStep {
   index: number
@@ -51,6 +57,9 @@ export interface PlanStep {
   tool_name?: string | null
   tool_arguments?: Record<string, unknown> | null
   requires_confirmation?: boolean
+  /** Story 6.6: the approval request when the write guard paused the step. */
+  approval_id?: string | null
+  risk_level?: 'low' | 'medium' | 'high' | null
 }
 
 export interface RetrievalEvent {
@@ -77,9 +86,17 @@ export interface AwaitingConfirmationEvent {
   index: number
   label: string
   tool_name: string | null
-  risk_tier: string | null
   arguments: Record<string, unknown> | null
+  /** Story 6.6 fields. */
+  approval_id?: string
+  risk_level?: 'low' | 'medium' | 'high'
+  risk_reasons?: string[]
+  approver_kind?: 'requester' | 'approver'
+  summary?: string
 }
+
+/** Story 6.6: a high-risk write waiting for HR / Operations, an admin or a manager. */
+export type ApprovalRequiredEvent = AwaitingConfirmationEvent
 
 // ---------------------------------------------------------------------------
 // Streaming options
@@ -108,6 +125,8 @@ export interface StreamAssistantChatOptions {
   onHalted?: (reason: string) => void
   /** Story 6.5: a write step is waiting for the user to reply "confirm". */
   onAwaitingConfirmation?: (event: AwaitingConfirmationEvent) => void
+  /** Story 6.6: a high-risk write is waiting for another person's approval. */
+  onApprovalRequired?: (event: ApprovalRequiredEvent) => void
 }
 
 export interface QuickAction {
@@ -167,6 +186,7 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
     onStepError,
     onHalted,
     onAwaitingConfirmation,
+    onApprovalRequired,
   } = options
 
   const payload = {
@@ -288,6 +308,11 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
                   typeof parsed.awaiting_confirmation === 'object'
                 ) {
                   onAwaitingConfirmation?.(parsed.awaiting_confirmation as AwaitingConfirmationEvent)
+                }
+
+                // ---- Story 6.6: High-risk write waiting for an approver ----
+                if (parsed.approval_required && typeof parsed.approval_required === 'object') {
+                  onApprovalRequired?.(parsed.approval_required as ApprovalRequiredEvent)
                 }
 
                 // ---- Story 6.4: Step error ----

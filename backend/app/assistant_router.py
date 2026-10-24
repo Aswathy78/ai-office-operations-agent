@@ -31,8 +31,10 @@ New SSE event fields (additive — old clients ignore unknown fields):
   step_done   {index, summary}    step completed successfully
   step_error  {index, message}    step failed; earlier checkpoints preserved
   halted      str                 "step_limit" | "cost_cap"
-  awaiting_confirmation {index, label, tool_name, risk_tier, arguments}
-                                  (6.5) write step waiting for "confirm"
+  awaiting_confirmation {index, label, tool_name, approval_id, risk_level,
+                         risk_reasons, approver_kind, arguments, summary}
+                                  (6.5/6.6) medium-risk write waiting for "confirm"
+  approval_required {same fields} (6.6) high-risk write waiting for an approver
   confirmed   {confirmation_id}   (6.5) the user confirmed; waiting steps now run
 
 Existing fields remain unchanged:
@@ -78,18 +80,20 @@ from app.assistant_understanding import (
     understand_assistant_command,
 )
 import app.assistant_planner as assistant_planner
+from app.assistant_approvals import cancel_approval, decide_approval
 from app.assistant_planner import (
     CompletedStep,
     PlanStep,
+    StepApprovalRequired,
     StepExecutionError,
     clear_execution_checkpoint,
     estimate_tokens,
     execute_plan_step,
     load_execution_checkpoint,
-    prepare_tool_arguments,
     save_execution_checkpoint,
+    summarize_tool_result,
 )
-from app.assistant_tools import ToolError, get_registry, validate_tool_call
+from app.assistant_tools import ToolError, get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -187,11 +191,12 @@ def _confirmation_expired(pending: dict) -> bool:
 class _PlanRunner:
     """Runs plan steps for one chat turn and yields the SSE events.
 
-    First turn (``confirmed=False``): read-only tool steps run immediately; the
-    first medium/high-risk write step is bound and validated, then it and every
-    later action step wait for the user's "confirm". Confirm turn
-    (``confirmed=True``): the waiting steps run with the arguments the user saw.
-    A failed step skips the remaining action steps but the summary still runs.
+    Every write goes through the write guard (Story 6.6): low-risk writes within
+    the user's permissions run at once; a medium-risk write pauses until the user
+    replies "confirm" (``confirmed=True`` turn approves and runs it); a high-risk
+    write pauses until someone else approves it on the Approvals page. Denied or
+    conflicting writes fail with the reason. Steps after a paused step wait. A
+    failed step skips the remaining action steps but the summary still runs.
     """
 
     def __init__(
@@ -223,8 +228,10 @@ class _PlanRunner:
         self.halted_reason: str | None = None
         self.failure: str | None = None
         self.awaiting: list[PlanStep] = []
-        self.confirmation_id: str | None = None
+        self.turn_id = uuid.uuid4().hex
         self.turn_summaries: list[str] = []
+        self.writes_done: list[str] = []
+        self._reasons: dict[int, list[str]] = {}
         self.chunks: list[str] = []
         self.last_index = -1
 
@@ -266,45 +273,39 @@ class _PlanRunner:
 
     # -- steps -------------------------------------------------------------
 
-    def _await_confirmation(self, step: PlanStep):
-        if not self.awaiting:
-            # Bind and validate now, so the user confirms exactly what will run.
-            try:
-                step.tool_arguments = prepare_tool_arguments(
-                    step, self.understanding, self.results
-                )
-                validate_tool_call(
-                    self.principal, step.tool_name, step.tool_arguments, require_key=False
-                )
-            except ToolError as exc:
-                yield from self._fail(step, exc.message)
-                return
-            except StepExecutionError as exc:
-                yield from self._fail(step, str(exc))
-                return
-        elif step.tool_name is not None:
-            try:
-                step.tool_arguments = prepare_tool_arguments(
-                    step, self.understanding, self.results
-                )
-            except (StepExecutionError, KeyError):
-                step.tool_arguments = None  # depends on an earlier write; bound on confirm
-        self.confirmation_id = self.confirmation_id or uuid.uuid4().hex
-        step.idempotency_key = f"chat:{self.conversation_id}:{self.confirmation_id}:{step.index}"
-        step.status = "awaiting_confirmation"
+    def _pause(self, step: PlanStep, exc: StepApprovalRequired):
+        """The write guard paused this step: show why and who must approve it."""
+        approval = exc.approval
+        step.approval_id = approval["id"]
+        step.risk_level = approval["risk_level"]
+        by_requester = approval["approver_kind"] == "requester"
+        step.status = "awaiting_confirmation" if by_requester else "approval_required"
+        self._reasons[step.index] = approval["risk_reasons"][1:] or approval["risk_reasons"]
         self.awaiting.append(step)
-        risk_tier = (
-            get_registry().get(step.tool_name).risk_tier if step.tool_name else None
-        )
-        yield _sse({
-            "awaiting_confirmation": {
-                "index": step.index,
-                "label": step.description,
-                "tool_name": step.tool_name,
-                "risk_tier": risk_tier,
-                "arguments": step.tool_arguments,
-            }
-        })
+        self.last_index = step.index
+        self.save()
+        payload = {
+            "index": step.index,
+            "label": step.description,
+            "tool_name": step.tool_name,
+            "approval_id": approval["id"],
+            "risk_level": approval["risk_level"],
+            "risk_reasons": approval["risk_reasons"],
+            "approver_kind": approval["approver_kind"],
+            "arguments": step.tool_arguments,
+            "summary": approval["summary"],
+        }
+        # Medium risk: the requester confirms in chat. High risk: someone else approves.
+        yield _sse({"awaiting_confirmation" if by_requester else "approval_required": payload})
+
+    def _run_approved(self, step: PlanStep) -> str:
+        """Confirm turn: approve the requester's own medium-risk request and run it."""
+        result = decide_approval(self.run_db, step.approval_id, self.principal, "approve")
+        if result.outcome is None:
+            raise StepExecutionError(result.message)
+        step.result = result.outcome.result or {}
+        self.results[step.tool_name] = step.result
+        return summarize_tool_result(step.tool_name, step.result)
 
     def _execute(self, step: PlanStep):
         # Conditional retrieval for steps that are not themselves the search tool.
@@ -315,17 +316,29 @@ class _PlanRunner:
                 self.total_tokens_estimated += estimate_tokens(snippet)
                 # Do NOT log snippet content (sensitive policy details).
                 yield _sse({"retrieval": {"query": step.retrieval_query, "snippet": snippet}})
+        if step.tool_name and step.idempotency_key is None:
+            spec = get_registry().get(step.tool_name)
+            if spec.is_write:
+                step.idempotency_key = f"chat:{self.conversation_id}:{self.turn_id}:{step.index}"
         try:
-            summary = execute_plan_step(
-                step,
-                self.understanding,
-                self.run_db,
-                user_id=self.principal.user_id,
-                principal=self.principal,
-                results=self.results,
-                conversation_id=self.conversation_id,
-                confirmed=self.confirmed,
-            )
+            if self.confirmed and step.status == "awaiting_confirmation" and step.approval_id:
+                summary = self._run_approved(step)
+            else:
+                summary = execute_plan_step(
+                    step,
+                    self.understanding,
+                    self.run_db,
+                    user_id=self.principal.user_id,
+                    principal=self.principal,
+                    results=self.results,
+                    conversation_id=self.conversation_id,
+                )
+        except StepApprovalRequired as exc:
+            yield from self._pause(step, exc)
+            return
+        except ToolError as exc:
+            yield from self._fail(step, exc.message)
+            return
         except StepExecutionError as exc:
             yield from self._fail(step, str(exc))
             return
@@ -344,29 +357,40 @@ class _PlanRunner:
         tokens = step.estimated_tokens + estimate_tokens(summary)
         self.total_tokens_estimated += tokens
         self.turn_summaries.append(summary)
+        if step.tool_name and get_registry().get(step.tool_name).is_write:
+            self.writes_done.append(summary)
         self._record(step, "done", summary, tokens)
         yield _sse({"step_done": {"index": step.index, "summary": summary}})
 
     def _summary_text(self) -> str:
-        if self.confirmed:
-            parts = []
-            if self.turn_summaries:
-                parts.append("Done. " + " ".join(self.turn_summaries))
-            if self.failure:
-                parts.append(f"I couldn't finish: {self.failure}")
-            return " ".join(parts) or "Nothing was run."
-        text = explain_understanding(self.understanding)
-        if self.awaiting:
-            actions = "; ".join(
-                step.description for step in self.awaiting if step.requires_confirmation
+        parts: list[str] = []
+        if self.writes_done:
+            parts.append("Done. " + " ".join(self.writes_done))
+        elif not self.confirmed:
+            parts.append(explain_understanding(self.understanding))
+        for step in self.awaiting:
+            approval_reasons = "; ".join(
+                reason for reason in self._reasons.get(step.index, []) if reason
             )
-            return (
-                f"{text} Ready to run: {actions}. "
-                "Reply \"confirm\" to go ahead or \"cancel\" to discard it."
-            )
+            why = f" ({step.risk_level} risk: {approval_reasons})" if approval_reasons else ""
+            if step.status == "awaiting_confirmation":
+                parts.append(
+                    f"Approval required{why}: {step.description}. "
+                    "Reply \"confirm\" to go ahead or \"cancel\" to discard it."
+                )
+            else:
+                parts.append(
+                    f"Approval required{why}: {step.description}. I sent it for approval "
+                    "to HR / Operations, an admin, or your team's manager (request "
+                    f"{step.approval_id}); it will run with your permissions once approved. "
+                    "You can follow it on the Approvals page."
+                )
         if self.failure:
-            return f"{text} I couldn't continue: {self.failure}"
-        return text
+            parts.append(
+                ("I couldn't finish: " if self.writes_done else "I couldn't continue: ")
+                + self.failure
+            )
+        return " ".join(parts) or "Nothing was run."
 
     def _summarise(self, step: PlanStep):
         summary_text = self._summary_text()
@@ -387,8 +411,8 @@ class _PlanRunner:
     def run(self):
         yield _sse({"plan": [asdict(step) for step in self.plan_steps]})
         for step in self.plan_steps:
-            if step.status in ("done", "failed", "skipped"):
-                continue  # finished in an earlier turn
+            if step.status in ("done", "failed", "skipped", "approval_required"):
+                continue  # finished earlier, or waiting for someone else's approval
             is_summary = step.action_type == "summarise_response"
 
             if assistant_planner.check_step_limit(step.index):
@@ -398,12 +422,8 @@ class _PlanRunner:
             if not is_summary and self.failure is not None:
                 step.status = "skipped"
                 continue
-            if not is_summary and (
-                self.awaiting
-                or (not self.confirmed and step.tool_name and step.requires_confirmation)
-            ):
-                yield from self._await_confirmation(step)
-                continue
+            if not is_summary and self.awaiting:
+                continue  # runs after the paused step is approved
             if assistant_planner.check_cost_cap(self.total_tokens_estimated, step.estimated_tokens):
                 self.halted_reason = "cost_cap"
                 yield _sse({"halted": self.halted_reason})
@@ -418,12 +438,14 @@ class _PlanRunner:
             yield from self._execute(step)
 
         pending = None
-        if self.awaiting and not self.halted_reason:
+        confirmable = [s for s in self.awaiting if s.status == "awaiting_confirmation"]
+        if confirmable and not self.halted_reason:
             pending = {
-                "confirmation_id": self.confirmation_id,
+                "confirmation_id": self.turn_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "understanding": self.understanding.model_dump(mode="json"),
                 "results": self.results,
+                "approval_ids": [s.approval_id for s in confirmable],
             }
         self.save(pending)
 
@@ -525,6 +547,11 @@ def stream_assistant_chat(
             )
         else:
             # Cancelled, expired, or the user moved on: the waiting steps never run.
+            for approval_id in checkpoint.pending_confirmation.get("approval_ids") or []:
+                try:
+                    cancel_approval(db, approval_id, principal)
+                except ToolError:
+                    pass  # already decided, expired or cancelled
             assistant_planner.clear_pending_confirmation(db, conv)
             if reply in CONFIRM_REPLIES:
                 forced_response = (
