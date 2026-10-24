@@ -93,6 +93,24 @@ def test_task_assignment_command_and_variations(db_session: Session):
             assert result.status == "understood"
 
 
+def test_task_assignment_named_task_command_extracts_only_quoted_title(
+    db_session: Session,
+):
+    result = understand(
+        db_session,
+        'Assign Rahul a task called "Prepare Q4 database migration report" '
+        "due Friday, October 30 at 5 PM.",
+    )
+
+    assert result is not None
+    assert result.intent == "task_assignment"
+    assert result.status == "understood"
+    assert result.entities.task == "Prepare Q4 database migration report"
+    assert result.entities.people == ["Rahul Sharma"]
+    assert result.entities.date.isoformat() == "2026-10-30"
+    assert result.entities.time.strftime("%I:%M %p").lstrip("0") == "5:00 PM"
+
+
 def test_duplicate_first_name_with_single_token_employee_requires_clarification(
     db_session: Session,
 ):

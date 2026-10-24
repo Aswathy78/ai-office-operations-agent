@@ -353,14 +353,64 @@ class _PlanRunner:
             self.total_tokens_estimated += estimate_tokens(snippet)
             yield _sse({"retrieval": {"query": step.retrieval_query, "snippet": snippet}})
 
+        verification = (step.result or {}).get("verification")
+        if verification and verification.get("status") == "escalated":
+            step.status = "escalated"
+            link = verification.get("link", {})
+            escalation_notifications = verification.get("notifications", [])
+            sent_count = sum(
+                notification.get("status") == "sent"
+                for notification in escalation_notifications
+            )
+            failed_count = sum(
+                notification.get("status") == "failed"
+                for notification in escalation_notifications
+            )
+            message = (
+                "The action may have completed, but its saved result did not match the request "
+                "after a retry and re-plan."
+            )
+            if sent_count:
+                message += f" Review notifications were sent to {sent_count} recipient(s)."
+            if failed_count:
+                message += f" {failed_count} review notification(s) could not be delivered."
+            if not sent_count and not failed_count:
+                message += " No review notification could be delivered; check the audit log."
+            if link.get("url"):
+                message += f" Review the record: {link['url']}"
+            self.failure = message
+            self._record(step, "escalated", message, step.estimated_tokens)
+            yield _sse({
+                "step_error": {
+                    "index": step.index,
+                    "status": "escalated",
+                    "message": message,
+                    "links": (step.result or {}).get("links", {}),
+                }
+            })
+            return
+
         step.status = "done"
         tokens = step.estimated_tokens + estimate_tokens(summary)
         self.total_tokens_estimated += tokens
         self.turn_summaries.append(summary)
         if step.tool_name and get_registry().get(step.tool_name).is_write:
-            self.writes_done.append(summary)
+            record_link = ((step.result or {}).get("links") or {}).get("record", {})
+            link_text = (
+                f" Review: {record_link['url']}"
+                if step.tool_name != "task.create" and record_link.get("url")
+                else ""
+            )
+            self.writes_done.append(summary + link_text)
         self._record(step, "done", summary, tokens)
-        yield _sse({"step_done": {"index": step.index, "summary": summary}})
+        yield _sse({
+            "step_done": {
+                "index": step.index,
+                "summary": summary,
+                "status": step.status,
+                "links": (step.result or {}).get("links", {}),
+            }
+        })
 
     def _summary_text(self) -> str:
         parts: list[str] = []
@@ -411,7 +461,7 @@ class _PlanRunner:
     def run(self):
         yield _sse({"plan": [asdict(step) for step in self.plan_steps]})
         for step in self.plan_steps:
-            if step.status in ("done", "failed", "skipped", "approval_required"):
+            if step.status in ("done", "failed", "escalated", "skipped", "approval_required"):
                 continue  # finished earlier, or waiting for someone else's approval
             is_summary = step.action_type == "summarise_response"
 

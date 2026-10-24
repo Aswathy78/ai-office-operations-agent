@@ -62,6 +62,7 @@ from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.email_delivery_service import process_due_emails
 from app.meeting.models import (
+    AssistantAuditEvent,
     AssistantConversation,
     AssistantToolExecution,
     Base,
@@ -564,6 +565,11 @@ class TestRealExecution:
         )
         assert response.status_code == 200, response.text
         result = response.json()["result"]
+        assert result["verification"]["status"] == "verified"
+        assert result["verification"]["attempts"] == [{"attempt": 1, "mismatches": []}]
+        assert result["step_status"] == "done"
+        assert result["links"]["record"]["path"] == f"/tasks?task_id={result['task_id']}"
+        assert result["notifications"][0]["status"] == "sent"
 
         task = db_session.get(Task, result["task_id"])
         assert task is not None
@@ -586,6 +592,132 @@ class TestRealExecution:
 
         execution = db_session.query(AssistantToolExecution).one()
         assert execution.status == "succeeded" and execution.result["task_id"] == task.id
+        assert execution.result["verification"]["verified"] is True
+
+    def test_verification_retries_readback_without_repeating_write(
+        self, as_manager, db_session, mail, monkeypatch
+    ):
+        import app.assistant_verification as verification
+
+        read_back = verification._read_back
+        reads = []
+
+        def mismatch_once(db, tool_name, result):
+            actual = read_back(db, tool_name, result)
+            reads.append(tool_name)
+            if len(reads) == 1:
+                actual["title"] = "Unexpected title"
+            return actual
+
+        monkeypatch.setattr(verification, "_read_back", mismatch_once)
+        response = _execute(
+            as_manager,
+            "task.create",
+            {"assignee_email": "bob@northstar.example", "title": "Verified task",
+             "due_at": _future()},
+            key="key-verify-retry-01",
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["verification"]["status"] == "verified"
+        assert result["verification"]["attempts"][0]["mismatches"]
+        assert result["verification"]["attempts"][1]["mismatches"] == []
+        assert len(reads) == 2
+        assert db_session.query(Task).count() == 1
+        assert mail.recipients() == ["bob@northstar.example"]
+        assert db_session.query(AssistantAuditEvent).filter_by(
+            event="verification_succeeded"
+        ).count() == 1
+
+    def test_task_verification_compares_unwrapped_title_and_requested_due_at(
+        self, as_manager, db_session, mail, monkeypatch
+    ):
+        import app.assistant_verification as verification
+        from app.meeting.models import AssistantAuditEvent
+
+        read_back = verification._read_back
+
+        def mismatched_persisted_fields(db, tool_name, result):
+            actual = read_back(db, tool_name, result)
+            if tool_name == "task.create":
+                actual["due_at"] = "2026-10-30T12:30:00+00:00"
+            return actual
+
+        monkeypatch.setattr(verification, "_read_back", mismatched_persisted_fields)
+        response = _execute(
+            as_manager,
+            "task.create",
+            {
+                "assignee_email": "bob@northstar.example",
+                "title": 'task "Prepare database migration report"',
+                "due_at": "2026-10-30T11:30:00+00:00",
+            },
+            key="key-task-verify-fields",
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        check = result["verification"]
+        assert check["status"] == "escalated"
+        assert check["expected"]["title"] == "Prepare database migration report"
+        assert check["expected"]["due_at"] == "2026-10-30T11:30:00+00:00"
+        assert check["actual"]["title"] == 'task "Prepare database migration report"'
+        assert check["actual"]["due_at"] == "2026-10-30T12:30:00+00:00"
+        assert all(
+            len(attempt["mismatches"]) == 2 for attempt in check["attempts"]
+        )
+        assert result["step_status"] == "escalated"
+        assert db_session.query(AssistantAuditEvent).filter_by(
+            event="verification_escalated"
+        ).count() == 1
+        assert sorted(mail.recipients()) == [
+            "bob@northstar.example",
+            "priya@northstar.example",
+        ]
+
+    def test_persistent_mismatch_escalates_after_replanned_readback(
+        self, as_manager, db_session, mail, monkeypatch
+    ):
+        import app.assistant_verification as verification
+        from app.meeting.models import AssistantAuditEvent
+
+        requester_manager = db_session.get(Employee, "emp-alice")
+        requester = db_session.get(Employee, "emp-mgr")
+        requester.manager_id = requester_manager.id
+        db_session.commit()
+        read_back = verification._read_back
+        reads = []
+
+        def persistent_mismatch(db, tool_name, result):
+            actual = read_back(db, tool_name, result)
+            reads.append(tool_name)
+            actual["title"] = "Unexpected title"
+            return actual
+
+        monkeypatch.setattr(verification, "_read_back", persistent_mismatch)
+        response = _execute(
+            as_manager,
+            "task.create",
+            {"assignee_email": "bob@northstar.example", "title": "Needs review",
+             "due_at": _future()},
+            key="key-verify-escalate-1",
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["verification"]["status"] == "escalated"
+        assert result["verification"]["replanned"] is True
+        assert len(reads) == verification.MAX_VERIFICATION_READS
+        assert result["step_status"] == "escalated"
+        assert sorted(mail.recipients()) == [
+            "alice@northstar.example",
+            "bob@northstar.example",
+            "priya@northstar.example",
+        ]
+        assert db_session.query(AssistantAuditEvent).filter_by(
+            event="verification_escalated"
+        ).count() == 1
 
     def test_meeting_schedule_creates_meeting_and_sends_invitations(
         self, as_manager, db_session, mail
@@ -643,8 +775,20 @@ class TestRealExecution:
         assert db_session.query(EmailDraft).count() == 0  # medium risk: paused first
         result = _approve(as_manager, response)["execution"]["result"]
         assert result["outcome"] == "queued"
+        assert result["verification"]["status"] == "verified"
+        assert result["step_status"] == "done"
+        assert result["links"]["record"]["path"] == (
+            f"/api/v1/email-drafts/{result['draft_id']}"
+        )
+        assert result["notifications"][0]["status"] == "queued"
         draft = db_session.get(EmailDraft, result["draft_id"])
         assert draft.status == "queued" and draft.created_by_id == "emp-mgr"
+        assert "queued for delivery" in assistant_planner.summarize_tool_result(
+            "email.send", result
+        )
+        assert "sent successfully" not in assistant_planner.summarize_tool_result(
+            "email.send", result
+        )
         statuses = [e.to_status for e in db_session.query(EmailDraftEvent)
                     .filter_by(draft_id=draft.id).order_by(EmailDraftEvent.sequence)]
         assert statuses == ["draft", "queued"]
@@ -655,6 +799,12 @@ class TestRealExecution:
         db_session.refresh(draft)
         assert draft.status == "sent"
         assert mail.recipients() == ["bob@northstar.example"]
+        delivered_result = {**result, "delivery_results": draft.delivery_results}
+        delivered_summary = assistant_planner.summarize_tool_result(
+            "email.send", delivered_result
+        )
+        assert "sent successfully" in delivered_summary
+        assert "queued for delivery" not in delivered_summary
 
     def test_email_to_external_recipient_goes_to_approval(self, as_manager, db_session, mail):
         response = _execute(
@@ -826,11 +976,21 @@ class TestChatExecution:
         # Low risk within the manager's own team: no approval needed.
         assert not _of(events, "awaiting_confirmation")
         assert not _of(events, "step_error")
+        task_step = next(
+            event["step_done"] for event in events
+            if event.get("step_done", {}).get("index") == 1
+        )
+        assert task_step["status"] == "done"
+        assert task_step["links"]["record"]["path"].startswith("/tasks?task_id=")
         task = db_session.query(Task).one()
         assert task.title == "quarterly report" and task.assignee_id == "emp-bob"
         assert task.source == "assistant"
         assert mail.recipients() == ["bob@northstar.example"]
-        assert "Created task 'quarterly report' for Bob Lee" in _tokens(events)
+        response_text = _tokens(events)
+        assert "Task: quarterly report. Assignee: Bob Lee." in response_text
+        assert "Assignment e-mail: sent." in response_text
+        assert "task " + task.id not in response_text
+        assert "Review:" not in response_text
 
         # Saying "confirm" afterwards cannot run the write a second time.
         _chat(as_manager, "confirm", conversation_id)

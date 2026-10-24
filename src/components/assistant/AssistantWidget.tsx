@@ -27,6 +27,9 @@ import {
   X,
   XCircle,
 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkBreaks from 'remark-breaks'
+import remarkGfm from 'remark-gfm'
 import { ASSISTANT_QUICK_ACTIONS, type PlanStep } from '../../api/assistant'
 import { useAssistant } from '../../contexts/AssistantContext'
 
@@ -401,15 +404,21 @@ export function AssistantWidget() {
                     </div>
                   )}
                   <div className="assistant-msg-bubble">
-                    <p className="assistant-msg-text">
-                      {msg.content}
+                    <div className="assistant-msg-text">
+                      {isUser ? (
+                        msg.content
+                      ) : (
+                        <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
+                          {msg.content.replace(/<br\s*\/?>/gi, '\n')}
+                        </ReactMarkdown>
+                      )}
                       {msg.isStreaming && (
                         <span
                           className="assistant-streaming-cursor"
                           aria-hidden="true"
                         />
                       )}
-                    </p>
+                    </div>
                     {msg.isStreaming && !msg.content && (
                       <div
                         className="assistant-typing-indicator"

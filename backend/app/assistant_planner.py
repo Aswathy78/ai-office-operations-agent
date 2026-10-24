@@ -200,7 +200,7 @@ def search_company_knowledge(query: str, limit: int = 3) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 StepStatus = Literal[
-    "pending", "running", "done", "failed", "skipped", "awaiting_confirmation",
+    "pending", "running", "done", "failed", "escalated", "skipped", "awaiting_confirmation",
     "approval_required",
 ]
 ActionType = Literal[
@@ -597,14 +597,15 @@ def _organization_datetime(day, hour: int, minute: int) -> datetime:
 
 
 def _task_due_at(understanding: AssistantUnderstanding) -> datetime:
-    """The requested date at 17:00 organization time, or a week from today."""
+    """The requested date/time in organization time, or the existing defaults."""
     from app.meeting.scheduling_service import get_organization_timezone
 
     day = understanding.entities.date
     if day is None:
         today = datetime.now(timezone.utc).astimezone(get_organization_timezone()).date()
         day = today + timedelta(days=DEFAULT_TASK_DUE_DAYS)
-    return _organization_datetime(day, *TASK_DUE_LOCAL_TIME)
+    due_time = understanding.entities.time or Time(*TASK_DUE_LOCAL_TIME)
+    return _organization_datetime(day, due_time.hour, due_time.minute)
 
 
 def prepare_tool_arguments(
@@ -689,6 +690,24 @@ def _names(people: list[dict]) -> str:
     return ", ".join(person["name"] for person in people) or "nobody"
 
 
+def _format_assistant_datetime(value: str | datetime) -> str:
+    """Format a stored UTC timestamp in the configured organization timezone."""
+    from app.meeting.scheduling_service import get_organization_timezone
+
+    parsed = (
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if isinstance(value, str)
+        else value
+    )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local = parsed.astimezone(get_organization_timezone())
+    return (
+        f"{local.strftime('%A, %B')} {local.day} at "
+        f"{local.strftime('%I:%M %p').lstrip('0')}"
+    )
+
+
 def summarize_tool_result(tool_name: str, result: dict) -> str:
     """Turn a tool result into a one-line step summary.
 
@@ -714,7 +733,10 @@ def summarize_tool_result(tool_name: str, result: dict) -> str:
                 f"'{c['conflicting_event_title']}'"
                 for c in result["conflicts"]
             )
-            slots = ", ".join(slot["start_at"] for slot in result["alternative_slots"])
+            slots = ", ".join(
+                _format_assistant_datetime(slot["start_at"])
+                for slot in result["alternative_slots"]
+            )
             raise StepExecutionError(
                 f"{busy}. " + (f"Free slots: {slots}." if slots else "No free slot was found.")
             )
@@ -722,7 +744,8 @@ def summarize_tool_result(tool_name: str, result: dict) -> str:
 
     if tool_name == "meeting.schedule":
         summary = (
-            f"Scheduled '{result['title']}' at {result['start_at']} "
+            f"Scheduled '{result['title']}' at "
+            f"{_format_assistant_datetime(result['start_at'])} "
             f"(meeting {result['meeting_id']}); invitations sent to "
             f"{len(result['invitations_sent'])} attendee(s)."
         )
@@ -753,6 +776,24 @@ def summarize_tool_result(tool_name: str, result: dict) -> str:
 
     if tool_name == "email.send":
         outcome = result["outcome"]
+        delivery_results = result.get("delivery_results", [])
+        sent_recipients = {
+            item["email"].casefold()
+            for item in delivery_results
+            if item.get("status") == "sent" and item.get("email")
+        }
+        recipients = {
+            email.casefold() for email in result.get("recipients", []) if email
+        }
+        if (
+            result.get("recipient_count", 0) > 0
+            and len(sent_recipients) >= result["recipient_count"]
+            and (not recipients or recipients <= sent_recipients)
+        ):
+            return (
+                f"E-mail \"{result['subject']}\" sent successfully to "
+                f"{result['recipient_count']} recipient(s) (draft {result['draft_id']})."
+            )
         if outcome == "queued":
             return (
                 f"E-mail \"{result['subject']}\" queued for delivery to "
@@ -773,8 +814,9 @@ def summarize_tool_result(tool_name: str, result: dict) -> str:
     if tool_name == "task.create":
         assignee = result["assignee"]["name"] if result.get("assignee") else "the assignee"
         return (
-            f"Created task '{result['title']}' for {assignee}, due {result['due_at']} "
-            f"(task {result['task_id']}). Assignment e-mail: {result['assignment_email_status']}."
+            f"Task: {result['title']}. Assignee: {assignee}. "
+            f"Due: {_format_assistant_datetime(result['due_at'])}. "
+            f"Assignment e-mail: {result['assignment_email_status']}."
         )
 
     return f"Completed {tool_name}."

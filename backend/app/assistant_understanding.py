@@ -97,6 +97,12 @@ _TASK_COMMAND = re.compile(
     r"(?P<person>.+?)(?=\s+(?:by|before|due|on)\b|[.!?,]|$)",
     re.IGNORECASE,
 )
+_TASK_NAMED_COMMAND = re.compile(
+    r"\bassign\s+(?P<person>.+?)\s+(?:a|the)\s+task\s+(?:called|named)\s+"
+    r'(?:"(?P<double_task>[^"]+)"|\'(?P<single_task>[^\']+)\'|'
+    r"(?P<plain_task>.+?))(?=\s+(?:due|by|before|on)\b|[.!?,]|$)",
+    re.IGNORECASE,
+)
 _TASK_INTENT = re.compile(r"\b(?:assign|reassign|allocate)\b", re.IGNORECASE)
 _MEETING_INTENT = re.compile(
     r"\b(?:schedule|book|set\s+up)\b.*\bmeeting\b|\bmeeting\b.*"
@@ -248,10 +254,20 @@ def understand_assistant_command(
     topic = None
 
     if intent == "task_assignment":
-        match = _TASK_COMMAND.search(text)
+        match = _TASK_NAMED_COMMAND.search(text)
         if match:
-            task = _clean_phrase(match.group("task"))
+            task = _clean_phrase(
+                match.group("double_task")
+                or match.group("single_task")
+                or match.group("plain_task")
+            )
             requested_assignee = _clean_phrase(match.group("person"))
+        else:
+            match = _TASK_COMMAND.search(text)
+            if match:
+                task = _clean_phrase(match.group("task"))
+                requested_assignee = _clean_phrase(match.group("person"))
+        if match:
             if requested_assignee:
                 if requested_assignee.casefold() not in {
                     name.casefold() for name in ambiguous_people
