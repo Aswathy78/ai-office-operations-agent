@@ -9,6 +9,7 @@ import {
   getRescheduleRequests,
   decideRescheduleRequest,
 } from '../api/meetings'
+import { AgentApprovalsSection } from '../components/assistant/AgentApprovalsSection'
 import { EmailApprovalsSection } from '../components/email/EmailApprovalsSection'
 import { useAuth } from '../contexts/AuthContext'
 import type { MeetingRescheduleRequest } from '../types/meeting'
@@ -413,6 +414,9 @@ export function ApprovalsPage() {
       {meetingActor && <MeetingRescheduleApprovalsSection actor={meetingActor} />}
 
       {emailActor && <EmailApprovalsSection actor={emailActor} />}
+
+      {/* Story 6.6: assistant actions paused with "Approval Required" */}
+      {user && <AgentApprovalsSection />}
     </div>
   )
 }

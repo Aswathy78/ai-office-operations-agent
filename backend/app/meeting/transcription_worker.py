@@ -5,7 +5,7 @@ Run from the backend directory with:
     python -m app.meeting.transcription_worker
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import ctypes
 from importlib.util import find_spec
 import logging
@@ -143,6 +143,43 @@ def create_whisper_model():
 
     _configure_cuda_dll_directories()
     return _load_whisper_model("cuda", compute_type or "float16")
+
+
+def stale_processing_minutes() -> float:
+    try:
+        return max(5.0, float(os.getenv("TRANSCRIPTION_STALE_MINUTES", "30")))
+    except ValueError:
+        return 30.0
+
+
+def requeue_stale_transcripts(db: Session, older_than_minutes: float | None = None) -> int:
+    """Put transcripts stuck in "processing" back to "pending".
+
+    A worker that was stopped or crashed mid-transcription leaves its row in
+    "processing" and nothing would ever pick it up again; the UI then polls it
+    forever. Rows older than ``TRANSCRIPTION_STALE_MINUTES`` (default 30) are
+    re-queued so the next poll transcribes them.
+    """
+    minutes = older_than_minutes if older_than_minutes is not None else stale_processing_minutes()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    count = (
+        db.query(MeetingTranscript)
+        .filter(
+            MeetingTranscript.status == TRANSCRIPT_STATUS_PROCESSING,
+            MeetingTranscript.processing_started_at < cutoff,
+        )
+        .update(
+            {
+                MeetingTranscript.status: TRANSCRIPT_STATUS_PENDING,
+                MeetingTranscript.processing_started_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    db.commit()
+    if count:
+        logger.warning("Re-queued %d transcript(s) stuck in processing for over %.0f minutes", count, minutes)
+    return count
 
 
 def claim_pending_transcript(db: Session) -> str | None:
@@ -490,6 +527,12 @@ def run_worker(
     model = None
     last_idle_log_at = 0.0
 
+    def wait(seconds: float) -> None:
+        if stop_event is None:
+            time.sleep(seconds)
+        else:
+            stop_event.wait(seconds)
+
     while (
         stop_event is None
         or not stop_event.is_set()
@@ -498,9 +541,22 @@ def run_worker(
         claim_session = session_factory()
 
         try:
+            if time.monotonic() - last_idle_log_at >= _IDLE_LOG_INTERVAL_SECONDS:
+                # At start-up, after each job and every idle interval: recover
+                # rows a stopped or crashed worker left behind.
+                requeue_stale_transcripts(claim_session)
             transcript_id = claim_pending_transcript(
                 claim_session
             )
+
+        except Exception:
+            # A locked or briefly unavailable database must not kill the worker;
+            # pending transcripts would otherwise wait until someone restarts it.
+            logger.exception("Could not claim a pending transcript; retrying")
+            claim_session.rollback()
+            claim_session.close()
+            wait(poll_interval_seconds)
+            continue
 
         finally:
             claim_session.close()
@@ -549,14 +605,78 @@ def run_worker(
                 error,
             )
 
-            _persist_failure(
-                work_session,
-                transcript_id,
-                error,
-            )
+            try:
+                _persist_failure(
+                    work_session,
+                    transcript_id,
+                    error,
+                )
+            except Exception:
+                # Left in "processing"; requeue_stale_transcripts retries it later.
+                logger.exception("Could not record the failure of transcript %s", transcript_id)
 
         finally:
             work_session.close()
+
+
+# ---------------------------------------------------------------------------
+# In-process background worker, started with the API (like the e-mail dispatcher)
+# ---------------------------------------------------------------------------
+
+_background_stop: threading.Event | None = None
+_background_thread: threading.Thread | None = None
+
+
+def background_worker_enabled() -> bool:
+    value = os.getenv("TRANSCRIPTION_WORKER_ENABLED", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def start_transcription_worker() -> bool:
+    """Run the worker on a daemon thread of the API process. Returns whether it runs.
+
+    Without this, transcripts only progressed while someone kept a separate
+    ``python -m app.meeting.transcription_worker`` terminal open, so uploads sat
+    "pending" for minutes or hours at random. Running a separate worker as well
+    is still safe: claims are atomic.
+    """
+    global _background_stop, _background_thread
+    if not background_worker_enabled():
+        logger.info("Transcription worker disabled (TRANSCRIPTION_WORKER_ENABLED).")
+        return False
+    if find_spec("faster_whisper") is None:
+        logger.warning(
+            "faster-whisper is not installed in this Python (%s); transcripts will stay "
+            "pending. Run the API or `python -m app.meeting.transcription_worker` with "
+            "the Python 3.11 environment (.venv-py311).",
+            sys.version.split()[0],
+        )
+        return False
+    if _background_thread is not None and _background_thread.is_alive():
+        return True
+    _background_stop = threading.Event()
+
+    def _run() -> None:
+        while not _background_stop.is_set():
+            try:
+                run_worker(stop_event=_background_stop)
+            except Exception:  # noqa: BLE001 - restart instead of dying silently
+                logger.exception("Transcription worker crashed; restarting in 5 seconds")
+                _background_stop.wait(5)
+
+    _background_thread = threading.Thread(target=_run, name="transcription-worker", daemon=True)
+    _background_thread.start()
+    logger.info("Transcription worker started in the API process.")
+    return True
+
+
+def stop_transcription_worker() -> None:
+    global _background_thread
+    if _background_stop is not None:
+        _background_stop.set()
+    if _background_thread is not None:
+        _background_thread.join(timeout=10)
+    _background_thread = None
 
 
 if __name__ == "__main__":

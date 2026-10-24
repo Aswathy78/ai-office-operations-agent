@@ -2727,6 +2727,72 @@ cd backend
 ..\.venv\Scripts\python.exe -m pytest tests/test_assistant_tool_execution.py tests/test_assistant_plan_retrieve.py tests/test_assistant_understanding.py tests/test_assistant_chat_api.py -q
 ```
 
+---
+
+## Story 6.6 – Permission, Conflict, and Risk Checks Before Every Write
+
+### Overview
+Before any assistant write runs, `execute_tool` (the only path to a tool, used by both chat and the tools API) checks:
+1. **Permission** — the role's scopes, then the tool's resource rules (managers only assign or notify within their own team; only managers / HR / admins e-mail everyone; only HR / admins dispatch everyone's queued e-mail).
+2. **Conflicts** — busy calendar slots (attendees and organizer, with free-slot suggestions), duplicate open tasks, the same e-mail sent in the last 15 minutes, notices on closed tasks, a workflow already running, or an identical request already waiting for approval.
+3. **Risk** — Low, Medium or High:
+
+| Tool | Low | Medium | High |
+|---|---|---|---|
+| `task.create` | own team | priority high/urgent, or due within 24 h | assignee outside your team |
+| `meeting.schedule` | ≤ 5 internal attendees in working hours | 6–20 attendees, > 2 h, or outside someone's working hours | external attendees or > 20 attendees |
+| `email.send` | — | internal e-mail (cannot be recalled) | external recipients, more than the approval threshold, or sensitive data |
+| `notification.send_task_notice` | default | — | sensitive data |
+| `workflow.run` | — | — | always (affects every employee) |
+
+### Decisions
+- **Low risk** within your permissions runs at once.
+- **Medium risk** pauses with **Approval Required** until *you* confirm — reply "confirm" in chat, or click **Confirm and run** on the Approvals page.
+- **High risk** pauses until *someone else* approves: HR / Operations, an admin, or the manager of the requester's team. You cannot approve your own.
+- **Denied or blocked** actions explain why in chat and in the API (`403` with `reasons`, `409` with `conflicts`).
+- Approving re-runs every check and executes **with the requester's current permissions** (role re-read from their login account) — never the approver's. A requester who was demoted or disabled meanwhile cannot have it run.
+- The old `confirm: true` flag no longer skips anything; medium/high-risk calls return `202` with `status: "approval_required"`.
+- Every decision is written to `assistant_audit_events`: `permission_denied`, `conflict_blocked`, `auto_approved`, `approval_requested`, `approved`, `rejected`, `cancelled`, `expired`, `executed`, `execution_failed`, `replayed`.
+
+### API
+- `GET /api/v1/assistant/approvals?scope=mine|queue&status=pending`
+- `POST /api/v1/assistant/approvals/{id}/decide` — `{decision: "approve" | "reject", note?}`
+- `POST /api/v1/assistant/approvals/{id}/cancel`
+- `GET /api/v1/assistant/audit` — your events (HR / admins see everyone's)
+
+### UI
+- **Approvals page → "AI assistant actions"**: the approver queue and "My requests", with risk level, reasons, expiry, Approve / Reject / Confirm and run / Cancel.
+- **Assistant widget**: steps waiting for your confirmation (amber) or another approver (red).
+
+### Database & configuration
+Migration `20261024_01` adds `assistant_action_approvals` and `assistant_audit_events` (`alembic upgrade head`). Settings: `ASSISTANT_CONFIRMATION_TTL_MINUTES` (medium, default 30) and `ASSISTANT_APPROVAL_TTL_HOURS` (high, default 72).
+
+### Testing
+```powershell
+cd backend
+..\.venv\Scripts\python.exe -m pytest tests/test_assistant_write_guard.py tests/test_assistant_tool_execution.py -q
+```
+
+---
+
+## Transcription reliability fix
+
+Transcripts sometimes stayed "pending" for minutes or hours and then appeared "randomly". The causes were:
+- The Whisper worker only ran in a separate terminal.
+- One database error killed the worker loop.
+- A crash left transcripts stuck in "processing" forever.
+- The transcript panel stopped polling after a single failed request.
+
+Now:
+- **The API starts the transcription worker itself** (`TRANSCRIPTION_WORKER_ENABLED`, default `true`). It needs `faster-whisper`, so run the API with the Python 3.11 environment:
+  ```powershell
+  cd backend
+  ..\.venv-py311\Scripts\python.exe -m uvicorn main:app --reload --port 8000
+  ```
+  Under an environment without `faster-whisper` the API logs a clear warning instead. Running `python -m app.meeting.transcription_worker` separately as well is still safe.
+- The worker survives claim and database errors, and re-queues transcripts stuck in "processing" for more than `TRANSCRIPTION_STALE_MINUTES` (default 30).
+- The transcript panel keeps the last transcript on a failed poll and keeps retrying, including while the transcript does not exist yet because the upload is still finishing.
+
 # 📌 Current Project Status
 
 ### Epic 1 — Meeting Management[README_updated.md](https://github.com/user-attachments/files/33364215/README_updated.md)

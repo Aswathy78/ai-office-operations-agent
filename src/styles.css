@@ -1861,6 +1861,12 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .assistant-step-icon.skipped { color: #94a3b8; }
 /* Story 6.5: write step waiting for the user to reply "confirm" */
 .assistant-step-icon.awaiting { color: #d97706; }
+/* Story 6.6: assistant approvals */
+.assistant-step-icon.approval { color: #b91c1c; }
+.agent-risk-badge { display: inline-flex; border-radius: 999px; padding: 2px 8px; font-size: 10px; font-weight: 800; text-transform: uppercase; background: #e8f7f0; color: var(--success); }
+.agent-risk-badge.medium { background: #fff3dc; color: var(--warning); }
+.agent-risk-badge.high { background: #fdecec; color: var(--danger); }
+.agent-risk-reasons { margin: 0; padding-left: 18px; font-size: 12px; color: #596579; }
 
 @keyframes assistant-step-spin {
   from { transform: rotate(0deg); }

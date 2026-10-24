@@ -200,7 +200,8 @@ def search_company_knowledge(query: str, limit: int = 3) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 StepStatus = Literal[
-    "pending", "running", "done", "failed", "skipped", "awaiting_confirmation"
+    "pending", "running", "done", "failed", "skipped", "awaiting_confirmation",
+    "approval_required",
 ]
 ActionType = Literal[
     "schedule_meeting",
@@ -229,6 +230,9 @@ class PlanStep:
     requires_confirmation: bool = False
     idempotency_key: str | None = None  # set for write steps when confirmation is requested
     result: dict | None = None  # the tool's result once the step has run
+    # Story 6.6 — set when the write guard paused the step for approval.
+    approval_id: str | None = None
+    risk_level: str | None = None
 
 
 @dataclass
@@ -559,6 +563,15 @@ class StepExecutionError(Exception):
     """Raised when a plan step fails.  The caller preserves earlier checkpoints."""
 
 
+class StepApprovalRequired(Exception):
+    """The write guard paused the step (Story 6.6); ``approval`` is the pending request."""
+
+    def __init__(self, approval: dict, risk_reasons: list[str]):
+        super().__init__(approval["summary"])
+        self.approval = approval
+        self.risk_reasons = risk_reasons
+
+
 def _tool_requires_confirmation(tool_name: str) -> bool:
     from app.assistant_tools import get_registry
 
@@ -776,7 +789,6 @@ def execute_plan_step(
     principal=None,
     results: dict[str, dict] | None = None,
     conversation_id: str | None = None,
-    confirmed: bool = False,
 ) -> str:
     """Execute one plan step and return a short human-readable summary.
 
@@ -785,6 +797,10 @@ def execute_plan_step(
     happens (a task row is created, a meeting is booked, an e-mail is queued) and
     is recorded in the tool-execution ledger.  The tool result is stored in
     ``step.result`` and in ``results`` for later steps.
+
+    Story 6.6: writes pass the write guard.  A denied or conflicting write raises
+    StepExecutionError with the reason; a medium/high-risk write raises
+    StepApprovalRequired and runs nothing until it is approved.
 
     Steps without a tool (e.g. plans built by older code) are only validated
     against the understanding and report "Validated: ..." — they change nothing.
@@ -821,10 +837,13 @@ def execute_plan_step(
                 step.tool_arguments,
                 idempotency_key=step.idempotency_key,
                 conversation_id=conversation_id,
-                confirmed=confirmed,
             )
         except ToolError as exc:
             raise StepExecutionError(exc.message) from exc
+        step.risk_level = outcome.risk_level
+        if outcome.status == "approval_required":
+            step.approval_id = outcome.approval["id"]
+            raise StepApprovalRequired(outcome.approval, outcome.risk_reasons)
         step.result = outcome.result or {}
         results[step.tool_name] = step.result
         return summarize_tool_result(step.tool_name, step.result)

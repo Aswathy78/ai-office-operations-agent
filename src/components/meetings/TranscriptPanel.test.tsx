@@ -184,6 +184,43 @@ describe('TranscriptPanel', () => {
     expect(await screen.findByText('Transcript is pending.')).toBeInTheDocument()
   })
 
+  it('keeps polling a pending transcript after a failed poll until it completes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(getMeetingTranscript)
+        .mockResolvedValueOnce({ ...transcript, status: 'pending', segments: [] })
+        .mockRejectedValueOnce(new Error('Network down'))
+        .mockResolvedValueOnce(transcript)
+      renderPanel(false)
+      expect(await screen.findByText('Transcript is pending.')).toBeInTheDocument()
+
+      // The failed poll keeps the pending transcript on screen instead of dropping it.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+      expect(screen.getByText('Transcript is pending.')).toBeInTheDocument()
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+      expect(await screen.findByText('Welcome.')).toBeInTheDocument()
+      expect(getMeetingTranscript).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries when the transcript does not exist yet (upload still finishing)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      vi.mocked(getMeetingTranscript)
+        .mockRejectedValueOnce(new MeetingApiError('Transcript not found', 404))
+        .mockResolvedValueOnce({ ...transcript, status: 'processing', segments: [] })
+      renderPanel(false)
+      expect(await screen.findByText('Transcript not available.')).toBeInTheDocument()
+      await act(async () => { await vi.advanceTimersByTimeAsync(3100) })
+      expect(await screen.findByText('Transcript is being processed.')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('shows a friendly unavailable state when no transcript exists', async () => {
     vi.mocked(getMeetingTranscript).mockRejectedValue(
       new MeetingApiError('Transcript not found', 404),

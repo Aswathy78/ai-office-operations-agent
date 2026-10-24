@@ -353,6 +353,22 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
                 : prev,
             )
           },
+          // ---- Story 6.6 ----
+          onApprovalRequired: (event) => {
+            setCurrentPlan((prev) =>
+              prev
+                ? prev.map((s) =>
+                    s.index === event.index
+                      ? {
+                          ...s,
+                          status: 'approval_required' as const,
+                          result_summary: `Waiting for approval (${event.risk_level ?? 'high'} risk). See the Approvals page.`,
+                        }
+                      : s,
+                  )
+                : prev,
+            )
+          },
         })
       } catch {
         // streamAssistantChat already invoked onError callback

@@ -8,19 +8,28 @@
 Write tools need an idempotency key (body ``idempotency_key`` or the
 ``Idempotency-Key`` header). Repeating a call with the same key and arguments
 returns the first result with ``replayed: true``; reusing the key for a different
-call is a 409. Medium- and high-risk tools also need ``"confirm": true``.
+call is a 409.
+
+Story 6.6: every write passes the permission, conflict and risk checks. A
+denied write is 403 and a conflicting one 409, each with the reasons. Low-risk
+writes run (200); medium/high-risk writes return 202 with
+``status: "approval_required"`` and the pending approval — nothing runs until it
+is approved through ``/api/v1/assistant/approvals``. ``confirm`` is accepted for
+backward compatibility but no longer skips any check.
 """
 
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.assistant_tools import (
     ToolArgumentError,
+    ToolConflictBlocked,
     ToolError,
+    ToolPermissionDenied,
     execute_tool,
     get_registry,
     scopes_for_role,
@@ -38,12 +47,13 @@ class ToolExecuteRequest(BaseModel):
 
     arguments: dict[str, Any] = Field(default_factory=dict)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    # Ignored since Story 6.6: approval comes from /api/v1/assistant/approvals.
     confirm: bool = False
     conversation_id: str | None = None
 
 
 class ToolExecutionResponse(BaseModel):
-    execution_id: str
+    execution_id: str | None
     tool_name: str
     status: str
     result: dict | None
@@ -51,6 +61,9 @@ class ToolExecutionResponse(BaseModel):
     attempts: int
     duration_ms: int | None
     idempotency_key: str | None
+    risk_level: str | None = None
+    risk_reasons: list[str] = []
+    approval: dict | None = None
 
 
 class ToolExecutionRecord(BaseModel):
@@ -104,6 +117,7 @@ def list_tools(
 def execute_tool_endpoint(
     tool_name: str,
     req: ToolExecuteRequest,
+    response: Response,
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
     idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -129,15 +143,26 @@ def execute_tool_endpoint(
             req.arguments,
             idempotency_key=key,
             conversation_id=req.conversation_id,
-            confirmed=req.confirm,
         )
     except ToolArgumentError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail={"message": exc.message, "errors": exc.errors},
         ) from exc
+    except ToolPermissionDenied as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"message": exc.message, "reasons": exc.reasons},
+        ) from exc
+    except ToolConflictBlocked as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"message": exc.message, "conflicts": exc.conflicts},
+        ) from exc
     except ToolError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if outcome.status == "approval_required":
+        response.status_code = status.HTTP_202_ACCEPTED
     return ToolExecutionResponse(**outcome.as_dict())
 
 

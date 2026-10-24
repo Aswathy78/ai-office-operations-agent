@@ -23,6 +23,7 @@ from app.assistant_understanding import (
     understand_assistant_command,
 )
 import app.assistant_service as assistant_service
+import app.assistant_understanding as assistant_understanding
 
 
 REFERENCE_TIME = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
@@ -246,6 +247,13 @@ def test_email_deadline_is_separated_from_topic_without_sending(
         "stream_chat_completion",
         lambda *_args, **_kwargs: pytest.fail("recognized commands must not reach LLM"),
     )
+    # The chat endpoint reads the clock; pin it so "Friday" keeps meaning 2026-10-23.
+    real_reference_local = assistant_understanding._reference_local
+    monkeypatch.setattr(
+        assistant_understanding,
+        "_reference_local",
+        lambda reference_time=None: real_reference_local(reference_time or REFERENCE_TIME),
+    )
     try:
         with TestClient(app) as client:
             response = client.post(
@@ -354,6 +362,13 @@ def test_chat_stream_includes_validated_understanding_without_executing_actions(
         assistant_service,
         "stream_chat_completion",
         lambda *_args, **_kwargs: pytest.fail("recognized commands must not reach LLM"),
+    )
+    # The chat endpoint reads the clock; pin it so "Friday" keeps meaning 2026-10-23.
+    real_reference_local = assistant_understanding._reference_local
+    monkeypatch.setattr(
+        assistant_understanding,
+        "_reference_local",
+        lambda reference_time=None: real_reference_local(reference_time or REFERENCE_TIME),
     )
     try:
         with TestClient(app) as client:
