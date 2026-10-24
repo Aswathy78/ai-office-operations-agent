@@ -32,6 +32,10 @@ until the requester confirms; high-risk writes until someone else with approval
 rights approves (``app.assistant_approvals``). Approved actions run through this
 same function again — every check is repeated — with the requester's own
 principal. Every decision and outcome is written to ``assistant_audit_events``.
+
+Story 6.7 verifies task, meeting and email writes from persisted records after
+execution. A mismatch retries and re-plans only the read-back, then escalates
+to the requester and their manager; it never repeats the external write.
 """
 
 from __future__ import annotations
@@ -1114,6 +1118,19 @@ def execute_tool(
                 "This idempotency key was already used for a different operation. "
                 "Use a new key for a new operation."
             )
+        if spec.name in {"task.create", "meeting.schedule", "email.send"}:
+            if not (previous.result or {}).get("verification"):
+                from app.assistant_verification import verify_write_result
+
+                previous.result = verify_write_result(
+                    db,
+                    principal,
+                    spec.name,
+                    arguments,
+                    dict(previous.result or {}),
+                    execution_id=previous.id,
+                    conversation_id=conversation_id,
+                )
         record_audit(db, actor=principal, tool_name=spec.name, event="replayed",
                      execution_id=previous.id, conversation_id=conversation_id,
                      detail="Repeated request; returned the earlier result without acting again.")
@@ -1189,6 +1206,18 @@ def execute_tool(
 
     outcome.risk_level = decision.risk_level
     outcome.risk_reasons = decision.risk_reasons
+    if outcome.result is not None and spec.name in {"task.create", "meeting.schedule", "email.send"}:
+        from app.assistant_verification import verify_write_result
+
+        outcome.result = verify_write_result(
+            db,
+            principal,
+            spec.name,
+            arguments,
+            outcome.result,
+            execution_id=outcome.execution_id,
+            conversation_id=conversation_id,
+        )
     if approval is not None:
         approval.status = ACTION_APPROVAL_STATUS_EXECUTED
         approval.execution_id = outcome.execution_id

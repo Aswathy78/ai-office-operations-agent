@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -44,7 +44,9 @@ from app.assistant_planner import (
     check_step_limit,
     estimate_tokens,
     needs_retrieval,
+    prepare_tool_arguments,
     retrieve_company_knowledge,
+    summarize_tool_result,
     save_execution_checkpoint,
     load_execution_checkpoint,
     clear_execution_checkpoint,
@@ -221,18 +223,70 @@ class TestBuildExecutionPlan:
     def test_meeting_plan_has_no_retrieval_by_default(self):
         u = self._understood("meeting_scheduling")
         plan = build_execution_plan(u)
-        # Routine meeting scheduling steps should not trigger retrieval
         retrieval_steps = [
             s for s in plan
             if s.retrieval_query and "policy" in s.retrieval_query.lower()
         ]
-        # Basic meeting scheduling only triggers retrieval if the description
-        # mentions policy keywords; routine steps should not.
         non_summary = [s for s in plan if s.action_type == "schedule_meeting"]
         assert all(
             not needs_retrieval(s.description) or s.retrieval_query is not None
             for s in non_summary
         ), "Only explicitly policy-related steps should have retrieval_query set"
+
+
+class TestTaskDueTimeArguments:
+    @pytest.fixture()
+    def organization_timezone(self, monkeypatch):
+        from app.meeting import scheduling_service
+
+        timezone_ist = timezone(timedelta(hours=5, minutes=30))
+        monkeypatch.setattr(
+            scheduling_service,
+            "get_organization_timezone",
+            lambda: timezone_ist,
+        )
+        return timezone_ist
+
+    def _task_arguments(self, due_time):
+        understanding = AssistantUnderstanding(
+            intent="task_assignment",
+            status="understood",
+            entities=AssistantEntities(
+                people=["Maya Thompson"],
+                task="Write the Q3 report",
+                date=date(2026, 10, 30),
+                time=due_time,
+            ),
+        )
+        step = PlanStep(
+            index=0,
+            description="Create task",
+            action_type="assign_task",
+            tool_name="task.create",
+        )
+        return prepare_tool_arguments(
+            step,
+            understanding,
+            {
+                "directory.lookup_employees": {
+                    "employees": [{"email": "maya@example.com"}],
+                },
+            },
+        )
+
+    def test_task_due_time_uses_explicit_four_pm_local_time(self, organization_timezone):
+        arguments = self._task_arguments(time(16, 0))
+
+        due_at = datetime.fromisoformat(arguments["due_at"])
+        assert due_at.astimezone(organization_timezone).strftime("%I:%M %p") == "04:00 PM"
+
+    def test_task_due_time_defaults_to_five_pm_when_not_specified(
+        self, organization_timezone
+    ):
+        arguments = self._task_arguments(None)
+
+        due_at = datetime.fromisoformat(arguments["due_at"])
+        assert due_at.astimezone(organization_timezone).strftime("%I:%M %p") == "05:00 PM"
 
 
 class TestNeedsRetrieval:
@@ -301,6 +355,46 @@ class TestTokenEstimation:
 
     def test_minimum_is_one(self):
         assert estimate_tokens("") >= 1
+
+
+class TestAssistantDateFormatting:
+    def test_task_and_meeting_summaries_use_organization_local_time(self, monkeypatch):
+        import app.meeting.scheduling_service as scheduling_service
+
+        monkeypatch.setattr(
+            scheduling_service,
+            "get_organization_timezone",
+            lambda: timezone(timedelta(hours=5, minutes=30)),
+        )
+        timestamp = "2026-10-30T11:30:00+00:00"
+        task_result = {
+            "title": "Prepare report",
+            "assignee": {"name": "Bob Lee"},
+            "due_at": timestamp,
+            "task_id": "task-1",
+            "assignment_email_status": "sent",
+        }
+        meeting_result = {
+            "title": "Planning",
+            "start_at": timestamp,
+            "meeting_id": "meeting-1",
+            "invitations_sent": [],
+            "invitation_failures": [],
+        }
+
+        task_summary = summarize_tool_result("task.create", task_result)
+        meeting_summary = summarize_tool_result("meeting.schedule", meeting_result)
+
+        assert "Friday, October 30 at 5:00 PM" in task_summary
+        assert "Friday, October 30 at 5:00 PM" in meeting_summary
+        assert "Task: Prepare report." in task_summary
+        assert "Assignee: Bob Lee." in task_summary
+        assert "Assignment e-mail: sent." in task_summary
+        assert "task-1" not in task_summary
+        assert "Review:" not in task_summary
+        assert "localhost" not in task_summary
+        assert task_result["due_at"] == timestamp
+        assert meeting_result["start_at"] == timestamp
 
 
 class TestLimitGuards:

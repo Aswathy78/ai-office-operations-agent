@@ -145,6 +145,73 @@ describe('Epic 6.1 — AI Assistant Floating Chat Widget', () => {
     })
   })
 
+  it('renders Markdown formatting and bullet lists in assistant messages', async () => {
+    const user = userEvent.setup()
+    const reply = [
+      'The sky looks blue because of **Rayleigh scattering** and *selective light dispersion*.',
+      '',
+      '- Short wavelengths scatter more',
+      '- Blue light reaches our eyes',
+    ].join('\n')
+
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      options.onChunk(reply)
+      options.onComplete?.(reply)
+    })
+
+    renderWidget()
+    await user.click(screen.getByRole('button', { name: /open ai assistant/i }))
+    await user.type(
+      screen.getByRole('textbox', { name: /message ai assistant/i }),
+      'Why is the sky blue?',
+    )
+    await user.click(screen.getByRole('button', { name: /send message/i }))
+
+    const bold = await screen.findByText('Rayleigh scattering')
+    expect(bold.tagName).toBe('STRONG')
+    expect(screen.getByText('selective light dispersion').tagName).toBe('EM')
+    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    expect(screen.getByText('Short wavelengths scatter more')).toBeInTheDocument()
+    expect(screen.getByText('Blue light reaches our eyes')).toBeInTheDocument()
+    expect(screen.queryByText(/\*\*Rayleigh scattering\*\*/)).not.toBeInTheDocument()
+  })
+
+  it('renders Markdown tables and line breaks without enabling raw HTML', async () => {
+    const user = userEvent.setup()
+    const reply = [
+      '| Item | Status |',
+      '| --- | --- |',
+      '| Task | Complete |',
+      '',
+      'First line<br>Second line',
+    ].join('\n')
+
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      options.onChunk(reply)
+      options.onComplete?.(reply)
+    })
+
+    renderWidget()
+    await user.click(screen.getByRole('button', { name: /open ai assistant/i }))
+    await user.type(
+      screen.getByRole('textbox', { name: /message ai assistant/i }),
+      'Show results',
+    )
+    await user.click(screen.getByRole('button', { name: /send message/i }))
+
+    const table = await screen.findByRole('table')
+    expect(table.querySelectorAll('th')).toHaveLength(2)
+    expect(table.querySelector('td')).toHaveTextContent('Task')
+    expect(table.querySelectorAll('tr')).toHaveLength(2)
+
+    const assistantMessage = screen.getAllByTestId('assistant-message-assistant').at(-1)
+    const messageText = assistantMessage?.querySelector('.assistant-msg-text')
+    expect(messageText).toHaveTextContent('First line')
+    expect(messageText).toHaveTextContent('Second line')
+    expect(messageText?.querySelector('br')).toBeInTheDocument()
+    expect(screen.queryByText('<br>')).not.toBeInTheDocument()
+  })
+
   it('reuses and persists the backend conversation ID for clarification replies', async () => {
     const user = userEvent.setup()
     const conversationIds: Array<string | null | undefined> = []
@@ -407,9 +474,8 @@ describe('Epic 6.1 — AI Assistant Floating Chat Widget', () => {
     await user.click(screen.getByRole('button', { name: /send message/i }))
 
     await waitFor(() => {
-      expect(
-        screen.getByText(/partial text before disconnection\s+\[stream interrupted: connection reset by peer\]/i),
-      ).toBeInTheDocument()
+      expect(screen.getByText('Partial text before disconnection')).toBeInTheDocument()
+      expect(screen.getByText('[Stream interrupted: Connection reset by peer]')).toBeInTheDocument()
     })
   })
 })

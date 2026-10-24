@@ -1863,7 +1863,7 @@ class AssistantAuditEvent(Base):
     tool_name: Mapped[str] = mapped_column(String(80), nullable=False)
     # permission_denied, conflict_blocked, invalid_arguments, auto_approved,
     # approval_requested, approved, rejected, cancelled, expired, executed,
-    # execution_failed, replayed
+    # execution_failed, replayed, verification_succeeded, verification_escalated
     event: Mapped[str] = mapped_column(String(40), nullable=False)
     risk_level: Mapped[str | None] = mapped_column(String(10), nullable=True)
     approval_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
