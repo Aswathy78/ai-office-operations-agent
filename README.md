@@ -2793,6 +2793,28 @@ Now:
 - The worker survives claim and database errors, and re-queues transcripts stuck in "processing" for more than `TRANSCRIPTION_STALE_MINUTES` (default 30).
 - The transcript panel keeps the last transcript on a failed poll and keeps retrying, including while the transcript does not exist yet because the upload is still finishing.
 
+## Document Indexing and Semantic Search
+
+The AI Office Operations Agent supports document ingestion, indexing, and semantic search through the Company Files interface.
+
+### Features
+
+* **Document extraction:** Extracts text from supported documents for indexing and retrieval.
+* **Heading-aware chunking:** Splits extracted content into meaningful chunks while preserving heading context, targeting 500–800 tokens with approximately 100-token overlap where feasible.
+* **Metadata management:** Associates chunks with source document, document version, department, and access-control metadata.
+* **Embedding generation:** Generates and persists embeddings for semantic retrieval.
+* **Asynchronous indexing:** Processes documents asynchronously and tracks indexing status.
+* **Indexing status:** Displays document processing and indexing states, including successful and failed processing.
+* **Semantic search:** Retrieves relevant passages from indexed documents based on the meaning of a user's query.
+* **Access control:** Applies document permissions when retrieving content.
+
+### Verification
+
+The Story 7.2 implementation was verified with automated tests covering document chunking, metadata persistence, indexing, processing status, and search.
+
+Semantic search was also tested through the Company Files interface using the HR Operations Knowledge Handbook.
+
+
 # 📌 Current Project Status
 
 ### Epic 1 — Meeting Management[README_updated.md](https://github.com/user-attachments/files/33364215/README_updated.md)
