@@ -20,6 +20,7 @@ DEVELOPMENT_EMPLOYEES = [
     {"name": "Chloe Nguyen", "email": "chloe.nguyen@northstar.example", "team": "Operations"},
     {"name": "Ethan Walker", "email": "ethan.walker@northstar.example", "team": "Operations"},
     {"name": "Rahul", "email": "rahulexample.test@gmail.com", "team": "Engineering"},
+    {"name": "Amal", "email": "amaldev980ads@gmail.com", "team": "Engineering"},
 ]
 
 # Line manager (by e-mail) for each team; receives reminder escalations (Story 4.4).

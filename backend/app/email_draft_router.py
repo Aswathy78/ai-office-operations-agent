@@ -2,6 +2,7 @@
 with the delivery lifecycle Draft / Approval / Queued / Sending / Sent / Failed / Retry
 (Story 4.4 / FR-22)."""
 
+import re
 from typing import Callable, Literal
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
@@ -21,6 +22,7 @@ from app.email_draft_service import (
     create_draft_from_chat,
     decide_draft,
     discard_draft,
+    extract_topic,
     get_draft,
     list_approval_queue,
     list_delivery_issues,
@@ -47,6 +49,13 @@ from app.meeting.schemas import TaskActorRole
 from app.time_utils import UtcDateTime
 
 router = APIRouter(prefix="/api/v1/email-drafts", tags=["E-mail drafts"])
+
+_EMAIL_DOCUMENT_CONTEXT_INTENT = re.compile(
+    r"\b(?:handbook|policies?|SOPs?|company documents?|uploaded documents?|"
+    r"according to|based on|casual leave|maternity leave|paternity leave|"
+    r"working hours|core hours|leave entitlement|HR benefits)\b",
+    re.IGNORECASE,
+)
 
 
 class EmailRecipient(BaseModel):
@@ -241,12 +250,50 @@ def create_email_draft(
     db: Session = Depends(get_db),
 ):
     """Draft an e-mail from a chat message. Nothing is sent."""
+    retrieved_context = None
+    from app import assistant_planner
+
+    if (
+        assistant_planner.needs_retrieval(payload.prompt)
+        and _EMAIL_DOCUMENT_CONTEXT_INTENT.search(payload.prompt)
+    ):
+        search_query = extract_topic(payload.prompt)
+        if re.search(r"\bcore\s+hours?\b", search_query, re.IGNORECASE):
+            search_query = (
+                "employee working hours "
+                + re.sub(
+                    r"\b(?:the\s+)?company['’]s\s*",
+                    "",
+                    search_query,
+                    flags=re.IGNORECASE,
+                )
+            )
+        results = assistant_planner.retrieve_semantic_document_context(
+            db,
+            actor_id=actor.id,
+            query=search_query,
+        )
+        retrieved_context = "\n\n".join(
+            f"[{item['source']}]\n{item['snippet']}"
+            for item in results
+            if item.get("snippet")
+        )
+        if not retrieved_context:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    "I couldn't find relevant information in the indexed company documents, "
+                    "so I didn't create a draft with unverified company details."
+                ),
+            )
+
     return _run(lambda: create_draft_from_chat(
         db, actor,
         prompt=payload.prompt,
         sender_name=payload.sender_name,
         sender_email=payload.sender_email,
         mode=payload.mode,
+        retrieved_context=retrieved_context,
     ))
 
 

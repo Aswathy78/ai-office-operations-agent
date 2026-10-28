@@ -392,7 +392,11 @@ def scan_sensitive(subject: str, body: str) -> list[dict]:
 # Drafting: templates and LLM
 # ---------------------------------------------------------------------------
 
-TOPIC_PATTERN = re.compile(r"\b(?:about|regarding|re:|on the topic of)\s+(.+)", re.IGNORECASE)
+TOPIC_PATTERN = re.compile(
+    r"\b(?:about|regarding|re:|on the topic of|explaining|describing)\s+(.+?)"
+    r"(?:\s+(?:according to|based on)\b.*)?$",
+    re.IGNORECASE,
+)
 
 # Each template: (key, trigger pattern, subject, body). Bodies use {greeting},
 # {topic} and {sender}; bracketed text is a placeholder the employee fills in.
@@ -487,6 +491,44 @@ def _render_template(subject: str, body: str, *, topic: str, greeting: str, send
     return rendered_subject[:1].upper() + rendered_subject[1:], body.format(**values)
 
 
+def finalize_draft_body(
+    body: str,
+    *,
+    sender: str,
+    retrieved_context: str | None,
+    recipient_names: list[str] | None = None,
+) -> str:
+    signature = re.search(
+        r"(?im)\n(?:best regards|kind regards|warm regards|regards|sincerely|"
+        r"best|thanks|thank you),?\s*\n[^\n]*\s*$",
+        body,
+    )
+    message = body[:signature.start()].rstrip() if signature else body.rstrip()
+    known_recipients = {
+        name.strip().casefold()
+        for recipient in recipient_names or []
+        if (name := recipient.strip())
+    }
+    known_recipients.update({name.split()[0] for name in known_recipients if name})
+    lines = message.splitlines()
+    while lines and lines[-1].strip().casefold() in known_recipients:
+        lines.pop()
+        while lines and lines[-1].strip().casefold() in {
+            "best regards,", "kind regards,", "warm regards,", "regards,",
+            "sincerely,", "best,", "thanks,", "thank you,",
+        }:
+            lines.pop()
+    message = "\n".join(lines).rstrip()
+    context = (retrieved_context or "").strip()
+    if context:
+        placeholder = "[Add the details you want to share here.]"
+        if placeholder in message:
+            message = message.replace(placeholder, context)
+        elif context.casefold() not in message.casefold():
+            message += f"\n\nRelevant information from company documents:\n{context}"
+    return f"{message}\n\nBest regards,\n{sender}"[:MAX_BODY_LENGTH]
+
+
 def generate_with_llm(prompt: str, *, sender: str, greeting: str) -> tuple[str, str]:
     """Ask the configured LLM for ``(subject, body)``. Raises on any failure."""
     api_key = os.environ.get("GROQ_API_KEY")
@@ -513,7 +555,9 @@ def generate_with_llm(prompt: str, *, sender: str, greeting: str) -> tuple[str, 
                     "plain text: start with greeting_line exactly as given, then the "
                     "message, then a sign-off with the sender's name. Do not add "
                     "deadlines, meeting times or requests the employee did not ask "
-                    "for. Respond with valid JSON "
+                    "for. When retrieved company-document facts are supplied, use "
+                    "them as the only source for company-policy or project claims; "
+                    "do not infer or add unsupported details. Respond with valid JSON "
                     'with exactly two string fields: "subject" and "body".'
                 ),
             },
@@ -547,6 +591,7 @@ def compose_draft(
     sender: str,
     recipients: list[dict],
     groups: list[dict],
+    retrieved_context: str | None = None,
 ) -> dict:
     """Return ``{source, template_key, subject, body, generation_note}``."""
     topic = extract_topic(prompt)
@@ -556,13 +601,35 @@ def compose_draft(
     if template is not None:
         key, _, subject, body = template
         subject, body = _render_template(subject, body, topic=topic, greeting=greeting, sender=sender)
+        body = finalize_draft_body(
+            body,
+            sender=sender,
+            retrieved_context=retrieved_context,
+            recipient_names=[recipient["name"] for recipient in recipients],
+        )
         return {"source": EMAIL_DRAFT_SOURCE_TEMPLATE, "template_key": key,
                 "subject": subject, "body": body, "generation_note": None}
 
     note = None
     if mode != "template":
         try:
-            subject, body = generate_with_llm(prompt, sender=sender, greeting=greeting)
+            generation_prompt = prompt
+            if retrieved_context:
+                generation_prompt += (
+                    "\n\nRetrieved company-document facts to include accurately:\n"
+                    f"{retrieved_context}"
+                )
+            subject, body = generate_with_llm(
+                generation_prompt,
+                sender=sender,
+                greeting=greeting,
+            )
+            body = finalize_draft_body(
+                body,
+                sender=sender,
+                retrieved_context=retrieved_context,
+                recipient_names=[recipient["name"] for recipient in recipients],
+            )
             return {"source": EMAIL_DRAFT_SOURCE_LLM, "template_key": None,
                     "subject": subject, "body": body, "generation_note": None}
         except Exception as exc:  # noqa: BLE001 - any LLM failure falls back to a template
@@ -574,6 +641,12 @@ def compose_draft(
 
     key, subject, body = GENERAL_TEMPLATE
     subject, body = _render_template(subject, body, topic=topic, greeting=greeting, sender=sender)
+    body = finalize_draft_body(
+        body,
+        sender=sender,
+        retrieved_context=retrieved_context,
+        recipient_names=[recipient["name"] for recipient in recipients],
+    )
     return {"source": EMAIL_DRAFT_SOURCE_TEMPLATE, "template_key": key,
             "subject": subject[:MAX_SUBJECT_LENGTH], "body": body, "generation_note": note}
 
@@ -603,6 +676,7 @@ def create_draft_from_chat(
     sender_name: str,
     sender_email: str | None,
     mode: str = "auto",
+    retrieved_context: str | None = None,
 ) -> EmailDraft:
     prompt = prompt.strip()
     if not prompt:
@@ -622,6 +696,7 @@ def create_draft_from_chat(
     content = compose_draft(
         drafting_prompt, mode=mode, sender=sender_name,
         recipients=recipients, groups=resolved_groups,
+        retrieved_context=retrieved_context,
     )
 
     now = _now()
