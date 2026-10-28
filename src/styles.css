@@ -1254,6 +1254,29 @@ button, a { -webkit-tap-highlight-color: transparent; }
   animation: assistant-robot-jump 3.2s ease-in-out infinite;
 }
 
+.assistant-launcher-btn.circular-movable {
+  width: 52px;
+  height: 52px;
+  padding: 0;
+  border-radius: 50%;
+  justify-content: center;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.assistant-launcher-btn.circular-movable:hover {
+  transform: translateY(-2px) scale(1.06);
+}
+
+.assistant-launcher-btn.circular-movable:active,
+.assistant-launcher-btn.circular-movable.is-dragging {
+  cursor: grabbing;
+  animation-play-state: paused;
+  transform: scale(1.12);
+  box-shadow: 0 18px 36px rgba(15, 45, 82, 0.55), 0 0 0 3px rgba(56, 189, 248, 0.5);
+}
+
 .assistant-launcher-btn:hover {
   animation-play-state: paused;
   transform: translateY(-4px) scale(1.03);
@@ -1263,6 +1286,18 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .assistant-launcher-btn:focus-visible {
   outline: 3px solid #60a5fa;
   outline-offset: 3px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }
 
 .assistant-launcher-label {

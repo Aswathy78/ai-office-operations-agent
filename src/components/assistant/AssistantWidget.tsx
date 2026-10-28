@@ -291,6 +291,91 @@ export function AssistantWidget() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Movable / draggable launcher position
+  const [launcherPos, setLauncherPos] = useState<{ x: number; y: number } | null>(() => {
+    try {
+      const saved = localStorage.getItem('ai-assistant-pos')
+      if (saved) return JSON.parse(saved)
+    } catch {
+      // fallback
+    }
+    return null
+  })
+
+  const [isDragging, setIsDragging] = useState(false)
+  const dragRef = useRef<{
+    startX: number
+    startY: number
+    initX: number
+    initY: number
+    hasMoved: boolean
+  } | null>(null)
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (e.button !== 0) return
+    const btn = e.currentTarget
+    const rect = btn.getBoundingClientRect()
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      initX: rect.left,
+      initY: rect.top,
+      hasMoved: false,
+    }
+    try {
+      btn.setPointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+  }
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!dragRef.current) return
+    const dx = e.clientX - dragRef.current.startX
+    const dy = e.clientY - dragRef.current.startY
+
+    if (!dragRef.current.hasMoved && Math.hypot(dx, dy) > 4) {
+      dragRef.current.hasMoved = true
+      setIsDragging(true)
+    }
+
+    if (dragRef.current.hasMoved) {
+      const btnSize = 54
+      const margin = 8
+      const maxX = Math.max(margin, window.innerWidth - btnSize - margin)
+      const maxY = Math.max(margin, window.innerHeight - btnSize - margin)
+      const nextX = Math.min(maxX, Math.max(margin, dragRef.current.initX + dx))
+      const nextY = Math.min(maxY, Math.max(margin, dragRef.current.initY + dy))
+      setLauncherPos({ x: nextX, y: nextY })
+    }
+  }
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLButtonElement>) => {
+    if (!dragRef.current) return
+    const wasDragging = dragRef.current.hasMoved
+    const btn = e.currentTarget
+    try {
+      btn.releasePointerCapture(e.pointerId)
+    } catch {
+      // ignore
+    }
+
+    dragRef.current = null
+    setIsDragging(false)
+
+    if (wasDragging) {
+      if (launcherPos) {
+        try {
+          localStorage.setItem('ai-assistant-pos', JSON.stringify(launcherPos))
+        } catch {
+          // ignore
+        }
+      }
+    } else {
+      openWidget()
+    }
+  }
+
   // Auto-scroll to bottom of conversation
   useEffect(() => {
     if (isOpen && !isMinimized) {
@@ -514,19 +599,45 @@ export function AssistantWidget() {
 
       {/* Floating Robot Launcher Button */}
       {(!isOpen || isMinimized) && (
-        <div className="assistant-launcher-wrapper">
+        <div
+          className="assistant-launcher-wrapper"
+          style={
+            launcherPos
+              ? {
+                  position: 'fixed',
+                  left: `${launcherPos.x}px`,
+                  top: `${launcherPos.y}px`,
+                  right: 'auto',
+                  bottom: 'auto',
+                  zIndex: 1000,
+                }
+              : undefined
+          }
+        >
           <button
             type="button"
-            className="assistant-launcher-btn"
-            onClick={openWidget}
+            className={`assistant-launcher-btn circular-movable ${isDragging ? 'is-dragging' : ''}`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={() => {
+              dragRef.current = null
+              setIsDragging(false)
+            }}
+            onClick={() => {
+              if (!isDragging && (!dragRef.current || !dragRef.current.hasMoved)) {
+                openWidget()
+              }
+            }}
             aria-label="Open AI Assistant"
             aria-expanded={isOpen && !isMinimized}
             aria-haspopup="dialog"
             data-testid="assistant-launcher-btn"
+            title="AI Assistant (Drag to reposition, click to open)"
           >
             <span className="assistant-robot-shadow" aria-hidden="true" />
-            <RobotMascot size={42} />
-            <span className="assistant-launcher-label">AI Assistant</span>
+            <RobotMascot size={32} />
+            <span className="assistant-launcher-label sr-only">AI Assistant</span>
           </button>
         </div>
       )}

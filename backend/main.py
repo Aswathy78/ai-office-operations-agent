@@ -14,10 +14,12 @@ from app.assistant_approvals_router import router as assistant_approvals_router
 from app.assistant_router import router as assistant_router
 from app.assistant_tools_router import router as assistant_tools_router
 from app.auth_router import router as auth_router
+from app.documents.router import router as documents_router
 from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
 from app.task_router import router as task_router
 from app.email_dispatcher import start_email_dispatcher, stop_email_dispatcher
+from app.documents.processor import start_document_processor, stop_document_processor
 from app.task_calendar_scheduler import (
     start_task_calendar_scheduler,
     stop_task_calendar_scheduler,
@@ -73,6 +75,7 @@ app.include_router(auth_router)
 app.include_router(assistant_router)
 app.include_router(assistant_tools_router)
 app.include_router(assistant_approvals_router)
+app.include_router(documents_router)
 
 
 @app.on_event("startup")
@@ -93,14 +96,17 @@ def startup():
     try:
         from app.db.database import SessionLocal
         from app.db.seed_employees import seed_development_employees
+        from app.db.seed_documents import seed_company_documents
         with SessionLocal() as db:
             seed_development_employees(db)
-    except Exception:
-        pass
+            seed_company_documents(db)
+    except Exception as seed_err:
+        logging.getLogger(__name__).warning("Database seeding skipped or failed: %s", seed_err)
     start_task_reminder_scheduler()
     start_email_dispatcher()
     start_task_calendar_scheduler()
     start_transcription_worker()
+    start_document_processor()
 
 
 @app.on_event("shutdown")
@@ -109,6 +115,7 @@ def shutdown():
     stop_email_dispatcher()
     stop_task_calendar_scheduler()
     stop_transcription_worker()
+    stop_document_processor()
 
 
 @app.get("/")

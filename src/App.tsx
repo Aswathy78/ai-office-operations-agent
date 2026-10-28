@@ -17,6 +17,7 @@ import { MeetingsPage } from './pages/MeetingsPage'
 import { PlaceholderPage } from './pages/PlaceholderPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { ChatPage } from './pages/ChatPage'
+import { DocumentsPage } from './pages/DocumentsPage'
 import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
@@ -66,7 +67,7 @@ function AppRoutes() {
       <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><TaskWorkspacePage view="mine" /></ProtectedAppPage>} />
       <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
       <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
-      <Route path="/documents" element={<ProtectedAppPage path="/documents"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/documents" element={<ProtectedAppPage path="/documents"><DocumentsPage /></ProtectedAppPage>} />
       <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><ApprovalsPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />

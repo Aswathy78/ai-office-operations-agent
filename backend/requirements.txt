@@ -20,6 +20,20 @@ groq>=0.11.0
 # English speech-to-text worker (Whisper small on CUDA).
 faster-whisper==1.2.1
 
+# Story 7.1 / FR-37: Document upload, text extraction, and OCR.
+# Tesseract OCR binary must be installed separately:
+#   Windows: choco install tesseract   (or UB Mannheim installer)
+#   Linux:   apt install tesseract-ocr
+#   macOS:   brew install tesseract
+# Set TESSERACT_CMD env var if Tesseract is not on PATH.
+pypdf>=4.0
+python-docx>=1.1
+python-pptx>=1.0
+openpyxl>=3.1
+Pillow>=10.0
+pytesseract>=0.3.13
+filetype>=1.2
+
 # Dependencies used by the backend test suite.
 pytest==9.1.1
 httpx==0.28.1

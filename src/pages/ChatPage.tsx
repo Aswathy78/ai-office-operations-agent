@@ -50,6 +50,24 @@ export function isMeetingSchedulingIntent(prompt: string): boolean {
   return false
 }
 
+import { streamAssistantChat } from '../api/assistant'
+
+export function isKnowledgeOrQuestionIntent(prompt: string): boolean {
+  const p = prompt.trim()
+  if (!p) return false
+  if (/^(email|send\s+(an?\s+)?email|draft\s+(an?\s+)?email|write\s+(an?\s+)?email|notify\b|inform\b|let\s+(the|our)\b)/i.test(p)) {
+    return false
+  }
+  if (p.endsWith('?')) return true
+  if (/^(how|what|who|when|where|why|which|can|could|is|are|does|do|tell|explain|show|describe)\b/i.test(p)) {
+    return true
+  }
+  if (/\b(policy|policies|leave|leaves|holiday|holidays|attendance|probation|notice|expense|expenses|travel|allowance|reimbursement|procurement|laptop|asset|it access|sla|handbook|rules?|guidelines?|wfh|work from home|maternity|paternity|casual leave|sick leave|earned leave|document|ocr)\b/i.test(p)) {
+    return true
+  }
+  return false
+}
+
 type ChatMessage =
   | { id: string; role: 'user'; text: string }
   | {
@@ -59,14 +77,17 @@ type ChatMessage =
       draftId?: string
       meetingResult?: ScheduleResult
       meetingPrompt?: string
+      retrievalSource?: string
       tone?: 'error' | 'warning'
     }
 
 const SUGGESTIONS = [
   "Move tomorrow's meeting to 3 PM",
+  'How many casual leaves do I get per year?',
   'Schedule a project meeting tomorrow at 10 AM with the development team',
+  'Who approves expense claims above INR 50,000?',
   "Email the development team a reminder about tomorrow's sprint demo at 10am",
-  'Email Ava about the deadline for the Q3 report on Friday',
+  'What is the notice period during probation?',
 ]
 
 let messageCounter = 0
@@ -258,6 +279,74 @@ export function ChatPage() {
       return
     }
 
+    if (isKnowledgeOrQuestionIntent(prompt)) {
+      lastClarificationPromptRef.current = null
+      const assistantMsgId = nextId()
+      setMessages((current) => [
+        ...current,
+        { id: assistantMsgId, role: 'assistant', text: '' },
+      ])
+
+      let accumulated = ''
+      let retrievalSource: string | undefined = undefined
+
+      try {
+        await streamAssistantChat({
+          message: prompt,
+          onRetrieval: (event) => {
+            retrievalSource = (event as any).source || 'Company Files'
+          },
+          onChunk: (chunk) => {
+            accumulated += chunk
+            setMessages((current) =>
+              current.map((msg) =>
+                msg.id === assistantMsgId
+                  ? { ...msg, text: accumulated, retrievalSource }
+                  : msg,
+              ),
+            )
+          },
+          onComplete: (full) => {
+            setMessages((current) =>
+              current.map((msg) =>
+                msg.id === assistantMsgId
+                  ? { ...msg, text: full || accumulated, retrievalSource }
+                  : msg,
+              ),
+            )
+          },
+          onError: (err) => {
+            setMessages((current) =>
+              current.map((msg) =>
+                msg.id === assistantMsgId
+                  ? {
+                      ...msg,
+                      text: `Failed to retrieve answer: ${err.message}`,
+                      tone: 'error',
+                    }
+                  : msg,
+              ),
+            )
+          },
+        })
+      } catch (err) {
+        setMessages((current) =>
+          current.map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  text: `Failed to answer inquiry: ${err instanceof Error ? err.message : 'unknown error'}`,
+                  tone: 'error',
+                }
+              : msg,
+          ),
+        )
+      } finally {
+        setPending(false)
+      }
+      return
+    }
+
     lastClarificationPromptRef.current = null
     try {
       const draft = await createEmailDraft(prompt, { name: user.name, email: user.email }, actor)
@@ -350,7 +439,12 @@ export function ChatPage() {
                   <span className="chat-avatar" aria-hidden="true"><Bot size={16} /></span>
                 )}
                 <div className="chat-bubble">
-                  <p>{message.text}</p>
+                  {message.role === 'assistant' && message.retrievalSource && (
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '11px', background: '#eef4ff', color: '#1a56db', padding: '3px 8px', borderRadius: '4px', marginBottom: '8px', fontWeight: 600 }}>
+                      📄 Verified from {message.retrievalSource}
+                    </div>
+                  )}
+                  <p style={{ whiteSpace: 'pre-wrap' }}>{message.text}</p>
                   {draft && (
                     <EmailDraftPreview draft={draft} actor={actor} groups={groups} onChange={storeDraft} />
                   )}

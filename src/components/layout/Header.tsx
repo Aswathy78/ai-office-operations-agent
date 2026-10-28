@@ -9,7 +9,7 @@ const titles: Record<string, string> = {
   '/chat': 'Corporate Chatbox',
   '/tasks': 'My Tasks',
   '/calendar': 'Calendar',
-  '/dashboard': 'Dashboard',
+  '/dashboard': 'Task Dashboard',
   '/documents': 'Knowledge',
   '/approvals': 'Approvals',
   '/admin/users': 'Users',

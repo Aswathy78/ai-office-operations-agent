@@ -140,13 +140,13 @@ export const ASSISTANT_QUICK_ACTIONS: QuickAction[] = [
   {
     id: 'schedule-meeting',
     label: 'Schedule a meeting',
-    prompt: 'Schedule a meeting with the development team tomorrow at 10 AM',
+    prompt: 'I want to schedule a meeting',
     description: 'Book a new calendar slot with team members',
   },
   {
     id: 'create-task',
     label: 'Create a task',
-    prompt: 'Create a task: Review sprint demo deliverables by Friday',
+    prompt: 'I want to create a task',
     description: 'Add a new action item to the task list',
   },
   {
