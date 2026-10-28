@@ -88,7 +88,7 @@ def _ocr_image_bytes(image_bytes: bytes, *, hint: str = "image") -> str:
 
 
 def extract_pdf(data: bytes) -> ExtractionResult:
-    """Extract text from a PDF.  Falls back to per-page OCR for scanned PDFs."""
+    """Extract PDF text and OCR embedded images on pages with little text."""
     try:
         import pypdf
     except ImportError as exc:
@@ -109,15 +109,15 @@ def extract_pdf(data: bytes) -> ExtractionResult:
     for i, page in enumerate(reader.pages, start=1):
         try:
             raw = page.extract_text() or ""
-        except Exception:
+        except Exception as exc:
+            logger.warning("Text extraction failed for PDF page %d: %s", i, exc)
             raw = ""
 
-        if len(raw.strip()) >= _PDF_MIN_CHARS:
-            pages_text.append(f"[Page {i}]\n{raw.strip()}")
-        else:
-            # Scanned page — attempt OCR via rasterization.
+        page_parts = [raw.strip()] if raw.strip() else []
+        page_ocr_used = False
+        if len(raw.strip()) < _PDF_MIN_CHARS:
+            # OCR embedded images; full-page PDF rasterization is not supported.
             try:
-                import pypdf.generic
                 # Extract images embedded in the page for OCR.
                 ocr_fragments: list[str] = []
                 if hasattr(page, "images") and page.images:
@@ -130,12 +130,16 @@ def extract_pdf(data: bytes) -> ExtractionResult:
                             logger.warning("OCR failed for PDF page %d image: %s", i, e)
                 if ocr_fragments:
                     ocr_used = True
-                    pages_text.append(f"[Page {i} — OCR]\n" + "\n".join(ocr_fragments))
-                else:
+                    page_ocr_used = True
+                    page_parts.extend(ocr_fragments)
+                elif not page_parts:
                     # Page has no embedded images either — treat as blank.
                     logger.debug("PDF page %d has no usable text or images.", i)
             except Exception as exc:
                 logger.warning("Could not attempt OCR for PDF page %d: %s", i, exc)
+        if page_parts:
+            page_label = f"[Page {i} — OCR]" if page_ocr_used else f"[Page {i}]"
+            pages_text.append(f"{page_label}\n" + "\n".join(page_parts))
 
     full_text = "\n\n".join(pages_text)
     if not full_text.strip():
@@ -159,7 +163,27 @@ def extract_docx(data: bytes) -> ExtractionResult:
     except Exception as exc:
         raise ExtractionError(f"Could not open DOCX: {exc}") from exc
 
-    paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+    paragraphs: list[str] = []
+    for block in doc.iter_inner_content():
+        if hasattr(block, "text"):
+            content = block.text.strip()
+            if not content:
+                continue
+            style_name = block.style.name if block.style else ""
+            if style_name.startswith("Heading"):
+                try:
+                    level = int(style_name.rsplit(" ", 1)[-1])
+                except ValueError:
+                    level = 1
+                content = f"{'#' * min(max(level, 1), 6)} {content}"
+            elif style_name.startswith(("List Bullet", "List Number")):
+                content = f"• {content}"
+            paragraphs.append(content)
+        else:
+            for row in block.rows:
+                cells = [cell.text.strip().replace("\n", " / ") for cell in row.cells]
+                if any(cells):
+                    paragraphs.append(" | ".join(cells))
     if not paragraphs:
         raise ExtractionError("DOCX contains no readable text.")
 
@@ -183,14 +207,39 @@ def extract_pptx(data: bytes) -> ExtractionResult:
         raise ExtractionError("PPTX contains no slides.")
 
     slides_text: list[str] = []
+    def slide_shapes(shapes):
+        for shape in shapes:
+            if hasattr(shape, "shapes"):
+                yield from slide_shapes(shape.shapes)
+            else:
+                yield shape
+
     for i, slide in enumerate(prs.slides, start=1):
         texts: list[str] = []
-        for shape in slide.shapes:
+        has_title = False
+        for shape in slide_shapes(slide.shapes):
             if shape.has_text_frame:
                 for para in shape.text_frame.paragraphs:
                     line = "".join(run.text for run in para.runs).strip()
                     if line:
+                        ppr = para._p.pPr
+                        paragraph_properties = ppr.xml if ppr is not None else ""
+                        is_bullet = (
+                            para.level > 0
+                            or "<a:buChar" in paragraph_properties
+                            or "<a:buAutoNum" in paragraph_properties
+                        )
+                        if is_bullet:
+                            line = f"• {line}"
+                        elif not has_title:
+                            line = f"# {line}"
+                            has_title = True
                         texts.append(line)
+            elif shape.has_table:
+                for row in shape.table.rows:
+                    cells = [cell.text.strip().replace("\n", " / ") for cell in row.cells]
+                    if any(cells):
+                        texts.append(" | ".join(cells))
         if texts:
             slides_text.append(f"[Slide {i}]\n" + "\n".join(texts))
 

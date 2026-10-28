@@ -32,20 +32,25 @@ from sqlalchemy.orm import Session
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
-from app.documents.models import DOC_STATUS_READY, Document
+from app.documents.models import Document
 from app.documents.schemas import (
     DocumentACLEntryResponse,
     DocumentListResponse,
     DocumentResponse,
     DocumentUploadResponse,
+    SemanticSearchResultResponse,
+    SemanticSearchResponse,
 )
+from app.documents.indexing import search_documents
 from app.documents.service import (
     DocumentAccessDenied,
     DocumentValidationError,
     check_document_access,
     create_document,
     list_accessible_documents,
+    queue_document_reindex,
     remove_document,
+    retry_document_index,
     reset_documents,
     update_document_file,
 )
@@ -83,6 +88,9 @@ def _doc_response(doc: Document) -> DocumentResponse:
         owner_id=doc.owner_id,
         status=doc.status,
         failure_reason=doc.failure_reason,
+        indexing_status=doc.indexing_status,
+        indexing_failure_reason=doc.indexing_failure_reason,
+        version=doc.version,
         page_count=doc.page_count,
         processing_started_at=doc.processing_started_at,
         processing_completed_at=doc.processing_completed_at,
@@ -255,6 +263,99 @@ def list_documents(
         documents=[_doc_response(d) for d in docs],
         total=len(docs),
     )
+
+
+@router.get(
+    "/search",
+    response_model=SemanticSearchResponse,
+    summary="Search accessible document content by meaning",
+)
+def semantic_search(
+    q: str = Query(..., min_length=1, max_length=1000),
+    limit: int = Query(10, ge=1, le=50),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+) -> SemanticSearchResponse:
+    _require_manager_or_hr(principal)
+    results = search_documents(
+        db,
+        actor_id=principal.user_id,
+        query=q,
+        limit=limit,
+    )
+    return SemanticSearchResponse(
+        results=[
+            SemanticSearchResultResponse.model_validate(result)
+            for result in results
+        ]
+    )
+
+
+@router.post(
+    "/{document_id}/index",
+    response_model=DocumentResponse,
+    summary="Retry semantic indexing for a failed document",
+)
+def retry_indexing(
+    document_id: str,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+) -> DocumentResponse:
+    _require_manager_or_hr(principal)
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+    try:
+        check_document_access(db, doc, principal.user_id)
+    except DocumentAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+    if not retry_document_index(db, doc):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only extracted documents with failed indexing can be retried.",
+        )
+    return _doc_response(doc)
+
+
+@router.post(
+    "/{document_id}/reindex",
+    response_model=DocumentResponse,
+    summary="Queue a safe same-version document reindex",
+)
+def reindex_document(
+    document_id: str,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+) -> DocumentResponse:
+    _require_manager_or_hr(principal)
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        )
+    try:
+        check_document_access(db, doc, principal.user_id)
+    except DocumentAccessDenied as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        )
+    if not queue_document_reindex(db, doc):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Only indexed or failed documents with extracted text can be "
+                "reindexed; an indexing job may already be queued or running."
+            ),
+        )
+    return _doc_response(doc)
 
 
 @router.get(

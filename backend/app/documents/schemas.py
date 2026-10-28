@@ -24,6 +24,9 @@ class DocumentResponse(BaseModel):
     owner_id: str
     status: str
     failure_reason: str | None = None
+    indexing_status: str
+    indexing_failure_reason: str | None = None
+    version: int
     page_count: int | None = None
     processing_started_at: datetime | None = None
     processing_completed_at: datetime | None = None
@@ -43,3 +46,18 @@ class DocumentUploadResponse(BaseModel):
     document: DocumentResponse
     warnings: list[str] = Field(default_factory=list)
     message: str = "Document uploaded successfully and queued for processing."
+
+
+class SemanticSearchResultResponse(BaseModel):
+    document_id: str
+    filename: str
+    heading: str | None
+    content: str
+    score: float
+    document_version: int
+
+    model_config = {"from_attributes": True}
+
+
+class SemanticSearchResponse(BaseModel):
+    results: list[SemanticSearchResultResponse]

@@ -17,12 +17,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import filetype
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.documents.models import (
     ALLOWED_EXTENSIONS,
+    DOC_STATUS_READY,
     DOC_STATUS_UPLOADED,
+    INDEX_STATUS_FAILED,
+    INDEX_STATUS_PENDING,
+    INDEX_STATUS_READY,
+    DocumentChunk,
     Document,
     DocumentACLEntry,
 )
@@ -214,21 +219,29 @@ def check_document_access(
     - The actor is the document owner, OR
     - The actor has an ACLentry on the document.
     """
-    if document.owner_id == actor_id:
-        return
-
-    entry = (
-        db.query(DocumentACLEntry)
+    has_access = (
+        db.query(Document.id)
         .filter(
-            DocumentACLEntry.document_id == document.id,
-            DocumentACLEntry.employee_id == actor_id,
+            Document.id == document.id,
+            _document_access_filter(actor_id),
         )
         .first()
     )
-    if entry is None:
+    if has_access is None:
         raise DocumentAccessDenied(
             "You do not have permission to access this document."
         )
+
+
+def _document_access_filter(actor_id: str):
+    """Shared SQL rule: only document owners and explicit ACL members have access."""
+    acl_document_ids = select(DocumentACLEntry.document_id).where(
+        DocumentACLEntry.employee_id == actor_id
+    )
+    return or_(
+        Document.owner_id == actor_id,
+        Document.id.in_(acl_document_ids),
+    )
 
 
 def list_accessible_documents(
@@ -239,17 +252,9 @@ def list_accessible_documents(
     offset: int = 0,
 ) -> list[Document]:
     """Return all documents the actor owns or has ACL access to."""
-    acl_doc_ids = select(DocumentACLEntry.document_id).where(
-        DocumentACLEntry.employee_id == actor_id
-    )
     return (
         db.query(Document)
-        .filter(
-            or_(
-                Document.owner_id == actor_id,
-                Document.id.in_(acl_doc_ids),
-            )
-        )
+        .filter(_document_access_filter(actor_id))
         .order_by(Document.created_at.desc())
         .offset(offset)
         .limit(limit)
@@ -265,63 +270,124 @@ def update_document_file(
     data: bytes,
     acl_employee_ids: list[str] | None = None,
 ) -> UploadResult:
-    """Replace an existing document's file data, reset status, and re-process text."""
+    """Replace a document and let the background worker re-extract and index it."""
     mime_type = validate_upload(filename, data)
 
-    # Delete previous file from disk
-    delete_document_file(document.stored_filename)
-
+    previous_filename = document.stored_filename
     new_stored_filename = generate_stored_filename(filename)
     write_document_file(new_stored_filename, data)
 
-    document.original_filename = filename
-    document.stored_filename = new_stored_filename
-    document.file_size = len(data)
-    document.mime_type = mime_type
-    document.status = DOC_STATUS_UPLOADED
-    document.failure_reason = None
-    document.extracted_text = None
-    document.page_count = None
-    document.processing_started_at = None
-    document.processing_completed_at = None
-    document.updated_at = datetime.now(timezone.utc)
-
     warnings: list[str] = []
-    if acl_employee_ids is not None:
-        db.query(DocumentACLEntry).filter(DocumentACLEntry.document_id == document.id).delete()
-        seen: set[str] = set()
-        for emp_id in acl_employee_ids:
-            if emp_id == document.owner_id or emp_id in seen:
-                continue
-            seen.add(emp_id)
-            emp = db.get(Employee, emp_id)
-            if emp is None or not emp.is_active:
-                warnings.append(f"Employee '{emp_id}' was not found or is inactive and was skipped.")
-                continue
-            entry = DocumentACLEntry(
-                id=str(uuid.uuid4()),
-                document_id=document.id,
-                employee_id=emp_id,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(entry)
-
-    db.commit()
-    db.refresh(document)
-
-    # Automatically re-process the updated file immediately so RAG knowledge is refreshed
     try:
-        from app.documents.processor import process_one_document
-        process_one_document(db, document)
-    except Exception as exc:
-        logger.warning("Synchronous re-processing of updated document %s failed: %s", document.id, exc)
+        document.original_filename = filename
+        document.stored_filename = new_stored_filename
+        document.file_size = len(data)
+        document.mime_type = mime_type
+        document.status = DOC_STATUS_UPLOADED
+        document.failure_reason = None
+        document.indexing_status = INDEX_STATUS_PENDING
+        document.indexing_failure_reason = None
+        document.extracted_text = None
+        document.page_count = None
+        document.version += 1
+        document.processing_started_at = None
+        document.processing_completed_at = None
+        document.updated_at = datetime.now(timezone.utc)
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document.id
+        ).delete(synchronize_session=False)
+
+        if acl_employee_ids is not None:
+            db.query(DocumentACLEntry).filter(
+                DocumentACLEntry.document_id == document.id
+            ).delete()
+            seen: set[str] = set()
+            for emp_id in acl_employee_ids:
+                if emp_id == document.owner_id or emp_id in seen:
+                    continue
+                seen.add(emp_id)
+                emp = db.get(Employee, emp_id)
+                if emp is None or not emp.is_active:
+                    warnings.append(
+                        f"Employee '{emp_id}' was not found or is inactive and was skipped."
+                    )
+                    continue
+                db.add(
+                    DocumentACLEntry(
+                        id=str(uuid.uuid4()),
+                        document_id=document.id,
+                        employee_id=emp_id,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
+        db.commit()
+        db.refresh(document)
+    except Exception:
+        db.rollback()
+        delete_document_file(new_stored_filename)
+        raise
+
+    delete_document_file(previous_filename)
 
     return UploadResult(document=document, acl_warnings=warnings)
+
+
+def retry_document_index(db: Session, document: Document) -> bool:
+    """Queue a failed semantic index again without changing extracted source text."""
+    if (
+        document.status != DOC_STATUS_READY
+        or document.indexing_status != INDEX_STATUS_FAILED
+        or not (
+            document.extracted_text and document.extracted_text.strip()
+        )
+    ):
+        return False
+    document.indexing_status = INDEX_STATUS_PENDING
+    document.indexing_failure_reason = None
+    document.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(document)
+    return True
+
+
+def queue_document_reindex(db: Session, document: Document) -> bool:
+    """Queue an already extracted document for a safe same-version rebuild."""
+    if (
+        document.status != DOC_STATUS_READY
+        or not (document.extracted_text and document.extracted_text.strip())
+        or document.indexing_status not in (INDEX_STATUS_READY, INDEX_STATUS_FAILED)
+    ):
+        return False
+
+    now = datetime.now(timezone.utc)
+    result = db.execute(
+        update(Document)
+        .where(
+            Document.id == document.id,
+            Document.version == document.version,
+            Document.status == DOC_STATUS_READY,
+            Document.indexing_status.in_((INDEX_STATUS_READY, INDEX_STATUS_FAILED)),
+        )
+        .values(
+            indexing_status=INDEX_STATUS_PENDING,
+            indexing_failure_reason=None,
+            updated_at=now,
+        )
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return False
+    db.commit()
+    db.refresh(document)
+    return True
 
 
 def remove_document(db: Session, document: Document) -> None:
     """Delete a document record and its stored file from disk."""
     delete_document_file(document.stored_filename)
+    db.query(DocumentChunk).filter(
+        DocumentChunk.document_id == document.id
+    ).delete(synchronize_session=False)
     db.delete(document)
     db.commit()
 
@@ -332,7 +398,9 @@ def reset_documents(db: Session) -> int:
     count = len(docs)
     for doc in docs:
         delete_document_file(doc.stored_filename)
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == doc.id
+        ).delete(synchronize_session=False)
         db.delete(doc)
     db.commit()
     return count
-
