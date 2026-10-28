@@ -1,28 +1,27 @@
-"""Planning, conditional knowledge retrieval, step execution, and checkpointing
-for the AI Office Operations Agent assistant (Story 6.4 — Plan & Retrieve).
+"""Planning, conditional document retrieval, step execution, and checkpointing
+for the AI Office Operations Agent assistant (Stories 6.4 and 7.3).
 
 Terminology
 -----------
 plan        Ordered list of PlanStep objects produced from an AssistantUnderstanding.
-retrieval   Keyword-based search of the company policy knowledge base triggered only
-            when a step description contains policy/rule/procedure language.
+retrieval   Semantic search of indexed company documents for assistant questions;
+            the legacy keyword lookup remains for policy-check plan steps.
 checkpoint  JSON blob stored in AssistantConversation.execution_state that records
             the plan, every completed step's result and token usage, the current step
             index, total token usage so far, and the termination reason when halted.
 
 Design constraints
 ------------------
-* No new external services or vector databases.  Retrieval is plain-text keyword
-  matching against backend/docs/company_policy.md; the interface can be swapped later.
+* No new external services or vector databases. Document retrieval reuses Story 7.2
+  embeddings, vectors, version checks, and ACL-filtered semantic search.
 * No duplicate service implementations.  Step execution delegates exclusively to the
   existing scheduling_service, task_service, and email_draft_service modules.
 * Story 6.5: every actionable step names the tool it runs (``tool_name``).  Tools
   are executed through ``app.assistant_tools.execute_tool`` (schema validation,
   scopes, idempotency, timeout, retries).  Medium/high-risk write steps wait for
   the user's confirmation before they run.
-* Retrieval is ONLY triggered by steps that contain explicit policy-related language.
-  Ordinary greetings, routine scheduling, and general chat never call the retrieval
-  function.
+* Semantic retrieval is limited to document-focused questions and plan steps explicitly
+  marked for retrieval. Greetings and routine scheduling do not trigger document search.
 * Estimated token counts are clearly labelled as estimates (character-heuristic
   len(text) // 4).  Actual provider usage is used when available (Groq/OpenAI
   CompletionUsage).  The two are never conflated.
@@ -35,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time as Time, timedelta, timezone
 from pathlib import Path
@@ -58,7 +58,7 @@ MAX_PLAN_STEPS: int = int(os.environ.get("ASSISTANT_MAX_STEPS", "12"))
 COST_CAP_TOKENS: int = int(os.environ.get("ASSISTANT_COST_CAP_TOKENS", "4000"))
 
 # ---------------------------------------------------------------------------
-# Knowledge-base retrieval (keyword-matching, no vector DB)
+# Assistant knowledge retrieval
 # ---------------------------------------------------------------------------
 
 _KNOWLEDGE_BASE_PATH = (
@@ -118,17 +118,64 @@ _RETRIEVAL_KEYWORDS = frozenset({
 })
 
 _MAX_RETRIEVAL_SNIPPET_CHARS = 600  # keep token usage predictable
+DOCUMENT_SEARCH_RETRIEVAL_LIMIT = 8
+DOCUMENT_SEARCH_CONTEXT_LIMIT = 4
+_DOCUMENT_QUERY_TERMS = re.compile(
+    r"\b(?:casual|maternity|time\s+off|working\s+hours|core\s+hours?|human\s+resources|"
+    r"entitlements?|benefits?)\b",
+    re.IGNORECASE,
+)
 
 
 def needs_retrieval(step_description: str) -> bool:
-    """Return True only when the step description references policy-level concepts.
+    """Return True when the description references company-document concepts.
 
-    This function deliberately returns False for ordinary requests (schedule a
-    meeting, assign a task, draft an email) so the knowledge base is never
-    consulted unnecessarily.
+    Ordinary meeting/task requests do not trigger document search unnecessarily.
     """
     lower = step_description.lower()
-    return any(kw in lower for kw in _RETRIEVAL_KEYWORDS)
+    return any(kw in lower for kw in _RETRIEVAL_KEYWORDS) or bool(
+        re.search(r"\b(?:hr|sops?|projects?)\b", lower)
+        or _DOCUMENT_QUERY_TERMS.search(lower)
+    )
+
+
+def is_document_plan_request(message: str) -> bool:
+    """Identify document-grounded plan requests that belong in the chat flow."""
+    return needs_retrieval(message) and bool(
+        re.search(
+            r"\b(?:create|make|build|draft|prepare|develop)\b.{0,80}\bplan\b",
+            message,
+            re.IGNORECASE,
+        )
+    )
+
+
+def retrieve_semantic_document_context(
+    db: Session,
+    *,
+    actor_id: str,
+    query: str,
+) -> list[dict]:
+    """Retrieve eight ACL-eligible semantic matches and pass only the best four."""
+    from app.documents.indexing import search_documents
+
+    retrieved = search_documents(
+        db,
+        actor_id=actor_id,
+        query=query,
+        limit=DOCUMENT_SEARCH_RETRIEVAL_LIMIT,
+    )
+    return [
+        {
+            "source": result.filename,
+            "snippet": result.content,
+            "score": result.score,
+            "document_id": result.document_id,
+            "heading": result.heading,
+            "document_version": result.document_version,
+        }
+        for result in retrieved[:DOCUMENT_SEARCH_CONTEXT_LIMIT]
+    ]
 
 
 def search_company_knowledge(
@@ -137,12 +184,12 @@ def search_company_knowledge(
     db: Session | None = None,
     actor_id: str | None = None,
 ) -> list[dict]:
-    """Return up to ``limit`` policy and document paragraphs ranked by relevance.
+    """Return relevant document passages and static policy paragraphs.
 
-    Searches:
-    1. Uploaded ready documents from the database (Story 7.1 / Epic 7 RAG) that
-       the actor has permission to view.
-    2. The static company policy / handbook Markdown file.
+    Uploaded documents are searched only through
+    ``retrieve_semantic_document_context`` so version and ACL checks remain
+    consistent with Story 7.2. The static company policy remains a keyword
+    fallback for legacy policy-check plan steps.
 
     Each result is ``{"snippet", "score", "source"}``.
     """
@@ -162,49 +209,20 @@ def search_company_knowledge(
         if len(raw_words[i]) > 2 and len(raw_words[i+1]) > 2
     ]
 
+    if db is not None and actor_id:
+        semantic_results = retrieve_semantic_document_context(
+            db,
+            actor_id=actor_id,
+            query=query,
+        )
+        if semantic_results:
+            return semantic_results[:limit]
+    if re.search(r"\bworking\s+hours?\b", query, re.IGNORECASE):
+        return []
+
     corpus_items: list[tuple[str, str]] = []  # (source_name, paragraph)
 
-    # 1. Gather text from uploaded documents in DB if session is available
-    if db is not None:
-        try:
-            from app.documents.models import DOC_STATUS_READY, Document, DocumentACLEntry
-
-            doc_query = db.query(Document).filter(
-                Document.status == DOC_STATUS_READY,
-                Document.extracted_text.isnot(None),
-            )
-            docs = doc_query.all()
-            for doc in docs:
-                # Permission check: if actor_id provided and doc has ACL, check access
-                if actor_id:
-                    if doc.owner_id != actor_id:
-                        has_acl = (
-                            db.query(DocumentACLEntry)
-                            .filter(
-                                DocumentACLEntry.document_id == doc.id,
-                                DocumentACLEntry.employee_id == actor_id,
-                            )
-                            .first()
-                            is not None
-                        )
-                        # If the doc has ACL entries and user is not in ACL, skip
-                        doc_entries_count = (
-                            db.query(DocumentACLEntry)
-                            .filter(DocumentACLEntry.document_id == doc.id)
-                            .count()
-                        )
-                        if doc_entries_count > 0 and not has_acl:
-                            continue
-
-                if doc.extracted_text:
-                    for para in doc.extracted_text.split("\n\n"):
-                        clean_para = para.strip()
-                        if clean_para and len(clean_para) > 10:
-                            corpus_items.append((doc.original_filename, clean_para))
-        except Exception as exc:
-            logger.warning("Failed querying documents from database for RAG: %s", exc)
-
-    # 2. Gather text from static policy file
+    # Only use the static policy file when indexed search has no relevant result.
     if _KNOWLEDGE_BASE_PATH.exists():
         try:
             content = _KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8")
@@ -740,14 +758,56 @@ def prepare_tool_arguments(
         if entities.groups:
             arguments["groups"] = list(dict.fromkeys(entities.groups))
         if tool == "email.preview":
+            document_context = results.get("document.context")
+            if document_context is not None:
+                context_results = document_context.get("results", [])
+                if context_results:
+                    context_text = "\n\n".join(
+                        f"[{item['source']}]\n{item['snippet']}"
+                        for item in context_results
+                    )
+                    arguments["document_context"] = "\n\n".join(
+                        item["snippet"] for item in context_results
+                    )[:10000]
+                    instructions = (
+                        "Use only the following retrieved company-document facts "
+                        "for factual claims; do not add unsupported company details:\n"
+                        f"{context_text}"
+                    )
+                else:
+                    instructions = (
+                        "No relevant indexed company documents were found. Do not "
+                        "make factual company-policy or project claims; ask the "
+                        "user to provide the needed information."
+                    )
+                arguments["instructions"] = instructions[:2000]
             return {**arguments, "topic": entities.topic, "mode": assistant_email_draft_mode()}
         preview = results.get("email.preview")
         if not preview:
             raise StepExecutionError("The e-mail has not been drafted yet.")
+        if principal is None:
+            raise StepExecutionError("The authenticated sender is required to send an e-mail.")
+        from app.email_draft_service import finalize_draft_body
+
+        document_context = results.get("document.context") or {}
+        context_results = document_context.get("results", [])
+        retrieved_context = "\n\n".join(
+            item["snippet"] for item in context_results if item.get("snippet")
+        )[:10000]
+        body = finalize_draft_body(
+            preview["body"],
+            sender=principal.name,
+            retrieved_context=retrieved_context,
+            recipient_names=[
+                recipient["name"]
+                for recipient in preview.get("recipients", [])
+                if recipient.get("name")
+            ],
+        )
         return {
             **arguments,
             "subject": preview["subject"],
-            "body": preview["body"],
+            "body": body,
             "request": f"E-mail about {entities.topic}",
         }
 
