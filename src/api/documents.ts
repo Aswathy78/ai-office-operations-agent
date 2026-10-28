@@ -7,6 +7,7 @@ export interface DocumentACLEntry {
 }
 
 export type DocumentStatus = 'uploaded' | 'processing' | 'ready' | 'failed'
+export type DocumentIndexingStatus = 'pending' | 'processing' | 'ready' | 'failed'
 
 export interface DocumentItem {
   id: string
@@ -16,6 +17,9 @@ export interface DocumentItem {
   owner_id: string
   status: DocumentStatus
   failure_reason: string | null
+  indexing_status: DocumentIndexingStatus
+  indexing_failure_reason: string | null
+  version: number
   page_count: number | null
   processing_started_at: string | null
   processing_completed_at: string | null
@@ -33,6 +37,103 @@ export interface DocumentUploadResponse {
 export interface DocumentListResponse {
   documents: DocumentItem[]
   total: number
+}
+
+export interface SemanticSearchResult {
+  document_id: string
+  filename: string
+  heading: string | null
+  content: string
+  score: number
+  document_version: number
+}
+
+function isSemanticSearchResult(value: unknown): value is SemanticSearchResult {
+  if (typeof value !== 'object' || value === null) return false
+  if (
+    !('document_id' in value)
+    || !('filename' in value)
+    || !('heading' in value)
+    || !('content' in value)
+    || !('score' in value)
+    || !('document_version' in value)
+  ) {
+    return false
+  }
+  return (
+    typeof value.document_id === 'string'
+    && typeof value.filename === 'string'
+    && (typeof value.heading === 'string' || value.heading === null)
+    && typeof value.content === 'string'
+    && typeof value.score === 'number'
+    && typeof value.document_version === 'number'
+  )
+}
+
+export async function searchDocuments(
+  query: string,
+  limit: number = 10,
+  signal?: AbortSignal,
+): Promise<SemanticSearchResult[]> {
+  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/search?${params}`, {
+    signal,
+  })
+  if (!response.ok) {
+    let errorDetail = 'Semantic search failed'
+    try {
+      const errorJson = await response.json()
+      errorDetail = errorJson.detail || errorDetail
+    } catch {
+      errorDetail = response.statusText || errorDetail
+    }
+    throw new Error(errorDetail)
+  }
+  const result: unknown = await response.json()
+  if (
+    typeof result !== 'object'
+    || result === null
+    || !('results' in result)
+    || !Array.isArray(result.results)
+    || !result.results.every(isSemanticSearchResult)
+  ) {
+    throw new Error('Semantic search returned an invalid response')
+  }
+  return result.results
+}
+
+export async function retryDocumentIndexing(id: string): Promise<DocumentItem> {
+  const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/${id}/index`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    let errorDetail = 'Could not retry document indexing'
+    try {
+      const errorJson = await response.json()
+      errorDetail = errorJson.detail || errorDetail
+    } catch {
+      errorDetail = response.statusText || errorDetail
+    }
+    throw new Error(errorDetail)
+  }
+  return response.json()
+}
+
+export async function reindexDocument(id: string): Promise<DocumentItem> {
+  const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/${id}/reindex`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    let errorDetail = 'Could not queue document reindexing'
+    try {
+      const errorJson = await response.json()
+      errorDetail = errorJson.detail || errorDetail
+    } catch {
+      errorDetail = response.statusText || errorDetail
+    }
+    throw new Error(errorDetail)
+  }
+  return response.json()
 }
 
 /**

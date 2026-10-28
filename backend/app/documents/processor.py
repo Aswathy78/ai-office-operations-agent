@@ -23,18 +23,21 @@ import logging
 import os
 import threading
 import time
-import traceback
 from datetime import datetime, timezone
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
 from app.documents.extraction import ExtractionError, extract_text
+from app.documents.indexing import index_document
 from app.documents.models import (
     DOC_STATUS_FAILED,
     DOC_STATUS_PROCESSING,
     DOC_STATUS_READY,
     DOC_STATUS_UPLOADED,
+    INDEX_STATUS_FAILED,
+    INDEX_STATUS_PENDING,
     Document,
 )
 from app.documents.storage import read_document_file
@@ -57,23 +60,49 @@ def _safe_failure_reason(exc: Exception) -> str:
 
 
 def process_one_document(db: Session, doc: Document) -> None:
-    """Process a single document synchronously (also used in tests)."""
-    # Transition to processing inside the same session.
-    doc.status = DOC_STATUS_PROCESSING
-    doc.processing_started_at = datetime.now(timezone.utc)
-    doc.updated_at = datetime.now(timezone.utc)
+    """Claim, extract, and enqueue vector indexing for one document."""
+    now = datetime.now(timezone.utc)
+    claim = db.execute(
+        update(Document)
+        .where(
+            Document.id == doc.id,
+            Document.status == DOC_STATUS_UPLOADED,
+        )
+        .values(
+            status=DOC_STATUS_PROCESSING,
+            processing_started_at=now,
+            updated_at=now,
+        )
+    )
+    if claim.rowcount != 1:
+        db.rollback()
+        return
     db.commit()
+    db.refresh(doc)
 
     try:
         data = read_document_file(doc.stored_filename)
         result = extract_text(data, doc.mime_type, filename=doc.original_filename)
-
-        doc.status = DOC_STATUS_READY
-        doc.extracted_text = result.text
-        doc.page_count = result.page_count
-        doc.processing_completed_at = datetime.now(timezone.utc)
-        doc.updated_at = datetime.now(timezone.utc)
+        completed_at = datetime.now(timezone.utc)
+        db.execute(
+            update(Document)
+            .where(
+                Document.id == doc.id,
+                Document.status == DOC_STATUS_PROCESSING,
+            )
+            .values(
+                status=DOC_STATUS_READY,
+                extracted_text=result.text,
+                page_count=result.page_count,
+                failure_reason=None,
+                indexing_status=INDEX_STATUS_PENDING,
+                indexing_failure_reason=None,
+                processing_completed_at=completed_at,
+                updated_at=completed_at,
+            )
+        )
         db.commit()
+        db.refresh(doc)
         logger.info(
             "Document %s processed: %d chars, %s pages, ocr=%s",
             doc.id,
@@ -81,28 +110,75 @@ def process_one_document(db: Session, doc: Document) -> None:
             result.page_count,
             result.ocr_used,
         )
+        index_document(db, doc.id)
 
     except (ExtractionError, FileNotFoundError) as exc:
         reason = _safe_failure_reason(exc)
         logger.warning("Document %s failed: %s", doc.id, reason)
-        doc.status = DOC_STATUS_FAILED
-        doc.failure_reason = reason
-        doc.processing_completed_at = datetime.now(timezone.utc)
-        doc.updated_at = datetime.now(timezone.utc)
+        failed_at = datetime.now(timezone.utc)
+        db.execute(
+            update(Document)
+            .where(
+                Document.id == doc.id,
+                Document.status == DOC_STATUS_PROCESSING,
+            )
+            .values(
+                status=DOC_STATUS_FAILED,
+                failure_reason=reason,
+                indexing_status=INDEX_STATUS_FAILED,
+                indexing_failure_reason="Text extraction failed; indexing is unavailable.",
+                processing_completed_at=failed_at,
+                updated_at=failed_at,
+            )
+        )
         db.commit()
 
     except Exception as exc:
         # Unexpected errors: log full traceback but store only a safe reason.
         logger.exception("Unexpected error processing document %s", doc.id)
         reason = f"Internal processing error: {type(exc).__name__}"
-        doc.status = DOC_STATUS_FAILED
-        doc.failure_reason = reason
-        doc.processing_completed_at = datetime.now(timezone.utc)
-        doc.updated_at = datetime.now(timezone.utc)
         try:
+            failed_at = datetime.now(timezone.utc)
+            db.execute(
+                update(Document)
+                .where(
+                    Document.id == doc.id,
+                    Document.status == DOC_STATUS_PROCESSING,
+                )
+                .values(
+                    status=DOC_STATUS_FAILED,
+                    failure_reason=reason,
+                    indexing_status=INDEX_STATUS_FAILED,
+                    indexing_failure_reason="Text extraction failed; indexing is unavailable.",
+                    processing_completed_at=failed_at,
+                    updated_at=failed_at,
+                )
+            )
             db.commit()
         except Exception:
             db.rollback()
+
+
+def _process_pending_index_documents(db: Session) -> None:
+    """Attempt every queued index job once, in creation order."""
+    pending_document_ids = (
+        db.query(Document.id)
+        .filter(
+            Document.status == DOC_STATUS_READY,
+            Document.indexing_status == INDEX_STATUS_PENDING,
+        )
+        .order_by(Document.created_at, Document.id)
+        .all()
+    )
+    for (document_id,) in pending_document_ids:
+        try:
+            index_document(db, document_id)
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Document worker failed to index queued document %s; continuing.",
+                document_id,
+            )
 
 
 def _worker_loop() -> None:
@@ -110,15 +186,15 @@ def _worker_loop() -> None:
     while not _stop_event.is_set():
         try:
             with SessionLocal() as db:
-                # Pick one document at a time to keep transactions short.
-                doc = (
+                uploaded_doc = (
                     db.query(Document)
                     .filter(Document.status == DOC_STATUS_UPLOADED)
-                    .with_for_update(skip_locked=True)
+                    .order_by(Document.created_at, Document.id)
                     .first()
                 )
-                if doc is not None:
-                    process_one_document(db, doc)
+                if uploaded_doc is not None:
+                    process_one_document(db, uploaded_doc)
+                _process_pending_index_documents(db)
         except Exception:
             logger.exception("Document worker encountered an error during polling.")
 

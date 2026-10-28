@@ -25,10 +25,14 @@ import {
   deleteDocument,
   downloadDocument,
   listDocuments,
+  reindexDocument,
   replaceDocument,
+  retryDocumentIndexing,
   resetAllDocuments,
+  searchDocuments,
   uploadDocument,
   type DocumentItem,
+  type SemanticSearchResult,
   type DocumentStatus,
 } from '../api/documents'
 import { AccessDenied } from '../components/common/AccessDenied'
@@ -74,6 +78,11 @@ export function DocumentsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchMode, setSearchMode] = useState<'name' | 'meaning'>('name')
+  const [semanticResults, setSemanticResults] = useState<SemanticSearchResult[]>([])
+  const [semanticLoading, setSemanticLoading] = useState(false)
+  const [semanticError, setSemanticError] = useState('')
+  const [retryingIndexId, setRetryingIndexId] = useState<string | null>(null)
   const [statusFilter, setStatusFilter] = useState<'all' | DocumentStatus>('all')
 
   // Upload state
@@ -98,6 +107,7 @@ export function DocumentsPage() {
   const [replacementFile, setReplacementFile] = useState<File | null>(null)
   const [replacementAcl, setReplacementAcl] = useState('')
   const [isReplacing, setIsReplacing] = useState(false)
+  const [reindexingId, setReindexingId] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [manageError, setManageError] = useState('')
   const manageFileInputRef = useRef<HTMLInputElement>(null)
@@ -127,7 +137,11 @@ export function DocumentsPage() {
   const hasProcessingDocs = useMemo(
     () =>
       documents.some(
-        (d) => d.status === 'uploaded' || d.status === 'processing',
+        (d) =>
+          d.status === 'uploaded' ||
+          d.status === 'processing' ||
+          d.indexing_status === 'pending' ||
+          d.indexing_status === 'processing',
       ),
     [documents],
   )
@@ -139,6 +153,61 @@ export function DocumentsPage() {
     }, 3000)
     return () => clearInterval(interval)
   }, [hasProcessingDocs, loadDocuments, isAuthorized])
+
+  useEffect(() => {
+    if (searchMode !== 'meaning') {
+      setSemanticResults([])
+      setSemanticError('')
+      setSemanticLoading(false)
+      return
+    }
+    const query = searchQuery.trim()
+    if (!query) {
+      setSemanticResults([])
+      setSemanticError('')
+      setSemanticLoading(false)
+      return
+    }
+    let active = true
+    let timedOut = false
+    let timeout: number | undefined
+    const controller = new AbortController()
+    setSemanticResults([])
+    setSemanticError('')
+    setSemanticLoading(true)
+    const timer = window.setTimeout(() => {
+      timeout = window.setTimeout(() => {
+        timedOut = true
+        controller.abort()
+      }, 60_000)
+      void searchDocuments(query, 10, controller.signal)
+        .then((results) => {
+          if (active) setSemanticResults(results)
+        })
+        .catch((err: unknown) => {
+          if (active) {
+            setSemanticError(
+              timedOut
+                ? 'Semantic search timed out. Please try again.'
+                : err instanceof Error
+                  ? err.message
+                  : 'Semantic search failed',
+            )
+            setSemanticResults([])
+          }
+        })
+        .finally(() => {
+          if (timeout !== undefined) window.clearTimeout(timeout)
+          if (active) setSemanticLoading(false)
+        })
+    }, 450)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+      if (timeout !== undefined) window.clearTimeout(timeout)
+      controller.abort()
+    }
+  }, [searchMode, searchQuery])
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -200,6 +269,25 @@ export function DocumentsPage() {
     }
   }
 
+  const handleRetryIndexing = async (doc: DocumentItem) => {
+    setRetryingIndexId(doc.id)
+    try {
+      await retryDocumentIndexing(doc.id)
+      setUploadFeedback({
+        type: 'success',
+        message: `"${doc.original_filename}" was queued for semantic indexing.`,
+      })
+      await loadDocuments(true)
+    } catch (err) {
+      setUploadFeedback({
+        type: 'error',
+        message: err instanceof Error ? err.message : 'Could not retry indexing',
+      })
+    } finally {
+      setRetryingIndexId(null)
+    }
+  }
+
   // Handle Start Over (Reset all uploaded documents)
   const handleStartOver = async () => {
     setIsResetting(true)
@@ -246,6 +334,25 @@ export function DocumentsPage() {
     }
   }
 
+  const handleReindexDocument = async () => {
+    if (!managingDoc) return
+    setReindexingId(managingDoc.id)
+    setManageError('')
+    try {
+      const updated = await reindexDocument(managingDoc.id)
+      setManagingDoc(updated)
+      setUploadFeedback({
+        type: 'success',
+        message: `"${updated.original_filename}" was queued for reindexing.`,
+      })
+      await loadDocuments(true)
+    } catch (err) {
+      setManageError(err instanceof Error ? err.message : 'Reindexing could not be queued')
+    } finally {
+      setReindexingId(null)
+    }
+  }
+
   // Handle document deletion
   const handleDeleteDoc = async () => {
     if (!managingDoc) return
@@ -270,24 +377,33 @@ export function DocumentsPage() {
   }
 
   const filteredDocuments = useMemo(() => {
+    const semanticDocumentIds = new Set(semanticResults.map((result) => result.document_id))
     return documents.filter((doc) => {
       const matchesSearch =
-        searchQuery === '' ||
-        doc.original_filename.toLowerCase().includes(searchQuery.toLowerCase())
+        searchMode === 'meaning'
+          ? searchQuery.trim() === '' || semanticDocumentIds.has(doc.id)
+          : searchQuery === '' ||
+            doc.original_filename.toLowerCase().includes(searchQuery.toLowerCase())
       const matchesStatus =
         statusFilter === 'all' || doc.status === statusFilter
       return matchesSearch && matchesStatus
     })
-  }, [documents, searchQuery, statusFilter])
+  }, [documents, searchQuery, searchMode, semanticResults, statusFilter])
 
   const counts = useMemo(() => {
     return {
       total: documents.length,
-      ready: documents.filter((d) => d.status === 'ready').length,
+      ready: documents.filter((d) => d.indexing_status === 'ready').length,
       processing: documents.filter(
-        (d) => d.status === 'uploaded' || d.status === 'processing',
+        (d) =>
+          d.status === 'uploaded' ||
+          d.status === 'processing' ||
+          d.indexing_status === 'pending' ||
+          d.indexing_status === 'processing',
       ).length,
-      failed: documents.filter((d) => d.status === 'failed').length,
+      failed: documents.filter(
+        (d) => d.status === 'failed' || d.indexing_status === 'failed',
+      ).length,
     }
   }, [documents])
 
@@ -547,23 +663,61 @@ export function DocumentsPage() {
           ))}
         </div>
 
-        <div style={{ position: 'relative', minWidth: '260px' }}>
-          <Search size={16} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--muted)' }} />
-          <input
-            type="text"
-            placeholder="Search documents by name..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            style={{
-              width: '100%',
-              padding: '7px 10px 7px 32px',
-              border: '1px solid var(--border)',
-              borderRadius: '8px',
-              fontSize: '13px',
-            }}
-          />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <div style={{ display: 'inline-flex', gap: '4px' }}>
+            {(['name', 'meaning'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`button ${searchMode === mode ? 'primary' : 'secondary'}`}
+                style={{ minHeight: '34px', padding: '0 10px', fontSize: '12px' }}
+                onClick={() => setSearchMode(mode)}
+              >
+                {mode === 'name' ? 'Name' : 'Meaning'}
+              </button>
+            ))}
+          </div>
+          <div style={{ position: 'relative', minWidth: '260px' }}>
+            <Search size={16} style={{ position: 'absolute', left: '10px', top: '10px', color: 'var(--muted)' }} />
+            <input
+              type="text"
+              placeholder={searchMode === 'meaning' ? 'Search document content by meaning...' : 'Search documents by name...'}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '7px 10px 7px 32px',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                fontSize: '13px',
+              }}
+            />
+          </div>
         </div>
       </div>
+
+      {searchMode === 'meaning' && searchQuery.trim() !== '' && (
+        <section aria-live="polite" style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: '12px', padding: '16px' }}>
+          <h3 style={{ margin: '0 0 10px', fontSize: '15px' }}>Semantic matches</h3>
+          {semanticLoading ? (
+            <p style={{ margin: 0, color: 'var(--muted)' }}>Searching indexed document content...</p>
+          ) : semanticError ? (
+            <p role="alert" style={{ margin: 0, color: '#9b1c1c' }}>{semanticError}</p>
+          ) : semanticResults.length === 0 ? (
+            <p style={{ margin: 0, color: 'var(--muted)' }}>No matching indexed content was found.</p>
+          ) : (
+            <div style={{ display: 'grid', gap: '10px' }}>
+              {semanticResults.map((result, index) => (
+                <article key={`${result.document_id}-${result.document_version}-${index}`} style={{ borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
+                  <strong>{result.filename}</strong>
+                  {result.heading && <div style={{ color: 'var(--muted)', fontSize: '12px', marginTop: '2px' }}>{result.heading}</div>}
+                  <p style={{ margin: '6px 0 0', fontSize: '13px', whiteSpace: 'pre-wrap' }}>{result.content}</p>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {/* Document List Table */}
       <section style={{ background: '#fff', border: '1px solid var(--border)', borderRadius: '12px', overflow: 'hidden' }}>
@@ -576,6 +730,15 @@ export function DocumentsPage() {
           <div style={{ padding: '30px', textAlign: 'center', color: '#9b1c1c' }}>
             <AlertCircle size={24} style={{ margin: '0 auto 8px' }} />
             {error}
+          </div>
+        ) : filteredDocuments.length === 0 &&
+          searchMode === 'meaning' &&
+          searchQuery.trim() !== '' &&
+          (semanticLoading || semanticError) ? (
+          <div style={{ padding: '30px', textAlign: 'center', color: 'var(--muted)' }}>
+            {semanticLoading
+              ? 'Searching indexed document content...'
+              : 'Document list was not filtered because semantic search failed.'}
           </div>
         ) : filteredDocuments.length === 0 ? (
           <div style={{ padding: '50px 20px', textAlign: 'center', color: 'var(--muted)' }}>
@@ -690,22 +853,56 @@ export function DocumentsPage() {
                       {/* Status */}
                       <td style={{ padding: '14px 16px' }}>
                         {doc.status === 'ready' ? (
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '5px',
-                              padding: '3px 8px',
-                              borderRadius: '6px',
-                              background: '#def7ec',
-                              color: '#03543f',
-                              fontSize: '11px',
-                              fontWeight: '700',
-                            }}
-                          >
-                            <CheckCircle2 size={12} />
-                            Ready
-                          </span>
+                          <div>
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                background: '#def7ec',
+                                color: '#03543f',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                              }}
+                            >
+                              <CheckCircle2 size={12} />
+                              Extracted
+                            </span>
+                            <div style={{ marginTop: '5px', fontSize: '11px' }}>
+                              {doc.indexing_status === 'ready' ? (
+                                <span style={{ color: '#03543f', fontWeight: 700 }}>
+                                  <CheckCircle2 size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                                  Indexed
+                                </span>
+                              ) : doc.indexing_status === 'pending' || doc.indexing_status === 'processing' ? (
+                                <span style={{ color: '#1e429f' }}>
+                                  <RefreshCw size={12} className={doc.indexing_status === 'processing' ? 'animate-spin' : ''} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                                  {doc.indexing_status === 'processing' ? 'Indexing' : 'Index queued'}
+                                </span>
+                              ) : (
+                                <div>
+                                  <span
+                                    title={doc.indexing_failure_reason || 'Indexing failed'}
+                                    style={{ color: '#9b1c1c', display: 'block', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                  >
+                                    <AlertCircle size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                                    {doc.indexing_failure_reason || 'Indexing failed'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    className="button secondary"
+                                    style={{ minHeight: '26px', padding: '0 7px', fontSize: '11px', marginTop: '4px' }}
+                                    onClick={() => void handleRetryIndexing(doc)}
+                                    disabled={retryingIndexId === doc.id}
+                                  >
+                                    {retryingIndexId === doc.id ? 'Retrying...' : 'Retry index'}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         ) : doc.status === 'processing' || doc.status === 'uploaded' ? (
                           <span
                             style={{
@@ -961,6 +1158,20 @@ export function DocumentsPage() {
                   <span>Uploaded: {formatDate(managingDoc.created_at)}</span>
                   <span>Status: <strong>{managingDoc.status}</strong></span>
                 </div>
+                {managingDoc.status === 'ready' &&
+                  managingDoc.indexing_status === 'ready' && (
+                    <button
+                      type="button"
+                      className="button secondary"
+                      style={{ minHeight: '32px', padding: '0 10px', fontSize: '12px', marginTop: '12px' }}
+                      onClick={() => void handleReindexDocument()}
+                      disabled={reindexingId === managingDoc.id}
+                    >
+                      {reindexingId === managingDoc.id
+                        ? 'Queueing reindex...'
+                        : 'Reindex with current model'}
+                    </button>
+                  )}
               </div>
 
               {manageError && (

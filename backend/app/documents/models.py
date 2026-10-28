@@ -16,6 +16,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -37,6 +38,17 @@ DOC_STATUSES = (
     DOC_STATUS_PROCESSING,
     DOC_STATUS_READY,
     DOC_STATUS_FAILED,
+)
+
+INDEX_STATUS_PENDING = "pending"
+INDEX_STATUS_PROCESSING = "processing"
+INDEX_STATUS_READY = "ready"
+INDEX_STATUS_FAILED = "failed"
+INDEX_STATUSES = (
+    INDEX_STATUS_PENDING,
+    INDEX_STATUS_PROCESSING,
+    INDEX_STATUS_READY,
+    INDEX_STATUS_FAILED,
 )
 
 # Allowed file extensions (lower-case, with leading dot).
@@ -91,6 +103,11 @@ class Document(Base):
     )
     # Human-readable failure reason (never a raw Python traceback).
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    indexing_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=INDEX_STATUS_PENDING
+    )
+    indexing_failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Plain-text corpus produced by the extraction pipeline.
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Number of pages/slides/sheets; None for image files.
@@ -119,6 +136,10 @@ class Document(Base):
         lazy="select",
     )
     acl_entries: Mapped[list["DocumentACLEntry"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+    )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
     )
@@ -164,3 +185,45 @@ class DocumentACLEntry(Base):
         foreign_keys=[employee_id],
         lazy="select",
     )
+
+
+class DocumentChunk(Base):
+    """Versioned document passage and local vector embedding for semantic search."""
+
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_id",
+            "document_version",
+            "chunk_index",
+            name="uq_document_chunks_version_index",
+        ),
+        Index(
+            "ix_document_chunks_version",
+            "document_id",
+            "document_version",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    department: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    acl_employee_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(JSON, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+    document: Mapped[Document] = relationship(back_populates="chunks")
