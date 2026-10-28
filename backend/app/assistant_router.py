@@ -310,7 +310,11 @@ class _PlanRunner:
     def _execute(self, step: PlanStep):
         # Conditional retrieval for steps that are not themselves the search tool.
         if step.retrieval_query is not None and step.tool_name != "document.search":
-            snippet = assistant_planner.retrieve_company_knowledge(step.retrieval_query)
+            snippet = assistant_planner.retrieve_company_knowledge(
+                step.retrieval_query,
+                db=self.run_db,
+                actor_id=self.principal.user_id,
+            )
             if snippet:
                 step.retrieval_snippet = snippet
                 self.total_tokens_estimated += estimate_tokens(snippet)
@@ -580,6 +584,7 @@ def stream_assistant_chat(
 
     pending_state = load_pending_clarification(conv)
     forced_response: str | None = None
+    clarification_resolved_notice: str | None = None
     clarification_count = 0
     understanding: AssistantUnderstanding | None = None
 
@@ -666,10 +671,11 @@ def stream_assistant_chat(
                 )
             else:
                 save_pending_clarification(db, conv, None)
-                forced_response = (
+                clarification_resolved_notice = (
                     "All required details are resolved. "
                     + explain_understanding(understanding)
                 )
+                forced_response = None
     else:
         understanding = understand_assistant_command(db, req.message)
         if understanding is not None and understanding.status == "needs_clarification":
@@ -703,6 +709,8 @@ def stream_assistant_chat(
         except Exception as exc:
             logger.error("Failed to build execution plan: %s", exc, exc_info=True)
             plan_steps = None  # fall back to explain_understanding
+            if clarification_resolved_notice is not None:
+                forced_response = clarification_resolved_notice
 
     # ------------------------------------------------------------------
     # Persist the incoming user message
@@ -776,6 +784,8 @@ def stream_assistant_chat(
         # STORY 6.4 / 6.5 PLAN & EXECUTE PATH
         # ================================================================
         if plan_steps is not None:
+            if clarification_resolved_notice is not None:
+                yield _sse({"token": "All required details are resolved. "})
             with Session(bind=engine) as run_db:
                 yield from _PlanRunner(
                     plan_steps=plan_steps,
@@ -790,16 +800,44 @@ def stream_assistant_chat(
             return
 
         # ================================================================
-        # STORY 6.1 / 6.3 PATH (forced_response or general chat)
+        # STORY 6.1 / 6.3 / EPIC 7 RAG PATH (forced_response or RAG chat)
         # ================================================================
+        rag_matches = []
+        if assistant_planner.needs_retrieval(req.message):
+            try:
+                with Session(bind=engine) as query_db:
+                    rag_matches = assistant_planner.search_company_knowledge(
+                        req.message,
+                        limit=3,
+                        db=query_db,
+                        actor_id=principal.user_id,
+                    )
+            except Exception as rag_err:
+                logger.warning("RAG retrieval failed: %s", rag_err)
+
+            if rag_matches:
+                yield _sse({
+                    "retrieval": {
+                        "query": req.message,
+                        "snippet": rag_matches[0]["snippet"],
+                        "source": rag_matches[0]["source"],
+                    }
+                })
+
         try:
-            response_stream = (
-                iter([forced_response])
-                if forced_response is not None
-                else iter([explain_understanding(understanding)])
-                if understanding is not None
-                else assistant_service.stream_chat_completion(context_messages)
-            )
+            effective_forced = forced_response or clarification_resolved_notice
+            if effective_forced is not None:
+                response_stream = iter([effective_forced])
+            elif rag_matches:
+                # Direct match in company documents/handbook: use RAG answer
+                response_stream = assistant_service.stream_chat_completion(
+                    context_messages,
+                    rag_context=rag_matches,
+                )
+            elif understanding is not None:
+                response_stream = iter([explain_understanding(understanding)])
+            else:
+                response_stream = assistant_service.stream_chat_completion(context_messages)
             for token in response_stream:
                 if token:
                     accumulated_chunks.append(token)

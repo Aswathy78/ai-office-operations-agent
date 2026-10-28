@@ -659,7 +659,10 @@ def search_documents(context: ToolContext, arguments: dict) -> dict:
     import app.assistant_planner as assistant_planner
 
     results = assistant_planner.search_company_knowledge(
-        arguments["query"], limit=arguments.get("limit", 3)
+        arguments["query"],
+        limit=arguments.get("limit", 3),
+        db=context.db,
+        actor_id=context.principal.user_id,
     )
     return {"query": arguments["query"], "results": results, "count": len(results)}
 

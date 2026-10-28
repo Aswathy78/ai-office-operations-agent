@@ -88,10 +88,33 @@ _RETRIEVAL_KEYWORDS = frozenset({
     "budget",
     "escalation",
     "restriction",
-    "restriction",
     "sensitive",
     "security",
     "data policy",
+    "leave",
+    "leaves",
+    "holiday",
+    "holidays",
+    "vacation",
+    "attendance",
+    "wfh",
+    "probation",
+    "notice",
+    "expense",
+    "travel",
+    "procurement",
+    "laptop",
+    "asset",
+    "sla",
+    "document",
+    "ocr",
+    "contract",
+    "handbook",
+    "allowance",
+    "reimbursement",
+    "working hours",
+    "onboarding",
+    "offboarding",
 })
 
 _MAX_RETRIEVAL_SNIPPET_CHARS = 600  # keep token usage predictable
@@ -108,91 +131,129 @@ def needs_retrieval(step_description: str) -> bool:
     return any(kw in lower for kw in _RETRIEVAL_KEYWORDS)
 
 
-def retrieve_company_knowledge(query: str) -> str | None:
-    """Return the first matching paragraph from the company policy document.
+def search_company_knowledge(
+    query: str,
+    limit: int = 3,
+    db: Session | None = None,
+    actor_id: str | None = None,
+) -> list[dict]:
+    """Return up to ``limit`` policy and document paragraphs ranked by relevance.
 
-    This is a plain keyword-match retrieval adapter over a Markdown file.
-    It is NOT described as semantic or vector search.  The interface can be
-    replaced with a proper retrieval backend (e.g. vector store) by swapping
-    this function without touching the planner or router.
+    Searches:
+    1. Uploaded ready documents from the database (Story 7.1 / Epic 7 RAG) that
+       the actor has permission to view.
+    2. The static company policy / handbook Markdown file.
 
-    Returns None when:
-    - The knowledge-base file does not exist.
-    - No paragraph contains any token from the query.
-
-    The returned snippet is truncated to _MAX_RETRIEVAL_SNIPPET_CHARS characters
-    to limit token consumption.
+    Each result is ``{"snippet", "score", "source"}``.
     """
-    if not _KNOWLEDGE_BASE_PATH.exists():
-        logger.warning(
-            "Company policy knowledge base not found at %s; retrieval skipped.",
-            _KNOWLEDGE_BASE_PATH,
-        )
-        return None
-
-    try:
-        content = _KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.error("Failed to read knowledge base: %s", exc)
-        return None
-
-    query_tokens = {token.lower() for token in query.split() if len(token) > 3}
-    if not query_tokens:
-        return None
-
-    for paragraph in content.split("\n\n"):
-        paragraph = paragraph.strip()
-        if not paragraph or paragraph.startswith("#"):
-            continue
-        lower_para = paragraph.lower()
-        if any(token in lower_para for token in query_tokens):
-            return paragraph[:_MAX_RETRIEVAL_SNIPPET_CHARS]
-
-    return None
-
-
-def search_company_knowledge(query: str, limit: int = 3) -> list[dict]:
-    """Return up to ``limit`` policy paragraphs ranked by how many query words they contain.
-
-    Same keyword-matching adapter as ``retrieve_company_knowledge`` (no vector
-    search), used by the ``document.search`` tool (Story 6.5). Each result is
-    ``{"snippet", "score", "source"}``; the list is empty when nothing matches
-    or the knowledge base is missing.
-    """
-    if not _KNOWLEDGE_BASE_PATH.exists():
-        logger.warning(
-            "Company policy knowledge base not found at %s; search skipped.",
-            _KNOWLEDGE_BASE_PATH,
-        )
-        return []
-    try:
-        content = _KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8")
-    except OSError as exc:
-        logger.error("Failed to read knowledge base: %s", exc)
-        return []
-
-    query_tokens = {token.lower().strip(".,;:!?\"'") for token in query.split() if len(token) > 3}
+    query_tokens = [
+        token.lower().strip(".,;:!?\"'()[]{}")
+        for token in query.split()
+        if len(token.strip(".,;:!?\"'()[]{}")) > 2
+    ]
     if not query_tokens:
         return []
 
-    ranked: list[tuple[int, int, str]] = []
-    for position, paragraph in enumerate(content.split("\n\n")):
-        paragraph = paragraph.strip()
-        if not paragraph or paragraph.startswith("#"):
-            continue
+    # Check for 2-word phrases from query for high-relevance boosting
+    raw_words = [w.lower().strip(".,;:!?\"'") for w in query.split() if w.strip(".,;:!?\"'")]
+    phrases = [
+        f"{raw_words[i]} {raw_words[i+1]}"
+        for i in range(len(raw_words) - 1)
+        if len(raw_words[i]) > 2 and len(raw_words[i+1]) > 2
+    ]
+
+    corpus_items: list[tuple[str, str]] = []  # (source_name, paragraph)
+
+    # 1. Gather text from uploaded documents in DB if session is available
+    if db is not None:
+        try:
+            from app.documents.models import DOC_STATUS_READY, Document, DocumentACLEntry
+
+            doc_query = db.query(Document).filter(
+                Document.status == DOC_STATUS_READY,
+                Document.extracted_text.isnot(None),
+            )
+            docs = doc_query.all()
+            for doc in docs:
+                # Permission check: if actor_id provided and doc has ACL, check access
+                if actor_id:
+                    if doc.owner_id != actor_id:
+                        has_acl = (
+                            db.query(DocumentACLEntry)
+                            .filter(
+                                DocumentACLEntry.document_id == doc.id,
+                                DocumentACLEntry.employee_id == actor_id,
+                            )
+                            .first()
+                            is not None
+                        )
+                        # If the doc has ACL entries and user is not in ACL, skip
+                        doc_entries_count = (
+                            db.query(DocumentACLEntry)
+                            .filter(DocumentACLEntry.document_id == doc.id)
+                            .count()
+                        )
+                        if doc_entries_count > 0 and not has_acl:
+                            continue
+
+                if doc.extracted_text:
+                    for para in doc.extracted_text.split("\n\n"):
+                        clean_para = para.strip()
+                        if clean_para and len(clean_para) > 10:
+                            corpus_items.append((doc.original_filename, clean_para))
+        except Exception as exc:
+            logger.warning("Failed querying documents from database for RAG: %s", exc)
+
+    # 2. Gather text from static policy file
+    if _KNOWLEDGE_BASE_PATH.exists():
+        try:
+            content = _KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8")
+            for para in content.split("\n\n"):
+                clean_para = para.strip()
+                if clean_para and not clean_para.startswith("#"):
+                    corpus_items.append((_KNOWLEDGE_BASE_PATH.name, clean_para))
+        except OSError as exc:
+            logger.error("Failed to read knowledge base file %s: %s", _KNOWLEDGE_BASE_PATH, exc)
+
+    if not corpus_items:
+        return []
+
+    ranked: list[tuple[int, int, str, str]] = []
+    for position, (source, paragraph) in enumerate(corpus_items):
         lower_para = paragraph.lower()
         score = sum(1 for token in query_tokens if token in lower_para)
-        if score:
-            ranked.append((-score, position, paragraph))
+        # Boost exact phrase matches
+        for phrase in phrases:
+            if phrase in lower_para:
+                score += 8
+        if score > 0:
+            ranked.append((-score, position, source, paragraph))
+
     ranked.sort()
     return [
         {
             "snippet": paragraph[:_MAX_RETRIEVAL_SNIPPET_CHARS],
             "score": -negative_score,
-            "source": _KNOWLEDGE_BASE_PATH.name,
+            "source": source,
         }
-        for negative_score, _, paragraph in ranked[:limit]
+        for negative_score, _, source, paragraph in ranked[:limit]
     ]
+
+
+def retrieve_company_knowledge(
+    query: str,
+    db: Session | None = None,
+    actor_id: str | None = None,
+) -> str | None:
+    """Return the first matching paragraph from the company policy or uploaded documents.
+
+    Maintains full backward compatibility with Story 6.4 while enabling RAG
+    retrieval across uploaded documents when `db` is available.
+    """
+    results = search_company_knowledge(query, limit=1, db=db, actor_id=actor_id)
+    if results:
+        return results[0]["snippet"]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -370,16 +431,18 @@ def build_execution_plan(
     elif understanding.intent == "task_assignment":
         entities = understanding.entities
         task = entities.task or "the specified task"
-        assignee = entities.people[0] if entities.people else "the specified assignee"
+        has_explicit_assignee = bool(entities.people)
+        assignee = entities.people[0] if has_explicit_assignee else "yourself"
         due = (
             f" by {entities.date.isoformat()}" if entities.date else ""
         )
 
-        add(
-            f"Verify that '{assignee}' is an active employee",
-            "assign_task", "directory.lookup_employees",
-            estimate_tokens(f"Verify employee {assignee}"),
-        )
+        if has_explicit_assignee:
+            add(
+                f"Verify that '{assignee}' is an active employee",
+                "assign_task", "directory.lookup_employees",
+                estimate_tokens(f"Verify employee {assignee}"),
+            )
         add(
             f"Create task '{task}' assigned to {assignee}{due} "
             "and send the assignment notification e-mail",
@@ -612,11 +675,14 @@ def prepare_tool_arguments(
     step: PlanStep,
     understanding: AssistantUnderstanding,
     results: dict[str, dict],
+    principal=None,
 ) -> dict:
     """Bind a step's tool arguments from the understanding and earlier tool results.
 
     ``results`` maps tool names to the results of steps that already ran, so for
     example the meeting attendees are the employees the directory step resolved.
+    ``principal`` is the logged-in user; used as the default task assignee when
+    no explicit person was named in a create-task command.
     """
     entities = understanding.entities
     tool = step.tool_name
@@ -653,10 +719,15 @@ def prepare_tool_arguments(
         }
 
     if tool == "task.create":
-        if not resolved:
+        if resolved:
+            assignee_email = resolved[0]["email"]
+        elif principal is not None and hasattr(principal, "email"):
+            # create-task with no explicit assignee — default to the logged-in user
+            assignee_email = principal.email
+        else:
             raise StepExecutionError("The task assignee was not resolved in the directory.")
         return {
-            "assignee_email": resolved[0]["email"],
+            "assignee_email": assignee_email,
             "title": entities.task,
             "due_at": _task_due_at(understanding).isoformat(),
             "priority": "medium",
@@ -870,7 +941,7 @@ def execute_plan_step(
 
         results = results if results is not None else {}
         if step.tool_arguments is None:
-            step.tool_arguments = prepare_tool_arguments(step, understanding, results)
+            step.tool_arguments = prepare_tool_arguments(step, understanding, results, principal)
         try:
             outcome = execute_tool(
                 db,
@@ -916,13 +987,11 @@ def execute_plan_step(
         task = entities.task
         if not task:
             raise StepExecutionError("Task description is missing from the understanding.")
-        assignee = entities.people[0] if entities.people else None
-        if not assignee:
-            raise StepExecutionError("Task assignee is missing from the understanding.")
+        assignee = entities.people[0] if entities.people else "yourself"
         due = (
             f" by {entities.date.isoformat()}" if entities.date else ""
         )
-        return f"Validated: assign '{task}' to {assignee}{due}."
+        return f"Validated: create task '{task}' assigned to {assignee}{due}."
 
     if step.action_type == "draft_email":
         recipients = entities.groups or entities.people

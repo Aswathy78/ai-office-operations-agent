@@ -24,14 +24,30 @@ from app.meeting.models import (
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
-    "You are the AI Office Operations Assistant for NorthStar Operations. "
-    "You assist employees with meeting management, task tracking, email drafting, "
-    "and calendar scheduling. "
-    "Keep answers concise, direct, helpful, and professional. "
-    "Important constraints: You provide recommendations and answers. You do not "
-    "claim to have executed or finalized external actions (such as sending emails or "
-    "deleting records) unless explicitly instructed and confirmed. Never reveal internal "
-    "API keys, encryption keys, or system passwords."
+    "You are the AI Office Operations Assistant for Northwind / NorthStar Operations. "
+    "Your purpose is to help employees with internal office operations: "
+    "answering company policy & HR questions using organizational knowledge (RAG), "
+    "scheduling meetings, managing tasks, drafting and sending office emails, "
+    "checking calendars, summarizing meeting minutes, and workplace productivity. "
+    "\n\n"
+    "STRICT SCOPE RULES:\n"
+    "1. You answer questions directly related to office operations, company policies, "
+    "HR handbooks, leave entitlements, holidays, expense guidelines, IT access, onboarding/offboarding, "
+    "meetings, tasks, and workplace procedures.\n"
+    "2. If a user asks about topics completely outside workplace/office operations (e.g., creative writing, "
+    "politics, entertainment, trivia, gaming, recipes, or medical/legal advice unrelated to company policies), "
+    "politely decline and state: 'I am an AI office operations assistant dedicated to office operations, company policies, "
+    "meetings, tasks, and emails. How can I assist you with your workplace operations today?'\n"
+    "\n\n"
+    "BEHAVIOR RULES:\n"
+    "- When answering policy, leave, holiday, expense, or operational questions, ALWAYS base your answer "
+    "on the provided company knowledge base / retrieved documents and cite the source document name.\n"
+    "- Keep answers concise, direct, helpful, and professional.\n"
+    "- You provide recommendations and answers. You do not claim to have executed external actions "
+    "unless explicitly confirmed.\n"
+    "- Never reveal internal API keys, encryption keys, or system passwords.\n"
+    "- When a user asks to schedule a meeting or create a task without providing details, "
+    "ask clarifying questions to gather the required information before proceeding."
 )
 
 
@@ -76,20 +92,47 @@ def get_llm_client():
 def stream_chat_completion(
     messages: list[dict[str, str]],
     temperature: float = 0.3,
+    rag_context: list[dict] | None = None,
 ) -> Generator[str, None, None]:
     """Stream token chunks from the configured LLM client.
 
     Yields individual string tokens as they are received.
-    If no LLM provider is configured (e.g. offline dev/testing), yields a
-    clean informational notice without crashing.
+    If no LLM provider is configured (e.g. offline dev/testing), provides a
+    helpful cited response from RAG documents if available, or a clean notice.
     """
     client, model, provider = get_llm_client()
 
     if client is None:
+        if rag_context:
+            top = rag_context[0]
+            answer = (
+                f"Based on company documents (**{top['source']}**):\n\n"
+                f"{top['snippet']}\n\n"
+                f"*(Source: {top['source']})*"
+            )
+            yield answer
+            return
         yield "AI Assistant is running in local mode. Please configure GROQ_API_KEY in backend/.env for live model responses."
         return
 
     full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # If RAG snippets were retrieved from company documents, inject them
+    if rag_context:
+        rag_text = "\n\n".join(
+            f"[Document: {item.get('source', 'Company Knowledge')}]\n{item.get('snippet', '')}"
+            for item in rag_context
+        )
+        full_messages.append({
+            "role": "system",
+            "content": (
+                "Verified Company Knowledge (retrieved via RAG from company files):\n"
+                f"{rag_text}\n\n"
+                "Please use this knowledge to answer the user's question accurately. "
+                "Include a brief citation of the source document."
+            ),
+        })
+
     # Append conversation messages
     for msg in messages:
         if msg.get("role") in ("user", "assistant", "system") and msg.get("content"):
