@@ -231,6 +231,8 @@ class _PlanRunner:
         self.turn_id = uuid.uuid4().hex
         self.turn_summaries: list[str] = []
         self.writes_done: list[str] = []
+        # Story 7.3: things the user should know that are not failures.
+        self.notices: list[str] = []
         self._reasons: dict[int, list[str]] = {}
         self.chunks: list[str] = []
         self.last_index = -1
@@ -307,7 +309,40 @@ class _PlanRunner:
         self.results[step.tool_name] = step.result
         return summarize_tool_result(step.tool_name, step.result)
 
+    def _email_document_context(self):
+        """Story 7.3: find company-document facts before the assistant drafts an e-mail.
+
+        Stored as ``results["document.context"]``, which binds the preview's
+        instructions and fills the e-mail body (``prepare_tool_arguments``).
+        """
+        topic = self.understanding.entities.topic or ""
+        if "document.context" in self.results or not assistant_planner.needs_retrieval(topic):
+            return
+        try:
+            context = assistant_planner.retrieve_email_document_context(
+                self.run_db, actor_id=self.principal.user_id, topic=topic
+            )
+        except Exception as exc:  # noqa: BLE001 - draft without facts rather than fail
+            logger.warning("Document retrieval for an e-mail failed: %s", exc)
+            context = []
+        self.results["document.context"] = {
+            "query": assistant_planner.email_document_query(topic),
+            "results": context,
+        }
+        if context:
+            snippet = context[0]["snippet"]
+            self.total_tokens_estimated += estimate_tokens(snippet)
+            yield _sse({"retrieval": {
+                "query": topic,
+                "snippet": snippet,
+                "source": context[0].get("source"),
+            }})
+        else:
+            self.notices.append(assistant_planner.EMAIL_DOCUMENT_NOT_FOUND_NOTICE)
+
     def _execute(self, step: PlanStep):
+        if step.tool_name == "email.preview":
+            yield from self._email_document_context()
         # Conditional retrieval for steps that are not themselves the search tool.
         if step.retrieval_query is not None and step.tool_name != "document.search":
             snippet = assistant_planner.retrieve_company_knowledge(
@@ -444,6 +479,7 @@ class _PlanRunner:
                 ("I couldn't finish: " if self.writes_done else "I couldn't continue: ")
                 + self.failure
             )
+        parts.extend(self.notices)
         return " ".join(parts) or "Nothing was run."
 
     def _summarise(self, step: PlanStep):
@@ -800,36 +836,54 @@ def stream_assistant_chat(
             return
 
         # ================================================================
-        # STORY 6.1 / 6.3 / EPIC 7 RAG PATH (forced_response or RAG chat)
+        # STORY 6.1 / 6.3 / 7.3 PATH (forced_response, document question, or chat)
         # ================================================================
-        rag_matches = []
-        if assistant_planner.needs_retrieval(req.message):
+        # Story 7.3: a policy / SOP / project question (or a request for a plan
+        # based on those documents) is answered only from the best four of eight
+        # ACL-filtered semantic matches. Nothing relevant: say so; never guess.
+        effective_forced = forced_response or clarification_resolved_notice
+        document_question = (
+            effective_forced is None
+            and assistant_planner.needs_retrieval(req.message)
+            and (
+                understanding is None
+                or assistant_planner.is_document_plan_request(req.message)
+            )
+        )
+        rag_matches: list[dict] = []
+        document_answer: str | None = None
+        if document_question:
             try:
                 with Session(bind=engine) as query_db:
-                    rag_matches = assistant_planner.search_company_knowledge(
-                        req.message,
-                        limit=3,
-                        db=query_db,
+                    rag_matches = assistant_planner.retrieve_semantic_document_context(
+                        query_db,
                         actor_id=principal.user_id,
+                        query=assistant_planner.document_search_query(req.message),
                     )
-            except Exception as rag_err:
-                logger.warning("RAG retrieval failed: %s", rag_err)
-
-            if rag_matches:
-                yield _sse({
-                    "retrieval": {
-                        "query": req.message,
-                        "snippet": rag_matches[0]["snippet"],
-                        "source": rag_matches[0]["source"],
-                    }
-                })
+            except Exception as rag_err:  # noqa: BLE001 - answer without guessing
+                logger.warning("Document retrieval failed: %s", rag_err)
+                document_answer = assistant_planner.DOCUMENT_SEARCH_FAILED_MESSAGE
+            else:
+                if rag_matches:
+                    yield _sse({
+                        "retrieval": {
+                            "query": req.message,
+                            "snippet": rag_matches[0]["snippet"],
+                            "source": rag_matches[0]["source"],
+                            "sources": list(dict.fromkeys(
+                                match["source"] for match in rag_matches
+                            )),
+                        }
+                    })
+                else:
+                    document_answer = assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
 
         try:
-            effective_forced = forced_response or clarification_resolved_notice
             if effective_forced is not None:
                 response_stream = iter([effective_forced])
+            elif document_answer is not None:
+                response_stream = iter([document_answer])
             elif rag_matches:
-                # Direct match in company documents/handbook: use RAG answer
                 response_stream = assistant_service.stream_chat_completion(
                     context_messages,
                     rag_context=rag_matches,

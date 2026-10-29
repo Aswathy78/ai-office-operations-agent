@@ -220,6 +220,10 @@ def seed_company_documents(db: Session) -> Document | None:
         .first()
     )
     if existing is not None:
+        # Story 7.3: the company handbook is for every employee, not only its owner.
+        if not existing.shared_with_all_employees:
+            existing.shared_with_all_employees = True
+            db.commit()
         return existing
 
     # Find an owner employee (e.g. manager Maya Thompson or first employee)
@@ -255,6 +259,7 @@ def seed_company_documents(db: Session) -> Document | None:
         mime_type="application/pdf",
         owner_id=owner.id,
         status=DOC_STATUS_READY,
+        shared_with_all_employees=True,
         extracted_text=HANDBOOK_TEXT,
         page_count=10,
         processing_completed_at=datetime.now(timezone.utc),

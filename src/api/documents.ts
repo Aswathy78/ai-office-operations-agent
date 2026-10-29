@@ -26,6 +26,8 @@ export interface DocumentItem {
   created_at: string
   updated_at: string
   acl: DocumentACLEntry[]
+  /** Story 7.3: every active employee may read it and ask the assistant about it. */
+  shared_with_all_employees?: boolean
 }
 
 export interface DocumentUploadResponse {
@@ -142,11 +144,15 @@ export async function reindexDocument(id: string): Promise<DocumentItem> {
 export async function uploadDocument(
   file: File,
   aclEmployeeIds: string[] = [],
+  sharedWithAllEmployees = false,
 ): Promise<DocumentUploadResponse> {
   const formData = new FormData()
   formData.append('file', file)
   if (aclEmployeeIds.length > 0) {
     formData.append('acl_employee_ids', JSON.stringify(aclEmployeeIds))
+  }
+  if (sharedWithAllEmployees) {
+    formData.append('shared_with_all_employees', 'true')
   }
 
   const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/upload`, {

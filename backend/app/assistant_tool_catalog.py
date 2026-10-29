@@ -407,15 +407,18 @@ def preview_email(context: ToolContext, arguments: dict) -> dict:
         emails=raw,
         exclude_email=context.principal.email,
     )
+    # Instructions (e.g. retrieved document facts, Story 7.3) go before the request
+    # line, so the e-mail topic is still read from "about …" alone.
     prompt = f"Send an e-mail about {arguments['topic']}."
     if arguments.get("instructions"):
-        prompt += f" {arguments['instructions']}"
+        prompt = f"{arguments['instructions']}\n\n{prompt}"
     content = compose_draft(
         prompt,
         mode=arguments.get("mode", "template"),
         sender=context.principal.name,
         recipients=recipients,
         groups=groups,
+        retrieved_context=arguments.get("document_context") or None,
     )
     approval_required, approval_reasons = evaluate_approval(recipients)
     findings = scan_sensitive(content["subject"], content["body"])
@@ -986,6 +989,8 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
                 **recipients,
                 "topic": {"type": "string", "minLength": 1, "maxLength": 500},
                 "instructions": {"type": "string", "maxLength": 2000},
+                # Story 7.3: retrieved company-document facts for the body.
+                "document_context": {"type": "string", "maxLength": 10000},
                 "mode": {"type": "string", "enum": ["template", "auto"]},
             },
             "anyOf": _RECIPIENT_REQUIRED,

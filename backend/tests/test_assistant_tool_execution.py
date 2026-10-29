@@ -867,7 +867,12 @@ class TestRealExecution:
         assert _execute(as_manager, "task.list",
                         {"assignee_email": "alice@northstar.example"}).status_code == 403
 
-    def test_meeting_list_upcoming(self, as_manager, mail):
+    def test_meeting_list_upcoming(self, as_manager, db_session, mail):
+        # Every day is a working day, so the booking is low risk on any weekday (Story 6.6).
+        bob = db_session.get(Employee, "emp-bob")
+        bob.working_days = [0, 1, 2, 3, 4, 5, 6]
+        bob.working_hours_start, bob.working_hours_end = "00:00", "23:59"
+        db_session.commit()
         _execute(as_manager, "meeting.schedule",
                  {"title": "Planning", "start_at": _future(days=2), "duration_minutes": 30,
                   "attendee_emails": ["bob@northstar.example"]},

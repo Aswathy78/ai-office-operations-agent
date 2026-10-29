@@ -63,9 +63,9 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
     first_run = seed_development_employees(db_session)
     second_run = seed_development_employees(db_session)
 
-    assert len(first_run) == 10
+    assert len(first_run) == 11
     assert len(second_run) == 0
-    assert db_session.query(Employee).count() == 10
+    assert db_session.query(Employee).count() == 11
     assert {employee.email for employee in db_session.query(Employee).all()} == {
         "manager@example.com",
         "ava.patel@northstar.example",
@@ -77,6 +77,7 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
         "chloe.nguyen@northstar.example",
         "ethan.walker@northstar.example",
         "rahulexample.test@gmail.com",
+        "amaldev980ads@gmail.com",
     }
     rahul = db_session.query(Employee).filter_by(email="rahulexample.test@gmail.com").one()
     assert rahul.name == "Rahul"

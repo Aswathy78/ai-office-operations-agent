@@ -88,6 +88,7 @@ export function DocumentsPage() {
   // Upload state
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [aclInput, setAclInput] = useState('')
+  const [sharedWithAll, setSharedWithAll] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadFeedback, setUploadFeedback] = useState<{
     type: 'success' | 'error' | 'warning'
@@ -238,7 +239,7 @@ export function DocumentsPage() {
       .filter(Boolean)
 
     try {
-      const res = await uploadDocument(selectedFile, aclIds)
+      const res = await uploadDocument(selectedFile, aclIds, sharedWithAll)
       setUploadFeedback({
         type: res.warnings && res.warnings.length > 0 ? 'warning' : 'success',
         message: `"${res.document.original_filename}" uploaded successfully and queued for extraction.`,
@@ -246,6 +247,7 @@ export function DocumentsPage() {
       })
       setSelectedFile(null)
       setAclInput('')
+      setSharedWithAll(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
       await loadDocuments(true)
     } catch (err) {
@@ -555,6 +557,18 @@ export function DocumentsPage() {
             <small style={{ color: 'var(--muted)', fontSize: '12px', display: 'block', marginTop: '4px' }}>
               You ({user?.name || 'Current User'}) are automatically the owner. Add other employee IDs to grant them view and download permissions.
             </small>
+            <label
+              htmlFor="share-all-input"
+              style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', marginTop: '10px' }}
+            >
+              <input
+                id="share-all-input"
+                type="checkbox"
+                checked={sharedWithAll}
+                onChange={(e) => setSharedWithAll(e.target.checked)}
+              />
+              Share with all employees (company-wide handbooks, policies and SOPs the AI assistant can answer from)
+            </label>
           </div>
 
           {/* Upload Button */}

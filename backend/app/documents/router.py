@@ -97,6 +97,7 @@ def _doc_response(doc: Document) -> DocumentResponse:
         created_at=doc.created_at,
         updated_at=doc.updated_at,
         acl=acl,
+        shared_with_all_employees=bool(doc.shared_with_all_employees),
     )
 
 
@@ -111,6 +112,10 @@ async def upload_document(
     acl_employee_ids: str | None = Form(
         None,
         description="JSON array of employee IDs to grant read access, e.g. [\"emp-1\", \"emp-2\"]",
+    ),
+    shared_with_all_employees: bool = Form(
+        False,
+        description="Let every active employee read and ask about it (handbooks, SOPs).",
     ),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
@@ -141,6 +146,7 @@ async def upload_document(
             data=data,
             owner_id=principal.user_id,
             acl_employee_ids=acl_ids,
+            shared_with_all_employees=shared_with_all_employees,
         )
     except DocumentValidationError as exc:
         raise HTTPException(
@@ -177,6 +183,7 @@ async def replace_document(
     document_id: str,
     file: UploadFile = File(..., description="Replacement document file"),
     acl_employee_ids: str | None = Form(None),
+    shared_with_all_employees: bool | None = Form(None),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
@@ -212,6 +219,7 @@ async def replace_document(
             filename=filename,
             data=data,
             acl_employee_ids=acl_ids,
+            shared_with_all_employees=shared_with_all_employees,
         )
     except DocumentValidationError as exc:
         raise HTTPException(

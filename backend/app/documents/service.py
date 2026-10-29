@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import filetype
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.documents.models import (
@@ -137,6 +137,7 @@ def create_document(
     data: bytes,
     owner_id: str,
     acl_employee_ids: list[str] | None = None,
+    shared_with_all_employees: bool = False,
 ) -> UploadResult:
     """Persist an uploaded document and return the created record.
 
@@ -167,6 +168,7 @@ def create_document(
         mime_type=mime_type,
         owner_id=owner_id,
         status=DOC_STATUS_UPLOADED,
+        shared_with_all_employees=shared_with_all_employees,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -234,13 +236,20 @@ def check_document_access(
 
 
 def _document_access_filter(actor_id: str):
-    """Shared SQL rule: only document owners and explicit ACL members have access."""
+    """Shared SQL rule: the owner, explicit ACL members and, for documents shared
+    with all employees (Story 7.3), any active employee have access."""
     acl_document_ids = select(DocumentACLEntry.document_id).where(
         DocumentACLEntry.employee_id == actor_id
+    )
+    actor_is_active = (
+        select(Employee.id)
+        .where(Employee.id == actor_id, Employee.is_active.is_(True))
+        .exists()
     )
     return or_(
         Document.owner_id == actor_id,
         Document.id.in_(acl_document_ids),
+        and_(Document.shared_with_all_employees.is_(True), actor_is_active),
     )
 
 
@@ -269,6 +278,7 @@ def update_document_file(
     filename: str,
     data: bytes,
     acl_employee_ids: list[str] | None = None,
+    shared_with_all_employees: bool | None = None,
 ) -> UploadResult:
     """Replace a document and let the background worker re-extract and index it."""
     mime_type = validate_upload(filename, data)
@@ -290,6 +300,8 @@ def update_document_file(
         document.extracted_text = None
         document.page_count = None
         document.version += 1
+        if shared_with_all_employees is not None:
+            document.shared_with_all_employees = shared_with_all_employees
         document.processing_started_at = None
         document.processing_completed_at = None
         document.updated_at = datetime.now(timezone.utc)

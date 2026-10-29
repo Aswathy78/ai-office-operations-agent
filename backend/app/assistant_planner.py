@@ -150,6 +150,25 @@ def is_document_plan_request(message: str) -> bool:
     )
 
 
+_PLAN_REQUEST_WORDS = re.compile(
+    r"^\s*(?:please\s+)?(?:can\s+you\s+)?(?:create|make|build|draft|prepare|develop)\s+"
+    r"(?:(?:a|an|the|my|our)\s+)?|\bplan\b|\b(?:based\s+on|using|from|according\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+def document_search_query(message: str) -> str:
+    """The question to search documents with (Story 7.3).
+
+    A plan request ("Create an onboarding plan based on the HR SOP") is searched
+    by its subject; the instruction words would only dilute the match.
+    """
+    if not is_document_plan_request(message):
+        return message
+    subject = re.sub(r"\s+", " ", _PLAN_REQUEST_WORDS.sub(" ", message)).strip(" .!?")
+    return subject or message
+
+
 def retrieve_semantic_document_context(
     db: Session,
     *,
@@ -272,6 +291,55 @@ def retrieve_company_knowledge(
     if results:
         return results[0]["snippet"]
     return None
+
+
+# Story 7.3: answers come only from documents the employee may read. When the
+# search finds nothing relevant the assistant says so instead of guessing.
+DOCUMENT_NOT_FOUND_MESSAGE = (
+    "I couldn't find relevant information in the indexed company documents you have "
+    "access to, so I won't guess an answer. Try rephrasing the question, or ask "
+    "HR / Operations to upload the document that covers it."
+)
+DOCUMENT_SEARCH_FAILED_MESSAGE = (
+    "I couldn't search the company documents right now, so I won't guess an answer. "
+    "Please try again in a moment."
+)
+EMAIL_DOCUMENT_NOT_FOUND_NOTICE = (
+    "I couldn't find relevant information in the indexed company documents for this "
+    "e-mail, so the draft contains no company-specific facts; add them before sending."
+)
+_EMAIL_QUERY_NOISE = re.compile(
+    r"\b(?:the\s+)?(?:company|organi[sz]ation)['’]s\s*"
+    r"|\s+(?:according\s+to|based\s+on|using|from|in)\s+(?:the\s+)?"
+    r"(?:hr\s+)?(?:handbook|polic(?:y|ies)|sops?|documents?)\b.*$",
+    re.IGNORECASE,
+)
+
+
+def email_document_query(topic: str) -> str:
+    """The search query for an e-mail topic, without where-to-look phrasing."""
+    return re.sub(r"\s+", " ", _EMAIL_QUERY_NOISE.sub(" ", topic)).strip() or topic
+
+
+def retrieve_email_document_context(
+    db: Session,
+    *,
+    actor_id: str,
+    topic: str,
+) -> list[dict]:
+    """Company-document facts for an e-mail the assistant drafts (Story 7.3).
+
+    The ACL-filtered semantic search (top 8, best 4) comes first; the static
+    company policy is the same fallback the plan's policy check uses.
+    """
+    query = email_document_query(topic)
+    results = retrieve_semantic_document_context(db, actor_id=actor_id, query=query)
+    if results:
+        return results
+    snippet = retrieve_company_knowledge(query, db=db, actor_id=actor_id)
+    if snippet:
+        return [{"source": _KNOWLEDGE_BASE_PATH.name, "snippet": snippet}]
+    return []
 
 
 # ---------------------------------------------------------------------------
