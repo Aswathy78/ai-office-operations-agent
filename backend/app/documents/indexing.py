@@ -135,6 +135,9 @@ class SemanticSearchResult:
     content: str
     score: float
     document_version: int
+    # Story 7.5: where the passage sits, for citations.
+    page_label: str | None = None
+    chunk_index: int | None = None
 
 
 def _search_terms(text: str) -> set[str]:
@@ -281,6 +284,23 @@ def _search_passages(content: str) -> list[tuple[str | None, str]]:
     return passages[:MAX_PASSAGES_PER_CHUNK]
 
 
+_PAGE_MARKER = re.compile(r"\[((?:Page|Slide)\s+\d+|Sheet:[^\]]+?)(?:\s+[—–-]\s+OCR)?\]", re.I)
+
+
+def _page_from_heading(indexed_heading: str | None, chunk_content: str) -> str | None:
+    """Page of a chunk indexed before ``page_label`` existed, if its text names one.
+
+    Only a chunk that names exactly one page is trusted; one that spans several
+    pages could point at the wrong one, so it gets no page (never a guess).
+    """
+    markers = {
+        marker.strip()
+        for text in (chunk_content, indexed_heading or "")
+        for marker in _PAGE_MARKER.findall(text)
+    }
+    return markers.pop() if len(markers) == 1 else None
+
+
 def _display_heading(
     section_heading: str | None,
     indexed_heading: str | None,
@@ -395,6 +415,7 @@ def index_document(db: Session, document_id: str) -> bool:
                     content=chunk.content,
                     token_count=chunk.token_count,
                     department=owner.team,
+                    page_label=chunk.location,
                     acl_employee_ids=acl_ids,
                     embedding=vector,
                     embedding_model=EMBEDDING_MODEL,
@@ -678,6 +699,8 @@ def search_documents(
                 content=content,
                 score=combined_score,
                 document_version=chunk.document_version,
+                page_label=chunk.page_label or _page_from_heading(chunk.heading, chunk.content),
+                chunk_index=chunk.chunk_index,
             )
         )
 

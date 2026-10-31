@@ -57,6 +57,7 @@ class SemanticSearchResultResponse(BaseModel):
     content: str
     score: float
     document_version: int
+    page_label: str | None = None
 
     model_config = {"from_attributes": True}
 

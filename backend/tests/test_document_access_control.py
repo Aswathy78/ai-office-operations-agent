@@ -231,7 +231,7 @@ def test_authorized_manager_gets_a_grounded_answer_with_a_valid_citation(
 
     answer = _answer(events)
     assert RESTRICTED_FACT in answer
-    assert f"(Source: {RESTRICTED_FILE})" in answer
+    assert f"[1] {RESTRICTED_FILE}" in answer
     [retrieval] = [event["retrieval"] for event in events if "retrieval" in event]
     assert retrieval["sources"] == [RESTRICTED_FILE]
 

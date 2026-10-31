@@ -16,6 +16,7 @@ import uuid
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
+from app import rag_citations
 from app.meeting.models import (
     AssistantConversation,
     AssistantMessage,
@@ -89,6 +90,23 @@ def get_llm_client():
     return None, None, None
 
 
+def answer_from_documents(
+    messages: list[dict[str, str]],
+    rag_context: list[dict],
+    *,
+    question: str = "",
+) -> rag_citations.GroundedAnswer:
+    """Answer from retrieved passages, keeping only what they support (Story 7.5).
+
+    The model's reply is buffered and checked before anything is shown: every
+    sentence must be supported by a passage, citations are attached from the
+    passage that really contains the claim, and an answer with no support is
+    replaced by the Not found message.
+    """
+    raw = "".join(stream_chat_completion(messages, rag_context=rag_context))
+    return rag_citations.ground_answer(raw, rag_context, question=question)
+
+
 def stream_chat_completion(
     messages: list[dict[str, str]],
     temperature: float = 0.3,
@@ -105,11 +123,8 @@ def stream_chat_completion(
     if client is None:
         if rag_context:
             top = rag_context[0]
-            answer = (
-                f"Based on company documents (**{top['source']}**):\n\n"
-                f"{top['snippet']}\n\n"
-                f"*(Source: {top['source']})*"
-            )
+            # The reply is checked and cited by the caller (Story 7.5).
+            answer = top["snippet"]
             others = list(dict.fromkeys(
                 item.get("source") for item in rag_context[1:]
                 if item.get("source") and item.get("source") != top["source"]
@@ -123,28 +138,12 @@ def stream_chat_completion(
 
     full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # Story 7.3: answer only from the retrieved company-document passages.
+    # Stories 7.3 / 7.5: answer only from the retrieved passages, which are
+    # numbered for citation and fenced off as untrusted data.
     if rag_context:
-        rag_text = "\n\n".join(
-            f"[Document: {item.get('source', 'Company Knowledge')}"
-            + (f" — {item['heading']}" if item.get("heading") else "")
-            + f"]\n{item.get('snippet', '')}"
-            for item in rag_context
-        )
         full_messages.append({
             "role": "system",
-            "content": (
-                "Company document passages the employee is allowed to read "
-                "(retrieved for this question):\n"
-                f"{rag_text}\n\n"
-                "Answer using ONLY these passages. Do not add facts, numbers, names or "
-                "rules that are not stated in them, and do not use outside knowledge "
-                "about company policy. Cite the document name for each fact, e.g. "
-                "(Source: handbook.pdf). If the passages do not contain the answer, say "
-                "plainly that you couldn't find it in the indexed company documents "
-                "instead of guessing. When asked to create a plan or checklist, build it "
-                "only from the steps and rules in these passages."
-            ),
+            "content": rag_citations.grounding_prompt(rag_context),
         })
 
     else:
@@ -156,9 +155,9 @@ def stream_chat_completion(
                 "No company documents were retrieved for this message. Never state "
                 "specific company policy facts, numbers, dates, entitlements or "
                 "document/file names from memory, and never say you will look something "
-                "up and get back later. If the employee is asking for such facts, say "
-                "plainly that you couldn't find them in the indexed company documents "
-                "they can access."
+                "up and get back later. If the employee is asking for such facts, reply "
+                "\"Not found\" and say you couldn't find them in the indexed company "
+                "documents they can access."
             ),
         })
 

@@ -28,6 +28,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
+import { CitationList, withoutSourcesBlock } from './CitationList'
 import remarkBreaks from 'remark-breaks'
 import remarkGfm from 'remark-gfm'
 import { ASSISTANT_QUICK_ACTIONS, type PlanStep } from '../../api/assistant'
@@ -494,7 +495,8 @@ export function AssistantWidget() {
                         msg.content
                       ) : (
                         <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-                          {msg.content.replace(/<br\s*\/?>/gi, '\n')}
+                          {(msg.citations?.length ? withoutSourcesBlock(msg.content) : msg.content)
+                            .replace(/<br\s*\/?>/gi, '\n')}
                         </ReactMarkdown>
                       )}
                       {msg.isStreaming && (
@@ -504,6 +506,9 @@ export function AssistantWidget() {
                         />
                       )}
                     </div>
+                    {!isUser && !msg.isStreaming && msg.citations && (
+                      <CitationList citations={msg.citations} />
+                    )}
                     {msg.isStreaming && !msg.content && (
                       <div
                         className="assistant-typing-indicator"

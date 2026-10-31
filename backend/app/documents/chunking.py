@@ -24,6 +24,17 @@ class DocumentChunkText:
     content: str
     heading: str | None
     token_count: int
+    # Story 7.5: the page, slide or sheet the chunk comes from ("Page 3",
+    # "Slide 2", "Sheet: Cafeteria"), kept apart from the section heading so a
+    # citation can name both. None for formats without pages (e.g. Word).
+    location: str | None = None
+
+
+def location_label(marker_line: str) -> str:
+    """``"[Page 3 — OCR]"`` -> ``"Page 3"``; ``"[Sheet: Rooms]"`` -> ``"Sheet: Rooms"``."""
+    label = marker_line.strip().strip("[]").strip()
+    label = re.split(r"\s+[—–-]\s+OCR\b", label, maxsplit=1)[0]
+    return label.strip()
 
 
 def _is_heading(line: str) -> bool:
@@ -41,16 +52,18 @@ def _is_heading(line: str) -> bool:
     )
 
 
-def _split_sections(text: str) -> list[tuple[str | None, str]]:
-    sections: list[tuple[str | None, str]] = []
+def _split_sections(text: str) -> list[tuple[str | None, str, str | None]]:
+    """Sections as (heading, body, location); location is the page/slide/sheet."""
+    sections: list[tuple[str | None, str, str | None]] = []
     heading_levels: list[tuple[int, str]] = []
     current_heading: str | None = None
+    current_location: str | None = None
     body_lines: list[str] = []
 
     def flush() -> None:
         body = "\n".join(body_lines).strip()
         if body:
-            sections.append((current_heading, body))
+            sections.append((current_heading, body, current_location))
         body_lines.clear()
 
     for line in text.splitlines():
@@ -68,6 +81,8 @@ def _split_sections(text: str) -> list[tuple[str | None, str]]:
             continue
         if _is_heading(line):
             flush()
+            if _STRUCTURAL_HEADING.match(line):
+                current_location = location_label(line)
             current_heading = line.strip()
             heading_levels.clear()
             continue
@@ -75,7 +90,7 @@ def _split_sections(text: str) -> list[tuple[str | None, str]]:
     flush()
 
     if not sections and text.strip():
-        sections.append((None, text.strip()))
+        sections.append((None, text.strip(), None))
     return sections
 
 
@@ -136,7 +151,7 @@ def _pack_underfilled_chunks(
     current: DocumentChunkText | None = None
     current_headings: list[str] = []
 
-    def append_chunk(content: str, heading: str | None) -> None:
+    def append_chunk(content: str, heading: str | None, location: str | None) -> None:
         token_count = count_tokens(content)
         if token_count > max_tokens:
             raise ValueError("Packed document chunk exceeds the embedding token limit.")
@@ -145,6 +160,7 @@ def _pack_underfilled_chunks(
                 content=content,
                 heading=heading,
                 token_count=token_count,
+                location=location,
             )
         )
 
@@ -155,11 +171,13 @@ def _pack_underfilled_chunks(
             continue
 
         combined = f"{current.content}\n\n{chunk.content}"
-        if count_tokens(combined) <= target_tokens:
+        # Chunks from different pages are never merged, so a chunk has one page.
+        if count_tokens(combined) <= target_tokens and chunk.location == current.location:
             current = DocumentChunkText(
                 content=combined,
                 heading=current.heading,
                 token_count=count_tokens(combined),
+                location=current.location,
             )
             if chunk.heading and (
                 not current_headings or chunk.heading != current_headings[-1]
@@ -170,13 +188,15 @@ def _pack_underfilled_chunks(
         append_chunk(
             current.content,
             " | ".join(current_headings) if current_headings else None,
+            current.location,
         )
 
         # Chunks split inside one heading already overlap in the section chunker.
         # At a heading boundary, carry context forward when it fits.
         next_content = chunk.content
         previous_heading = current_headings[-1] if current_headings else None
-        if previous_heading != chunk.heading:
+        # Never carry text over a page boundary: a chunk's page must be its own.
+        if previous_heading != chunk.heading and chunk.location == current.location:
             overlap = _trailing_overlap(
                 current.content,
                 overlap_tokens,
@@ -191,6 +211,7 @@ def _pack_underfilled_chunks(
             content=next_content,
             heading=chunk.heading,
             token_count=count_tokens(next_content),
+            location=chunk.location,
         )
         current_headings = [chunk.heading] if chunk.heading else []
 
@@ -198,6 +219,7 @@ def _pack_underfilled_chunks(
         append_chunk(
             current.content,
             " | ".join(current_headings) if current_headings else None,
+            current.location,
         )
     return packed
 
@@ -215,7 +237,7 @@ def chunk_document_text(
         return []
 
     chunks: list[DocumentChunkText] = []
-    for heading, section_text in _split_sections(text):
+    for heading, section_text, location in _split_sections(text):
         heading_context = f"{heading}\n\n" if heading else ""
         heading_tokens = count_tokens(heading_context)
         if heading_tokens >= max_tokens:
@@ -278,6 +300,7 @@ def chunk_document_text(
                     content=content,
                     heading=heading,
                     token_count=count,
+                    location=location,
                 )
             )
             if cursor >= len(atoms):
