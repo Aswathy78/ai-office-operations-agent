@@ -36,6 +36,7 @@ from app.documents.models import (
     DOC_STATUS_READY,
     INDEX_STATUS_READY,
     Document,
+    DocumentACLEntry,
     DocumentChunk,
 )
 from app.meeting.models import Base, Employee
@@ -170,9 +171,17 @@ def _ask(client: TestClient, message: str) -> list[dict]:
 
 
 def test_chat_passes_exactly_the_best_four_of_eight_matches_to_the_model(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, db_session: Session, monkeypatch: pytest.MonkeyPatch,
 ):
     limits = []
+    for i in range(8):
+        db_session.add(Document(
+            id=f"doc-{i}", original_filename=f"policy-{i}.pdf", stored_filename=f"s-{i}.pdf",
+            file_size=1, mime_type="application/pdf", owner_id="doc-hr",
+            status=DOC_STATUS_READY, indexing_status=INDEX_STATUS_READY, version=1,
+            shared_with_all_employees=True,
+        ))
+    db_session.commit()
 
     def search(db, *, actor_id, query, limit):
         limits.append(limit)
@@ -441,3 +450,88 @@ def test_email_topic_understands_explaining_and_where_to_look(db_session: Sessio
     assert result is not None and result.status == "understood"
     assert result.entities.topic == "the company's flexible core hours"
     assert assistant_planner.email_document_query(result.entities.topic) == "flexible core hours"
+
+
+# ---------------------------------------------------------------------------
+# Questions without a policy keyword are still grounded in the documents
+# ---------------------------------------------------------------------------
+
+REMOTE_QUESTION = "How many remote work days are allowed per year?"
+REMOTE_TEXT = "# Remote Work Policy\n\nRemote work: employees may work remotely from another city for up to 15 days per year."
+
+
+def _remote_policy_for_maya_only(db: Session) -> Document:
+    document = _add_document(
+        db, filename="Remote-Work-Policy.pdf", text=REMOTE_TEXT, owner_id="doc-hr", shared=False,
+    )
+    db.add(DocumentACLEntry(id=str(uuid.uuid4()), document_id=document.id, employee_id="doc-maya"))
+    db.query(DocumentChunk).filter(DocumentChunk.document_id == document.id).update(
+        {DocumentChunk.acl_employee_ids: ["doc-hr", "doc-maya"]}
+    )
+    db.commit()
+    return document
+
+
+@pytest.mark.parametrize("message", [
+    REMOTE_QUESTION,
+    "Can I work from home on Fridays?",
+    "How do I get a parking permit?",
+    "what is the travel allowance",
+])
+def test_questions_without_a_policy_keyword_are_searched_in_the_documents(message: str):
+    assert assistant_planner.should_search_documents(message)
+
+
+@pytest.mark.parametrize("message", ["ok", "full time", "hello there", "Schedule a meeting tomorrow"])
+def test_statements_and_commands_are_not_treated_as_document_questions(message: str):
+    assert not assistant_planner.looks_like_question(message)
+
+
+def test_remote_work_question_is_answered_for_a_person_on_the_access_list(
+    client: TestClient, db_session: Session, deterministic_embeddings, no_llm,
+):
+    _remote_policy_for_maya_only(db_session)
+    client.login("doc-maya")
+
+    events = _ask(client, REMOTE_QUESTION)
+
+    assert any("retrieval" in event for event in events)
+    assert "15 days" in _answer(events)
+    assert "Remote-Work-Policy.pdf" in _answer(events)
+
+
+def test_remote_work_question_is_not_answered_for_someone_off_the_access_list(
+    client: TestClient, db_session: Session, deterministic_embeddings, monkeypatch: pytest.MonkeyPatch,
+):
+    _remote_policy_for_maya_only(db_session)
+    monkeypatch.setattr(
+        assistant_service, "stream_chat_completion",
+        lambda *args, **kwargs: pytest.fail("The model must not answer from memory."),
+    )
+
+    events = _ask(client, REMOTE_QUESTION)
+
+    assert _answer(events) == assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
+    assert "15" not in _answer(events)
+
+
+def test_chat_without_documents_forbids_inventing_company_facts(
+    client: TestClient, db_session: Session, deterministic_embeddings, monkeypatch: pytest.MonkeyPatch,
+):
+    sent = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            sent.append(kwargs["messages"])
+            return iter([])
+
+    class FakeClient:
+        chat = type("Chat", (), {"completions": FakeCompletions()})()
+
+    monkeypatch.setattr(assistant_service, "get_llm_client", lambda: (FakeClient(), "m", "groq"))
+
+    _ask(client, "How do I find the parking garage?")
+
+    guard = [m["content"] for m in sent[0] if m["role"] == "system" and "No company documents were retrieved" in m["content"]]
+    assert len(guard) == 1
+    assert "Never state specific company policy facts" in guard[0]

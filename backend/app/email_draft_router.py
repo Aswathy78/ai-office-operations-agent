@@ -251,6 +251,7 @@ def create_email_draft(
 ):
     """Draft an e-mail from a chat message. Nothing is sent."""
     retrieved_context = None
+    source_document_ids: list[str] = []
     from app import assistant_planner
 
     if (
@@ -273,6 +274,13 @@ def create_email_draft(
             actor_id=actor.id,
             query=search_query,
         )
+        # Story 7.4: only passages the sender may read right now go into the draft.
+        results = assistant_planner.authorize_document_context(
+            db, actor_id=actor.id, context=results
+        )
+        source_document_ids = [
+            item["document_id"] for item in results if item.get("document_id")
+        ]
         retrieved_context = "\n\n".join(
             f"[{item['source']}]\n{item['snippet']}"
             for item in results
@@ -294,6 +302,7 @@ def create_email_draft(
         sender_email=payload.sender_email,
         mode=payload.mode,
         retrieved_context=retrieved_context,
+        source_document_ids=source_document_ids,
     ))
 
 

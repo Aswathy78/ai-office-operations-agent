@@ -161,6 +161,42 @@ def _use_deterministic_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _readable_context(
+    db_session: Session,
+    owner: Employee,
+    source: str,
+    snippet: str,
+    **extra,
+) -> dict:
+    """Context for a real company document everyone may read.
+
+    Story 7.4 re-checks retrieved context against the document store at answer
+    time, so injected context needs a readable document behind it.
+    """
+    document = Document(
+        id=str(uuid.uuid4()),
+        original_filename=source,
+        stored_filename=f"{uuid.uuid4()}.pdf",
+        file_size=100,
+        mime_type="application/pdf",
+        owner_id=owner.id,
+        status=DOC_STATUS_READY,
+        indexing_status=INDEX_STATUS_READY,
+        version=1,
+        extracted_text=snippet,
+        shared_with_all_employees=True,
+    )
+    db_session.add(document)
+    db_session.commit()
+    return {
+        "source": source,
+        "snippet": snippet,
+        "document_id": document.id,
+        "document_version": document.version,
+        **extra,
+    }
+
+
 def test_semantic_context_retrieves_eight_and_selects_best_four(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -397,10 +433,12 @@ def test_working_hours_does_not_fall_back_to_static_policy(
 )
 def test_chat_uses_semantic_document_context(
     client: TestClient,
+    db_session: Session,
+    employee: Employee,
     monkeypatch: pytest.MonkeyPatch,
     query: str,
 ):
-    context = [{"source": "handbook.docx", "snippet": "Verified source passage."}]
+    context = [_readable_context(db_session, employee, "handbook.docx", "Verified source passage.")]
     retrieval_calls = []
     generated_context = []
 
@@ -595,12 +633,14 @@ def test_shared_with_all_employees_is_semantically_searchable_by_active_employee
 
 def test_email_preview_receives_retrieved_document_context(
     client: TestClient,
+    db_session: Session,
+    employee: Employee,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    context = [{
-        "source": "project-sop.docx",
-        "snippet": "The project launch requires a readiness review.",
-    }]
+    context = [_readable_context(
+        db_session, employee, "project-sop.docx",
+        "The project launch requires a readiness review.",
+    )]
     captured_preview_instructions = []
     captured_document_context = []
 
@@ -863,14 +903,13 @@ def test_chat_email_plan_passes_retrieved_facts_and_sender_to_real_preview_tool(
     )
     db_session.add(recipient)
     db_session.commit()
+    handbook_fact = _readable_context(
+        db_session, employee, "HR_and_Operations_Knowledge_Handbook_v2.1.pdf", fact, score=0.99,
+    )
     monkeypatch.setattr(
         assistant_planner,
         "retrieve_semantic_document_context",
-        lambda db, *, actor_id, query: [{
-            "source": "HR_and_Operations_Knowledge_Handbook_v2.1.pdf",
-            "snippet": fact,
-            "score": 0.99,
-        }],
+        lambda db, *, actor_id, query: [handbook_fact],
     )
     monkeypatch.setattr(
         assistant_planner,
@@ -940,14 +979,13 @@ def test_chat_send_step_repairs_legacy_preview_body_before_confirmation(
     )
     db_session.add(recipient)
     db_session.commit()
+    handbook_fact = _readable_context(
+        db_session, employee, "HR_and_Operations_Knowledge_Handbook_v2.1.pdf", fact, score=0.99,
+    )
     monkeypatch.setattr(
         assistant_planner,
         "retrieve_semantic_document_context",
-        lambda db, *, actor_id, query: [{
-            "source": "HR_and_Operations_Knowledge_Handbook_v2.1.pdf",
-            "snippet": fact,
-            "score": 0.99,
-        }],
+        lambda db, *, actor_id, query: [handbook_fact],
     )
     monkeypatch.setattr(
         assistant_planner,
@@ -1034,9 +1072,13 @@ def test_email_plan_reports_when_no_relevant_document_context_exists(
 
 def test_email_plan_does_not_report_missing_context_after_plan_step_retrieval(
     client: TestClient,
+    tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
     snippet = "The HR handbook provides 8 days of casual leave."
+    static_policy = tmp_path / "company_policy.md"
+    static_policy.write_text(f"{snippet}\n", encoding="utf-8")
+    monkeypatch.setattr(assistant_planner, "_KNOWLEDGE_BASE_PATH", static_policy)
     monkeypatch.setattr(
         assistant_planner,
         "retrieve_semantic_document_context",
@@ -1069,9 +1111,13 @@ def test_email_plan_does_not_report_missing_context_after_plan_step_retrieval(
 
 def test_document_grounded_plan_uses_retrieved_context(
     client: TestClient,
+    db_session: Session,
+    employee: Employee,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    context = [{"source": "onboarding-sop.docx", "snippet": "Use the onboarding checklist."}]
+    context = [_readable_context(
+        db_session, employee, "onboarding-sop.docx", "Use the onboarding checklist.",
+    )]
     received_context = []
 
     monkeypatch.setattr(

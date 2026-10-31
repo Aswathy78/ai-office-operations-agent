@@ -1200,6 +1200,11 @@ class EmailDraft(Base):
     # [{"name", "count"}] — directory groups that were expanded into recipients.
     recipient_groups: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     unresolved_recipients: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Story 7.4: company documents whose facts the draft quotes; the sender's access
+    # to them is re-checked when the e-mail is sent.
+    source_document_ids: Mapped[list] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     approval_reasons: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     # [{"type", "label", "severity", "match", "field"}]

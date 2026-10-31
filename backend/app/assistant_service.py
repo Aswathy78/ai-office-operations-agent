@@ -147,6 +147,21 @@ def stream_chat_completion(
             ),
         })
 
+    else:
+        # Nothing was retrieved. Without this the model fills the gap from memory
+        # and invents policies, numbers and file names.
+        full_messages.append({
+            "role": "system",
+            "content": (
+                "No company documents were retrieved for this message. Never state "
+                "specific company policy facts, numbers, dates, entitlements or "
+                "document/file names from memory, and never say you will look something "
+                "up and get back later. If the employee is asking for such facts, say "
+                "plainly that you couldn't find them in the indexed company documents "
+                "they can access."
+            ),
+        })
+
     # Append conversation messages
     for msg in messages:
         if msg.get("role") in ("user", "assistant", "system") and msg.get("content"):

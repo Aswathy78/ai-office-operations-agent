@@ -479,6 +479,7 @@ def send_email(context: ToolContext, arguments: dict) -> dict:
                 groups=arguments.get("groups", []),
                 prompt=arguments.get("request") or f"AI assistant e-mail: {arguments['subject']}",
                 generation_note="Prepared and sent by the AI Office Assistant on your confirmation.",
+                source_document_ids=arguments.get("document_ids", []),
             )
         except ValueError as exc:
             raise ToolExecutionError(str(exc)) from exc
@@ -1017,6 +1018,13 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
                 "subject": {"type": "string", "minLength": 1, "maxLength": 255},
                 "body": {"type": "string", "minLength": 1, "maxLength": 20000},
                 "acknowledge_sensitive": {"type": "boolean"},
+                # Story 7.4: company documents whose facts the e-mail quotes.
+                "document_ids": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 36},
+                    "maxItems": 8,
+                    "uniqueItems": True,
+                },
                 "request": {"type": "string", "maxLength": 4000},
             },
             "anyOf": _RECIPIENT_REQUIRED,
@@ -1373,7 +1381,34 @@ def authorize_email_send(db, principal, arguments: dict) -> list[str]:
     everyone = any(g.casefold() == EVERYONE_GROUP.casefold() for g in arguments.get("groups", []))
     if everyone and principal.role == "employee":
         return ["Only managers, HR / Operations or admins can e-mail everyone through the assistant."]
+    # Story 7.4: re-checked whenever the e-mail actually runs (chat confirm, the
+    # Approvals page, the tools API), so a revoked grant stops it. Never named.
+    from app.documents.service import accessible_document_versions
+
+    quoted = set(arguments.get("document_ids", []))
+    if quoted - set(accessible_document_versions(db, principal.user_id, quoted)):
+        return [
+            "This e-mail quotes company documents you no longer have access to, "
+            "so it cannot be sent."
+        ]
     return []
+
+
+def _recipients_without_document_access(db, recipients: list[dict], document_ids: list[str]) -> list[str]:
+    """Recipients who may not read every quoted document (Story 7.4)."""
+    from app.documents.service import accessible_document_versions
+
+    wanted = set(document_ids)
+    by_email = {
+        employee.email.casefold(): employee.id
+        for employee in db.query(Employee).filter(Employee.is_active.is_(True)).all()
+    }
+    outside = []
+    for recipient in recipients:
+        employee_id = by_email.get(recipient["email"].casefold())
+        if employee_id is None or wanted - set(accessible_document_versions(db, employee_id, wanted)):
+            outside.append(recipient["email"])
+    return outside
 
 
 def conflicts_email_send(db, principal, arguments: dict) -> list[dict]:
@@ -1427,6 +1462,14 @@ def risk_email_send(db, principal, arguments: dict) -> tuple[str, list[str]]:
     if findings:
         level = "high"
         reasons.append("possible sensitive data: " + ", ".join(sorted({f["label"] for f in findings})))
+    if arguments.get("document_ids"):
+        outside = _recipients_without_document_access(db, recipients, arguments["document_ids"])
+        if outside:
+            level = "high"
+            reasons.append(
+                "quotes a restricted company document to recipient(s) outside its "
+                "access list: " + ", ".join(outside)
+            )
     return level, reasons
 
 

@@ -677,6 +677,7 @@ def create_draft_from_chat(
     sender_email: str | None,
     mode: str = "auto",
     retrieved_context: str | None = None,
+    source_document_ids: list[str] | None = None,
 ) -> EmailDraft:
     prompt = prompt.strip()
     if not prompt:
@@ -715,6 +716,7 @@ def create_draft_from_chat(
         recipients=recipients,
         recipient_groups=resolved_groups,
         unresolved_recipients=unresolved,
+        source_document_ids=list(dict.fromkeys(source_document_ids or [])),
         status=EMAIL_DRAFT_STATUS_DRAFT,
         delivery_results=[],
         attempt_count=0,
@@ -743,6 +745,7 @@ def create_draft(
     groups: list[str],
     prompt: str,
     generation_note: str | None = None,
+    source_document_ids: list[str] | None = None,
 ) -> EmailDraft:
     """Create a draft whose subject, body and recipients are already decided.
 
@@ -778,6 +781,7 @@ def create_draft(
         recipients=recipients,
         recipient_groups=resolved_groups,
         unresolved_recipients=[],
+        source_document_ids=list(dict.fromkeys(source_document_ids or [])),
         status=EMAIL_DRAFT_STATUS_DRAFT,
         delivery_results=[],
         attempt_count=0,
@@ -953,6 +957,23 @@ def _validate_content(draft: EmailDraft) -> None:
         )
 
 
+def _require_source_document_access(db: Session, draft: EmailDraft) -> None:
+    """Story 7.4: send only while the sender can still read every quoted document.
+
+    The error never names the documents, so it reveals nothing about them.
+    """
+    if not draft.source_document_ids:
+        return
+    from app.documents.service import accessible_document_versions
+
+    readable = accessible_document_versions(db, draft.created_by_id, draft.source_document_ids)
+    if set(draft.source_document_ids) - set(readable):
+        raise EmailDraftConflict(
+            "This e-mail quotes company documents you no longer have access to, so it "
+            "was not sent. Remove those details or ask the document owner for access."
+        )
+
+
 def send_draft(
     db: Session,
     draft_id: str,
@@ -978,6 +999,7 @@ def send_draft(
     if draft.status != EMAIL_DRAFT_STATUS_DRAFT:
         raise EmailDraftConflict(f"An e-mail that is {_status_label(draft.status)} cannot be sent again.")
     _validate_content(draft)
+    _require_source_document_access(db, draft)
 
     _refresh_checks(draft)
     if draft.approval_required and draft.approval_decision != EMAIL_APPROVAL_DECISION_APPROVED:
@@ -1007,6 +1029,7 @@ def retry_draft(db: Session, draft_id: str, actor: EmailActor) -> EmailDraft:
     _require_owner(draft, actor)
     if draft.status != EMAIL_DRAFT_STATUS_FAILED:
         raise EmailDraftConflict(f"Only a failed e-mail can be retried (this one is {_status_label(draft.status)}).")
+    _require_source_document_access(db, draft)
     delivery.request_retry(db, draft, actor_id=actor.id)
     db.refresh(draft)
     return draft

@@ -322,6 +322,10 @@ class _PlanRunner:
             context = assistant_planner.retrieve_email_document_context(
                 self.run_db, actor_id=self.principal.user_id, topic=topic
             )
+            # Story 7.4: only facts the requester may read go into the draft.
+            context = assistant_planner.authorize_document_context(
+                self.run_db, actor_id=self.principal.user_id, context=context
+            )
         except Exception as exc:  # noqa: BLE001 - draft without facts rather than fail
             logger.warning("Document retrieval for an e-mail failed: %s", exc)
             context = []
@@ -842,9 +846,10 @@ def stream_assistant_chat(
         # based on those documents) is answered only from the best four of eight
         # ACL-filtered semantic matches. Nothing relevant: say so; never guess.
         effective_forced = forced_response or clarification_resolved_notice
+        policy_question = assistant_planner.needs_retrieval(req.message)
         document_question = (
             effective_forced is None
-            and assistant_planner.needs_retrieval(req.message)
+            and assistant_planner.should_search_documents(req.message)
             and (
                 understanding is None
                 or assistant_planner.is_document_plan_request(req.message)
@@ -859,6 +864,11 @@ def stream_assistant_chat(
                         query_db,
                         actor_id=principal.user_id,
                         query=assistant_planner.document_search_query(req.message),
+                    )
+                    # Story 7.4: re-check permissions at answer time, before any
+                    # passage or citation reaches the model or the reply.
+                    rag_matches = assistant_planner.authorize_document_context(
+                        query_db, actor_id=principal.user_id, context=rag_matches
                     )
             except Exception as rag_err:  # noqa: BLE001 - answer without guessing
                 logger.warning("Document retrieval failed: %s", rag_err)
@@ -875,8 +885,10 @@ def stream_assistant_chat(
                             )),
                         }
                     })
-                else:
+                elif policy_question:
                     document_answer = assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
+                # Any other question with no readable match continues as ordinary
+                # chat, which is told not to invent company facts (see the service).
 
         try:
             if effective_forced is not None:

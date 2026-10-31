@@ -466,6 +466,14 @@ def search_documents(
         )
         .all()
     )
+    # Story 7.4: the SQL filter above already limits rows to documents the actor
+    # may read, before anything is ranked. A chunk without its ACL metadata cannot
+    # be verified, so it is never a candidate either (secure default).
+    rows = [
+        (chunk, doc)
+        for chunk, doc in rows
+        if isinstance(chunk.acl_employee_ids, list) and chunk.acl_employee_ids
+    ]
 
     query_terms = _search_terms(term_query)
     if query_terms - _SEARCH_META_WORDS:

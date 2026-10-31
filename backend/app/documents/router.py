@@ -52,6 +52,7 @@ from app.documents.service import (
     remove_document,
     retry_document_index,
     reset_documents,
+    update_document_access,
     update_document_file,
 )
 from app.documents.storage import read_document_file
@@ -177,17 +178,17 @@ def reset_all_documents(
 @router.put(
     "/{document_id}",
     response_model=DocumentUploadResponse,
-    summary="Replace document file and re-process",
+    summary="Replace the document file and/or change who can access it",
 )
 async def replace_document(
     document_id: str,
-    file: UploadFile = File(..., description="Replacement document file"),
+    file: UploadFile | None = File(None, description="Optional replacement document file"),
     acl_employee_ids: str | None = Form(None),
     shared_with_all_employees: bool | None = Form(None),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
-    """Replace an existing document file with a new file and re-process text."""
+    """Replace the file and re-process it, or, with no file, only change access."""
     _require_manager_or_hr(principal)
     doc = db.get(Document, document_id)
     if doc is None:
@@ -196,8 +197,7 @@ async def replace_document(
             detail="Document not found.",
         )
 
-    data = await file.read()
-    filename = file.filename or "upload"
+    has_file = file is not None and bool(file.filename)
 
     acl_ids = None
     if acl_employee_ids is not None:
@@ -213,14 +213,28 @@ async def replace_document(
             )
 
     try:
-        result = update_document_file(
-            db,
-            doc,
-            filename=filename,
-            data=data,
-            acl_employee_ids=acl_ids,
-            shared_with_all_employees=shared_with_all_employees,
-        )
+        if has_file:
+            data = await file.read()
+            result = update_document_file(
+                db,
+                doc,
+                filename=file.filename or "upload",
+                data=data,
+                acl_employee_ids=acl_ids,
+                shared_with_all_employees=shared_with_all_employees,
+            )
+        else:
+            if acl_ids is None and shared_with_all_employees is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Provide a replacement file or an access change.",
+                )
+            result = update_document_access(
+                db,
+                doc,
+                acl_employee_ids=acl_ids,
+                shared_with_all_employees=shared_with_all_employees,
+            )
     except DocumentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

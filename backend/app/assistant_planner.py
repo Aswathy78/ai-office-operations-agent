@@ -98,6 +98,8 @@ _RETRIEVAL_KEYWORDS = frozenset({
     "vacation",
     "attendance",
     "wfh",
+    "remote work",
+    "work from home",
     "probation",
     "notice",
     "expense",
@@ -137,6 +139,27 @@ def needs_retrieval(step_description: str) -> bool:
         re.search(r"\b(?:hr|sops?|projects?)\b", lower)
         or _DOCUMENT_QUERY_TERMS.search(lower)
     )
+
+
+_QUESTION_START = re.compile(
+    r"^\s*(?:please\s+)?(?:what|when|where|which|who|whom|whose|why|how|can|could|do|does|"
+    r"did|is|are|am|will|would|should|may|tell\s+me|explain)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_question(message: str) -> bool:
+    """True for a plain question, whatever words it uses."""
+    return "?" in message or bool(_QUESTION_START.search(message))
+
+
+def should_search_documents(message: str) -> bool:
+    """A question might be answered by a company document even without a policy keyword.
+
+    "How many remote work days are allowed per year?" has no entry in the keyword
+    list, yet only the uploaded documents can answer it, so any question is searched.
+    """
+    return needs_retrieval(message) or looks_like_question(message)
 
 
 def is_document_plan_request(message: str) -> bool:
@@ -340,6 +363,60 @@ def retrieve_email_document_context(
     if snippet:
         return [{"source": _KNOWLEDGE_BASE_PATH.name, "snippet": snippet}]
     return []
+
+
+def _is_public_policy_text(snippet: str) -> bool:
+    """True when ``snippet`` really comes from the static company policy file,
+    which every employee may read (it lives in the repository, not the ACL store)."""
+    text = " ".join((snippet or "").split())
+    if not text or not _KNOWLEDGE_BASE_PATH.exists():
+        return False
+    try:
+        policy = " ".join(_KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8").split())
+    except OSError:
+        return False
+    return text in policy
+
+
+def authorize_document_context(
+    db: Session,
+    *,
+    actor_id: str,
+    context: list[dict],
+) -> list[dict]:
+    """Re-check retrieved or cached document context for ``actor_id`` (Story 7.4).
+
+    Called right before context is used to answer, draft or send, and again for
+    context carried over from an earlier turn or another workflow. An item is kept
+    only when it names a document the actor may read now, at its current version,
+    or when its text comes from the public static policy file. Anything that
+    cannot be verified is dropped (secure default), so neither its content nor its
+    citation reaches the model or the user.
+    """
+    from app.documents.service import accessible_document_versions
+
+    if not context or not actor_id:
+        return []
+    allowed = accessible_document_versions(
+        db, actor_id, {item.get("document_id") for item in context}
+    )
+    kept = []
+    for item in context:
+        document_id = item.get("document_id")
+        if document_id:
+            version = item.get("document_version")
+            if document_id in allowed and (version is None or version == allowed[document_id]):
+                kept.append(item)
+        elif item.get("source") == _KNOWLEDGE_BASE_PATH.name and _is_public_policy_text(
+            item.get("snippet", "")
+        ):
+            kept.append(item)
+    if len(kept) < len(context):
+        logger.info(
+            "Dropped %d document passage(s) the requester may not read.",
+            len(context) - len(kept),
+        )
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -872,12 +949,19 @@ def prepare_tool_arguments(
                 if recipient.get("name")
             ],
         )
-        return {
+        sent = {
             **arguments,
             "subject": preview["subject"],
             "body": body,
             "request": f"E-mail about {entities.topic}",
         }
+        # Story 7.4: the documents this e-mail quotes, re-checked when it is sent.
+        document_ids = list(dict.fromkeys(
+            item["document_id"] for item in context_results if item.get("document_id")
+        ))
+        if document_ids:
+            sent["document_ids"] = document_ids[:DOCUMENT_SEARCH_RETRIEVAL_LIMIT]
+        return sent
 
     if tool == "document.search":
         return {"query": step.retrieval_query or step.description, "limit": 3}
