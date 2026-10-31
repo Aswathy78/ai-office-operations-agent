@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import filetype
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.documents.models import (
@@ -137,6 +137,7 @@ def create_document(
     data: bytes,
     owner_id: str,
     acl_employee_ids: list[str] | None = None,
+    shared_with_all_employees: bool = False,
 ) -> UploadResult:
     """Persist an uploaded document and return the created record.
 
@@ -167,6 +168,7 @@ def create_document(
         mime_type=mime_type,
         owner_id=owner_id,
         status=DOC_STATUS_UPLOADED,
+        shared_with_all_employees=shared_with_all_employees,
         created_at=datetime.now(timezone.utc),
         updated_at=datetime.now(timezone.utc),
     )
@@ -234,14 +236,54 @@ def check_document_access(
 
 
 def _document_access_filter(actor_id: str):
-    """Shared SQL rule: only document owners and explicit ACL members have access."""
+    """Shared SQL rule for every document read, search and answer.
+
+    Access needs an existing, active employee (Story 7.4: an unknown or disabled
+    identity matches nothing) who is the owner, is on the document's ACL, or the
+    document is shared with all employees (Story 7.3).
+    """
     acl_document_ids = select(DocumentACLEntry.document_id).where(
         DocumentACLEntry.employee_id == actor_id
     )
-    return or_(
-        Document.owner_id == actor_id,
-        Document.id.in_(acl_document_ids),
+    actor_is_active = (
+        select(Employee.id)
+        .where(Employee.id == actor_id, Employee.is_active.is_(True))
+        .exists()
     )
+    return and_(
+        actor_is_active,
+        or_(
+            Document.owner_id == actor_id,
+            Document.id.in_(acl_document_ids),
+            Document.shared_with_all_employees.is_(True),
+        ),
+    )
+
+
+def accessible_document_versions(
+    db: Session,
+    actor_id: str,
+    document_ids: list[str] | set[str],
+) -> dict[str, int]:
+    """Current version of each listed document the actor may read right now (Story 7.4).
+
+    Used to re-check retrieved or cached context at answer and send time, so a
+    revoked grant, a disabled account or a deleted document is noticed. Any
+    error is treated as "no access" (fail closed).
+    """
+    ids = {document_id for document_id in document_ids if document_id}
+    if not ids or not actor_id:
+        return {}
+    try:
+        rows = (
+            db.query(Document.id, Document.version)
+            .filter(Document.id.in_(ids), _document_access_filter(actor_id))
+            .all()
+        )
+    except Exception:  # noqa: BLE001 - cannot verify: deny
+        logger.exception("Document access re-check failed; denying access.")
+        return {}
+    return {document_id: version for document_id, version in rows}
 
 
 def list_accessible_documents(
@@ -269,6 +311,7 @@ def update_document_file(
     filename: str,
     data: bytes,
     acl_employee_ids: list[str] | None = None,
+    shared_with_all_employees: bool | None = None,
 ) -> UploadResult:
     """Replace a document and let the background worker re-extract and index it."""
     mime_type = validate_upload(filename, data)
@@ -290,6 +333,8 @@ def update_document_file(
         document.extracted_text = None
         document.page_count = None
         document.version += 1
+        if shared_with_all_employees is not None:
+            document.shared_with_all_employees = shared_with_all_employees
         document.processing_started_at = None
         document.processing_completed_at = None
         document.updated_at = datetime.now(timezone.utc)
@@ -298,28 +343,7 @@ def update_document_file(
         ).delete(synchronize_session=False)
 
         if acl_employee_ids is not None:
-            db.query(DocumentACLEntry).filter(
-                DocumentACLEntry.document_id == document.id
-            ).delete()
-            seen: set[str] = set()
-            for emp_id in acl_employee_ids:
-                if emp_id == document.owner_id or emp_id in seen:
-                    continue
-                seen.add(emp_id)
-                emp = db.get(Employee, emp_id)
-                if emp is None or not emp.is_active:
-                    warnings.append(
-                        f"Employee '{emp_id}' was not found or is inactive and was skipped."
-                    )
-                    continue
-                db.add(
-                    DocumentACLEntry(
-                        id=str(uuid.uuid4()),
-                        document_id=document.id,
-                        employee_id=emp_id,
-                        created_at=datetime.now(timezone.utc),
-                    )
-                )
+            warnings.extend(_replace_acl_entries(db, document, acl_employee_ids))
         db.commit()
         db.refresh(document)
     except Exception:
@@ -329,6 +353,78 @@ def update_document_file(
 
     delete_document_file(previous_filename)
 
+    return UploadResult(document=document, acl_warnings=warnings)
+
+
+def _replace_acl_entries(
+    db: Session, document: Document, acl_employee_ids: list[str]
+) -> list[str]:
+    """Replace the document's access list; the owner is implicit. Does not commit."""
+    warnings: list[str] = []
+    db.query(DocumentACLEntry).filter(
+        DocumentACLEntry.document_id == document.id
+    ).delete()
+    seen: set[str] = set()
+    for emp_id in acl_employee_ids:
+        if emp_id == document.owner_id or emp_id in seen:
+            continue
+        seen.add(emp_id)
+        emp = db.get(Employee, emp_id)
+        if emp is None or not emp.is_active:
+            warnings.append(
+                f"Employee '{emp_id}' was not found or is inactive and was skipped."
+            )
+            continue
+        db.add(
+            DocumentACLEntry(
+                id=str(uuid.uuid4()),
+                document_id=document.id,
+                employee_id=emp_id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    return warnings
+
+
+def update_document_access(
+    db: Session,
+    document: Document,
+    *,
+    acl_employee_ids: list[str] | None = None,
+    shared_with_all_employees: bool | None = None,
+) -> UploadResult:
+    """Change who can read a document without replacing its file.
+
+    The file, version and index stay as they are. The access list stored on the
+    document's search chunks is rewritten in place, so retrieval follows the new
+    list immediately and nothing has to be re-embedded.
+    """
+    warnings: list[str] = []
+    try:
+        if acl_employee_ids is not None:
+            warnings.extend(_replace_acl_entries(db, document, acl_employee_ids))
+            db.flush()
+            allowed = {document.owner_id}
+            allowed.update(
+                row[0]
+                for row in db.query(DocumentACLEntry.employee_id)
+                .filter(DocumentACLEntry.document_id == document.id)
+                .all()
+            )
+            db.query(DocumentChunk).filter(
+                DocumentChunk.document_id == document.id
+            ).update(
+                {DocumentChunk.acl_employee_ids: sorted(allowed)},
+                synchronize_session=False,
+            )
+        if shared_with_all_employees is not None:
+            document.shared_with_all_employees = shared_with_all_employees
+        document.updated_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(document)
+    except Exception:
+        db.rollback()
+        raise
     return UploadResult(document=document, acl_warnings=warnings)
 
 

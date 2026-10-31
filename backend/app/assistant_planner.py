@@ -98,6 +98,8 @@ _RETRIEVAL_KEYWORDS = frozenset({
     "vacation",
     "attendance",
     "wfh",
+    "remote work",
+    "work from home",
     "probation",
     "notice",
     "expense",
@@ -139,6 +141,27 @@ def needs_retrieval(step_description: str) -> bool:
     )
 
 
+_QUESTION_START = re.compile(
+    r"^\s*(?:please\s+)?(?:what|when|where|which|who|whom|whose|why|how|can|could|do|does|"
+    r"did|is|are|am|will|would|should|may|tell\s+me|explain)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_question(message: str) -> bool:
+    """True for a plain question, whatever words it uses."""
+    return "?" in message or bool(_QUESTION_START.search(message))
+
+
+def should_search_documents(message: str) -> bool:
+    """A question might be answered by a company document even without a policy keyword.
+
+    "How many remote work days are allowed per year?" has no entry in the keyword
+    list, yet only the uploaded documents can answer it, so any question is searched.
+    """
+    return needs_retrieval(message) or looks_like_question(message)
+
+
 def is_document_plan_request(message: str) -> bool:
     """Identify document-grounded plan requests that belong in the chat flow."""
     return needs_retrieval(message) and bool(
@@ -148,6 +171,25 @@ def is_document_plan_request(message: str) -> bool:
             re.IGNORECASE,
         )
     )
+
+
+_PLAN_REQUEST_WORDS = re.compile(
+    r"^\s*(?:please\s+)?(?:can\s+you\s+)?(?:create|make|build|draft|prepare|develop)\s+"
+    r"(?:(?:a|an|the|my|our)\s+)?|\bplan\b|\b(?:based\s+on|using|from|according\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+def document_search_query(message: str) -> str:
+    """The question to search documents with (Story 7.3).
+
+    A plan request ("Create an onboarding plan based on the HR SOP") is searched
+    by its subject; the instruction words would only dilute the match.
+    """
+    if not is_document_plan_request(message):
+        return message
+    subject = re.sub(r"\s+", " ", _PLAN_REQUEST_WORDS.sub(" ", message)).strip(" .!?")
+    return subject or message
 
 
 def retrieve_semantic_document_context(
@@ -272,6 +314,109 @@ def retrieve_company_knowledge(
     if results:
         return results[0]["snippet"]
     return None
+
+
+# Story 7.3: answers come only from documents the employee may read. When the
+# search finds nothing relevant the assistant says so instead of guessing.
+DOCUMENT_NOT_FOUND_MESSAGE = (
+    "I couldn't find relevant information in the indexed company documents you have "
+    "access to, so I won't guess an answer. Try rephrasing the question, or ask "
+    "HR / Operations to upload the document that covers it."
+)
+DOCUMENT_SEARCH_FAILED_MESSAGE = (
+    "I couldn't search the company documents right now, so I won't guess an answer. "
+    "Please try again in a moment."
+)
+EMAIL_DOCUMENT_NOT_FOUND_NOTICE = (
+    "I couldn't find relevant information in the indexed company documents for this "
+    "e-mail, so the draft contains no company-specific facts; add them before sending."
+)
+_EMAIL_QUERY_NOISE = re.compile(
+    r"\b(?:the\s+)?(?:company|organi[sz]ation)['’]s\s*"
+    r"|\s+(?:according\s+to|based\s+on|using|from|in)\s+(?:the\s+)?"
+    r"(?:hr\s+)?(?:handbook|polic(?:y|ies)|sops?|documents?)\b.*$",
+    re.IGNORECASE,
+)
+
+
+def email_document_query(topic: str) -> str:
+    """The search query for an e-mail topic, without where-to-look phrasing."""
+    return re.sub(r"\s+", " ", _EMAIL_QUERY_NOISE.sub(" ", topic)).strip() or topic
+
+
+def retrieve_email_document_context(
+    db: Session,
+    *,
+    actor_id: str,
+    topic: str,
+) -> list[dict]:
+    """Company-document facts for an e-mail the assistant drafts (Story 7.3).
+
+    The ACL-filtered semantic search (top 8, best 4) comes first; the static
+    company policy is the same fallback the plan's policy check uses.
+    """
+    query = email_document_query(topic)
+    results = retrieve_semantic_document_context(db, actor_id=actor_id, query=query)
+    if results:
+        return results
+    snippet = retrieve_company_knowledge(query, db=db, actor_id=actor_id)
+    if snippet:
+        return [{"source": _KNOWLEDGE_BASE_PATH.name, "snippet": snippet}]
+    return []
+
+
+def _is_public_policy_text(snippet: str) -> bool:
+    """True when ``snippet`` really comes from the static company policy file,
+    which every employee may read (it lives in the repository, not the ACL store)."""
+    text = " ".join((snippet or "").split())
+    if not text or not _KNOWLEDGE_BASE_PATH.exists():
+        return False
+    try:
+        policy = " ".join(_KNOWLEDGE_BASE_PATH.read_text(encoding="utf-8").split())
+    except OSError:
+        return False
+    return text in policy
+
+
+def authorize_document_context(
+    db: Session,
+    *,
+    actor_id: str,
+    context: list[dict],
+) -> list[dict]:
+    """Re-check retrieved or cached document context for ``actor_id`` (Story 7.4).
+
+    Called right before context is used to answer, draft or send, and again for
+    context carried over from an earlier turn or another workflow. An item is kept
+    only when it names a document the actor may read now, at its current version,
+    or when its text comes from the public static policy file. Anything that
+    cannot be verified is dropped (secure default), so neither its content nor its
+    citation reaches the model or the user.
+    """
+    from app.documents.service import accessible_document_versions
+
+    if not context or not actor_id:
+        return []
+    allowed = accessible_document_versions(
+        db, actor_id, {item.get("document_id") for item in context}
+    )
+    kept = []
+    for item in context:
+        document_id = item.get("document_id")
+        if document_id:
+            version = item.get("document_version")
+            if document_id in allowed and (version is None or version == allowed[document_id]):
+                kept.append(item)
+        elif item.get("source") == _KNOWLEDGE_BASE_PATH.name and _is_public_policy_text(
+            item.get("snippet", "")
+        ):
+            kept.append(item)
+    if len(kept) < len(context):
+        logger.info(
+            "Dropped %d document passage(s) the requester may not read.",
+            len(context) - len(kept),
+        )
+    return kept
 
 
 # ---------------------------------------------------------------------------
@@ -804,12 +949,19 @@ def prepare_tool_arguments(
                 if recipient.get("name")
             ],
         )
-        return {
+        sent = {
             **arguments,
             "subject": preview["subject"],
             "body": body,
             "request": f"E-mail about {entities.topic}",
         }
+        # Story 7.4: the documents this e-mail quotes, re-checked when it is sent.
+        document_ids = list(dict.fromkeys(
+            item["document_id"] for item in context_results if item.get("document_id")
+        ))
+        if document_ids:
+            sent["document_ids"] = document_ids[:DOCUMENT_SEARCH_RETRIEVAL_LIMIT]
+        return sent
 
     if tool == "document.search":
         return {"query": step.retrieval_query or step.description, "limit": 3}

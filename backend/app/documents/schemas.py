@@ -33,6 +33,8 @@ class DocumentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     acl: list[DocumentACLEntryResponse] = Field(default_factory=list)
+    # Story 7.3: readable by every active employee.
+    shared_with_all_employees: bool = False
 
     model_config = {"from_attributes": True}
 

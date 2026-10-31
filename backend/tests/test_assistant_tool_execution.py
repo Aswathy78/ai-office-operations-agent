@@ -641,7 +641,7 @@ class TestRealExecution:
         def mismatched_persisted_fields(db, tool_name, result):
             actual = read_back(db, tool_name, result)
             if tool_name == "task.create":
-                actual["due_at"] = "2026-10-30T12:30:00+00:00"
+                actual["due_at"] = "2030-10-30T12:30:00+00:00"
             return actual
 
         monkeypatch.setattr(verification, "_read_back", mismatched_persisted_fields)
@@ -651,7 +651,7 @@ class TestRealExecution:
             {
                 "assignee_email": "bob@northstar.example",
                 "title": 'task "Prepare database migration report"',
-                "due_at": "2026-10-30T11:30:00+00:00",
+                "due_at": "2030-10-30T11:30:00+00:00",
             },
             key="key-task-verify-fields",
         )
@@ -661,9 +661,9 @@ class TestRealExecution:
         check = result["verification"]
         assert check["status"] == "escalated"
         assert check["expected"]["title"] == "Prepare database migration report"
-        assert check["expected"]["due_at"] == "2026-10-30T11:30:00+00:00"
+        assert check["expected"]["due_at"] == "2030-10-30T11:30:00+00:00"
         assert check["actual"]["title"] == 'task "Prepare database migration report"'
-        assert check["actual"]["due_at"] == "2026-10-30T12:30:00+00:00"
+        assert check["actual"]["due_at"] == "2030-10-30T12:30:00+00:00"
         assert all(
             len(attempt["mismatches"]) == 2 for attempt in check["attempts"]
         )
@@ -867,7 +867,12 @@ class TestRealExecution:
         assert _execute(as_manager, "task.list",
                         {"assignee_email": "alice@northstar.example"}).status_code == 403
 
-    def test_meeting_list_upcoming(self, as_manager, mail):
+    def test_meeting_list_upcoming(self, as_manager, db_session, mail):
+        # Every day is a working day, so the booking is low risk on any weekday (Story 6.6).
+        bob = db_session.get(Employee, "emp-bob")
+        bob.working_days = [0, 1, 2, 3, 4, 5, 6]
+        bob.working_hours_start, bob.working_hours_end = "00:00", "23:59"
+        db_session.commit()
         _execute(as_manager, "meeting.schedule",
                  {"title": "Planning", "start_at": _future(days=2), "duration_minutes": 30,
                   "attendee_emails": ["bob@northstar.example"]},

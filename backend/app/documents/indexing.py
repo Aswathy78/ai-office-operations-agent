@@ -44,6 +44,22 @@ _SEARCH_STOP_WORDS = frozenset(
         "policy", "receive", "year", "happen", "happens", "available", "each",
     }
 )
+# Story 7.3: words that name where to look, not what to find ("What does the HR
+# handbook say about …", "according to the SOP"). Ignored only when the query has
+# other words, so a search for just "handbook" still works.
+_SEARCH_META_WORDS = frozenset(
+    {"handbook", "say", "says", "about", "according", "mention", "sop", "sops", "tell",
+     # Question verbs: "How many days can I take / get / have?" are answered by
+     # "Casual leave: 8 days", which never repeats the verb.
+     "take", "have", "much", "entitled", "allowed", "eligible", "allow", "give",
+     "given", "provided", "provide", "offer", "offered", "need"}
+)
+# Story 7.3: everyday wording mapped onto the wording documents use, so
+# "casual time off" finds "Casual Leave" and "office hours" finds "working hours".
+_QUERY_SYNONYMS = (
+    (re.compile(r"\b(?:time[\s-]+off|vacations?|pto|paid\s+leave)\b", re.I), "leave"),
+    (re.compile(r"\b(?:office|work|business)\s+hours?\b", re.I), "working hours"),
+)
 MAX_SEARCH_CANDIDATE_CHUNKS = 20
 MAX_PASSAGES_PER_CHUNK = 400
 MAX_SEARCH_PASSAGES = 32
@@ -60,7 +76,9 @@ _MEASURE_QUERY = re.compile(
     re.I,
 )
 _MEASURE_VALUE = re.compile(
-    r"\b\d+(?:[.,]\d+)?\s*(?:days?|weeks?|months?|years?|hours?|minutes?|percent(?:age)?|rupees?|inr)\b",
+    r"\b\d+(?:[.,]\d+)?\s*(?:days?|weeks?|months?|years?|hours?|minutes?|percent(?:age)?|rupees?|inr)\b"
+    # A clock-time range ("09:30–18:00") answers an hours question too.
+    r"|\b\d{1,2}:\d{2}\s*(?:[-–—]|to)\s*\d{1,2}:\d{2}\b",
     re.I,
 )
 _CARRY_FORWARD_QUERY = re.compile(
@@ -433,6 +451,10 @@ def search_documents(
         return []
 
     query_vector = embed_query(normalized_query)
+    # Lexical checks use the document vocabulary; the embedding keeps the user's words.
+    term_query = normalized_query
+    for pattern, replacement in _QUERY_SYNONYMS:
+        term_query = pattern.sub(replacement, term_query)
     rows = (
         db.query(DocumentChunk, Document)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -444,8 +466,18 @@ def search_documents(
         )
         .all()
     )
+    # Story 7.4: the SQL filter above already limits rows to documents the actor
+    # may read, before anything is ranked. A chunk without its ACL metadata cannot
+    # be verified, so it is never a candidate either (secure default).
+    rows = [
+        (chunk, doc)
+        for chunk, doc in rows
+        if isinstance(chunk.acl_employee_ids, list) and chunk.acl_employee_ids
+    ]
 
-    query_terms = _search_terms(normalized_query)
+    query_terms = _search_terms(term_query)
+    if query_terms - _SEARCH_META_WORDS:
+        query_terms -= _SEARCH_META_WORDS
     if not query_terms:
         return []
 
@@ -519,10 +551,10 @@ def search_documents(
     if len(passage_vectors) != len(candidates):
         raise RuntimeError("The embedding model returned incomplete search passages.")
 
-    factual_query = bool(_MEASURE_QUERY.search(normalized_query))
+    factual_query = bool(_MEASURE_QUERY.search(term_query))
     query_leave_types = {
         match.casefold()
-        for match in _LEAVE_TYPE_MENTION.findall(normalized_query)
+        for match in _LEAVE_TYPE_MENTION.findall(term_query)
     }
     carry_forward_query = bool(_CARRY_FORWARD_QUERY.search(normalized_query))
 

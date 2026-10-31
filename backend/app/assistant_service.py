@@ -110,6 +110,12 @@ def stream_chat_completion(
                 f"{top['snippet']}\n\n"
                 f"*(Source: {top['source']})*"
             )
+            others = list(dict.fromkeys(
+                item.get("source") for item in rag_context[1:]
+                if item.get("source") and item.get("source") != top["source"]
+            ))
+            if others:
+                answer += f"\n\nAlso relevant: {', '.join(others)}."
             yield answer
             return
         yield "AI Assistant is running in local mode. Please configure GROQ_API_KEY in backend/.env for live model responses."
@@ -117,19 +123,42 @@ def stream_chat_completion(
 
     full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # If RAG snippets were retrieved from company documents, inject them
+    # Story 7.3: answer only from the retrieved company-document passages.
     if rag_context:
         rag_text = "\n\n".join(
-            f"[Document: {item.get('source', 'Company Knowledge')}]\n{item.get('snippet', '')}"
+            f"[Document: {item.get('source', 'Company Knowledge')}"
+            + (f" — {item['heading']}" if item.get("heading") else "")
+            + f"]\n{item.get('snippet', '')}"
             for item in rag_context
         )
         full_messages.append({
             "role": "system",
             "content": (
-                "Verified Company Knowledge (retrieved via RAG from company files):\n"
+                "Company document passages the employee is allowed to read "
+                "(retrieved for this question):\n"
                 f"{rag_text}\n\n"
-                "Please use this knowledge to answer the user's question accurately. "
-                "Include a brief citation of the source document."
+                "Answer using ONLY these passages. Do not add facts, numbers, names or "
+                "rules that are not stated in them, and do not use outside knowledge "
+                "about company policy. Cite the document name for each fact, e.g. "
+                "(Source: handbook.pdf). If the passages do not contain the answer, say "
+                "plainly that you couldn't find it in the indexed company documents "
+                "instead of guessing. When asked to create a plan or checklist, build it "
+                "only from the steps and rules in these passages."
+            ),
+        })
+
+    else:
+        # Nothing was retrieved. Without this the model fills the gap from memory
+        # and invents policies, numbers and file names.
+        full_messages.append({
+            "role": "system",
+            "content": (
+                "No company documents were retrieved for this message. Never state "
+                "specific company policy facts, numbers, dates, entitlements or "
+                "document/file names from memory, and never say you will look something "
+                "up and get back later. If the employee is asking for such facts, say "
+                "plainly that you couldn't find them in the indexed company documents "
+                "they can access."
             ),
         })
 

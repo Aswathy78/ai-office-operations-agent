@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -108,6 +109,11 @@ class Document(Base):
     )
     indexing_failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Story 7.3: company-wide documents (handbooks, SOPs) every active employee may
+    # read and ask about, without listing each person in the ACL.
+    shared_with_all_employees: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     # Plain-text corpus produced by the extraction pipeline.
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Number of pages/slides/sheets; None for image files.

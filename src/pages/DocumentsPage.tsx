@@ -36,6 +36,7 @@ import {
   type DocumentStatus,
 } from '../api/documents'
 import { AccessDenied } from '../components/common/AccessDenied'
+import { EmployeeAccessPicker } from '../components/documents/EmployeeAccessPicker'
 import { useAuth } from '../contexts/AuthContext'
 
 function formatFileSize(bytes: number): string {
@@ -87,7 +88,8 @@ export function DocumentsPage() {
 
   // Upload state
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
-  const [aclInput, setAclInput] = useState('')
+  const [aclIds, setAclIds] = useState<string[]>([])
+  const [sharedWithAll, setSharedWithAll] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [uploadFeedback, setUploadFeedback] = useState<{
     type: 'success' | 'error' | 'warning'
@@ -105,7 +107,8 @@ export function DocumentsPage() {
   // Manage document modal state
   const [managingDoc, setManagingDoc] = useState<DocumentItem | null>(null)
   const [replacementFile, setReplacementFile] = useState<File | null>(null)
-  const [replacementAcl, setReplacementAcl] = useState('')
+  const [replacementAcl, setReplacementAcl] = useState<string[]>([])
+  const [replacementShared, setReplacementShared] = useState(false)
   const [isReplacing, setIsReplacing] = useState(false)
   const [reindexingId, setReindexingId] = useState<string | null>(null)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -231,21 +234,16 @@ export function DocumentsPage() {
     setUploading(true)
     setUploadFeedback(null)
 
-    // Parse ACL employee IDs from comma/space separated input
-    const aclIds = aclInput
-      .split(/[\s,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-
     try {
-      const res = await uploadDocument(selectedFile, aclIds)
+      const res = await uploadDocument(selectedFile, aclIds, sharedWithAll)
       setUploadFeedback({
         type: res.warnings && res.warnings.length > 0 ? 'warning' : 'success',
         message: `"${res.document.original_filename}" uploaded successfully and queued for extraction.`,
         warnings: res.warnings,
       })
       setSelectedFile(null)
-      setAclInput('')
+      setAclIds([])
+      setSharedWithAll(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
       await loadDocuments(true)
     } catch (err) {
@@ -308,20 +306,22 @@ export function DocumentsPage() {
 
   // Handle document replacement
   const handleReplaceDocument = async () => {
-    if (!managingDoc || !replacementFile) return
+    if (!managingDoc) return
     setIsReplacing(true)
     setManageError('')
 
-    const aclIds = replacementAcl
-      .split(/[\s,]+/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-
     try {
-      const res = await replaceDocument(managingDoc.id, replacementFile, aclIds)
+      const res = await replaceDocument(
+        managingDoc.id,
+        replacementFile,
+        replacementAcl,
+        replacementShared,
+      )
       setUploadFeedback({
         type: res.warnings && res.warnings.length > 0 ? 'warning' : 'success',
-        message: `"${res.document.original_filename}" replaced successfully and re-queued for extraction.`,
+        message: replacementFile
+          ? `"${res.document.original_filename}" replaced successfully and re-queued for extraction.`
+          : `Access to "${res.document.original_filename}" was updated.`,
         warnings: res.warnings,
       })
       setManagingDoc(null)
@@ -538,23 +538,27 @@ export function DocumentsPage() {
               <Shield size={15} />
               Access Control List (Optional)
             </label>
-            <input
+            <EmployeeAccessPicker
               id="acl-input"
-              type="text"
-              placeholder="e.g. emp-102, emp-105 (comma-separated employee IDs)"
-              value={aclInput}
-              onChange={(e) => setAclInput(e.target.value)}
-              style={{
-                width: '100%',
-                padding: '9px 12px',
-                border: '1px solid var(--border)',
-                borderRadius: '8px',
-                fontSize: '13px',
-              }}
+              selectedIds={aclIds}
+              onChange={setAclIds}
+              ownerId={user?.id}
             />
             <small style={{ color: 'var(--muted)', fontSize: '12px', display: 'block', marginTop: '4px' }}>
-              You ({user?.name || 'Current User'}) are automatically the owner. Add other employee IDs to grant them view and download permissions.
+              You ({user?.name || 'Current User'}) are automatically the owner. Tick other employees to grant them view and download permissions.
             </small>
+            <label
+              htmlFor="share-all-input"
+              style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', marginTop: '10px' }}
+            >
+              <input
+                id="share-all-input"
+                type="checkbox"
+                checked={sharedWithAll}
+                onChange={(e) => setSharedWithAll(e.target.checked)}
+              />
+              Share with all employees (company-wide handbooks, policies and SOPs the AI assistant can answer from)
+            </label>
           </div>
 
           {/* Upload Button */}
@@ -991,7 +995,8 @@ export function DocumentsPage() {
                             onClick={() => {
                               setManagingDoc(doc)
                               setReplacementFile(null)
-                              setReplacementAcl(doc.acl ? doc.acl.map((a) => a.employee_id).join(', ') : '')
+                              setReplacementAcl(doc.acl ? doc.acl.map((a) => a.employee_id) : [])
+                              setReplacementShared(Boolean(doc.shared_with_all_employees))
                               setManageError('')
                             }}
                             title="Manage document (edit/replace file or delete)"
@@ -1253,27 +1258,34 @@ export function DocumentsPage() {
                   >
                     Access Control List (Optional)
                   </label>
-                  <input
+                  <EmployeeAccessPicker
                     id="manage-acl-input"
-                    type="text"
-                    placeholder="e.g. emp-102, emp-105"
-                    value={replacementAcl}
-                    onChange={(e) => setReplacementAcl(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      border: '1px solid var(--border)',
-                      borderRadius: '6px',
-                      fontSize: '13px',
-                    }}
+                    selectedIds={replacementAcl}
+                    onChange={setReplacementAcl}
+                    ownerId={managingDoc.owner_id}
                   />
+                  <label
+                    htmlFor="manage-share-all-input"
+                    style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', marginTop: '10px' }}
+                  >
+                    <input
+                      id="manage-share-all-input"
+                      type="checkbox"
+                      checked={replacementShared}
+                      onChange={(e) => setReplacementShared(e.target.checked)}
+                    />
+                    Share with all employees
+                  </label>
+                  <small style={{ color: 'var(--muted)', fontSize: '12px', display: 'block', marginTop: '4px' }}>
+                    Choose a file above to replace it, or leave it empty to change access only.
+                  </small>
                 </div>
 
                 <button
                   type="button"
                   className="button primary"
                   style={{ marginTop: '14px', width: '100%', justifyContent: 'center' }}
-                  disabled={!replacementFile || isReplacing || isDeleting}
+                  disabled={isReplacing || isDeleting}
                   onClick={handleReplaceDocument}
                 >
                   {isReplacing ? (
@@ -1282,7 +1294,7 @@ export function DocumentsPage() {
                       Uploading & Processing...
                     </>
                   ) : (
-                    'Save & Process Replacement'
+                    replacementFile ? 'Save & Process Replacement' : 'Save Access Changes'
                   )}
                 </button>
               </div>

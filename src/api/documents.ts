@@ -26,6 +26,8 @@ export interface DocumentItem {
   created_at: string
   updated_at: string
   acl: DocumentACLEntry[]
+  /** Story 7.3: every active employee may read it and ask the assistant about it. */
+  shared_with_all_employees?: boolean
 }
 
 export interface DocumentUploadResponse {
@@ -142,11 +144,15 @@ export async function reindexDocument(id: string): Promise<DocumentItem> {
 export async function uploadDocument(
   file: File,
   aclEmployeeIds: string[] = [],
+  sharedWithAllEmployees = false,
 ): Promise<DocumentUploadResponse> {
   const formData = new FormData()
   formData.append('file', file)
   if (aclEmployeeIds.length > 0) {
     formData.append('acl_employee_ids', JSON.stringify(aclEmployeeIds))
+  }
+  if (sharedWithAllEmployees) {
+    formData.append('shared_with_all_employees', 'true')
   }
 
   const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/upload`, {
@@ -242,17 +248,27 @@ export async function downloadDocument(id: string, filename: string): Promise<vo
 }
 
 /**
- * Replace an existing document file with a new file and trigger re-extraction.
+ * Replace an existing document file and/or change who can access it.
+ *
+ * With a file, the document is re-extracted and re-indexed. With `file` null,
+ * only access changes: the file and its index are left as they are. An empty
+ * `aclEmployeeIds` list clears the access list (the owner always keeps access).
  */
 export async function replaceDocument(
   id: string,
-  file: File,
+  file: File | null,
   aclEmployeeIds?: string[],
+  sharedWithAllEmployees?: boolean,
 ): Promise<DocumentUploadResponse> {
   const formData = new FormData()
-  formData.append('file', file)
-  if (aclEmployeeIds && aclEmployeeIds.length > 0) {
+  if (file) {
+    formData.append('file', file)
+  }
+  if (aclEmployeeIds) {
     formData.append('acl_employee_ids', JSON.stringify(aclEmployeeIds))
+  }
+  if (sharedWithAllEmployees !== undefined) {
+    formData.append('shared_with_all_employees', String(sharedWithAllEmployees))
   }
 
   const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/${id}`, {

@@ -143,7 +143,10 @@ _DATE_MODIFIER_PATTERN = (
     r"dec(?:ember)?)(?:\.?\s+\d{1,2}(?:st|nd|rd|th)?)?)\b"
 )
 _TOPIC = re.compile(
-    rf"\babout\s+(.+?)(?=\s+(?:to|cc)\b|\s+by\s+(?={_DATE_MODIFIER_PATTERN})|[.!?]|$)",
+    rf"\b(?:about|regarding|explaining|describing)\s+(.+?)"
+    rf"(?=\s+(?:to|cc)\b|\s+by\s+(?={_DATE_MODIFIER_PATTERN})"
+    # Story 7.3: "… according to the HR handbook" says where to look, not the topic.
+    r"|\s+(?:according\s+to|based\s+on|using)\b|[.!?]|$)",
     re.IGNORECASE,
 )
 _DATE_MODIFIER = re.compile(

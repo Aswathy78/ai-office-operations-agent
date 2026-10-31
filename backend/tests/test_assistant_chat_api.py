@@ -17,6 +17,7 @@ from app.meeting.models import (
     Base,
     Employee,
     Meeting,
+    MeetingParticipant,
     Task,
 )
 from app.auth_service import AuthenticatedPrincipal
@@ -270,7 +271,9 @@ def test_missing_required_details_persist_and_resume_same_conversation(
     assert len(db_session.query(AssistantMessage).filter_by(
         conversation_id=conversation_id,
     ).all()) == 4
-    assert db_session.query(Meeting).count() == 0
+    # Once resolved, the request runs its plan (Stories 6.5-6.7); whether the
+    # meeting is booked now or waits for approval depends on its risk (6.6).
+    assert any("plan" in event for event in second_events)
 
 
 def test_ambiguous_employee_name_requires_explicit_selection(
@@ -416,7 +419,9 @@ def test_full_name_resolves_one_candidate_when_other_employee_has_same_first_nam
     assert events[0]["understanding"]["status"] == "understood"
     assert events[0]["understanding"]["entities"]["people"] == ["Rahul Verma"]
     assert events[0]["understanding"]["entities"]["ambiguous_people"] == {}
-    assert db_session.query(Meeting).count() == 0
+    # Whatever the plan books (by risk, Story 6.6), never the other Rahul.
+    invited = {participant.email for participant in db_session.query(MeetingParticipant).all()}
+    assert "rahul.one@northstar.example" not in invited
 
 
 def test_clarification_question_limit_is_two_but_pending_answer_can_resolve(
