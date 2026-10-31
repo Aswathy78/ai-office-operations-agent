@@ -875,16 +875,32 @@ def stream_assistant_chat(
                 document_answer = assistant_planner.DOCUMENT_SEARCH_FAILED_MESSAGE
             else:
                 if rag_matches:
-                    yield _sse({
-                        "retrieval": {
-                            "query": req.message,
-                            "snippet": rag_matches[0]["snippet"],
-                            "source": rag_matches[0]["source"],
-                            "sources": list(dict.fromkeys(
-                                match["source"] for match in rag_matches
-                            )),
-                        }
-                    })
+                    try:
+                        grounded = assistant_service.answer_from_documents(
+                            context_messages,
+                            rag_matches,
+                            question=req.message,
+                        )
+                    except Exception as llm_err:  # noqa: BLE001 - answer without guessing
+                        logger.warning("Grounded answer failed: %s", llm_err)
+                        grounded = None
+                        document_answer = assistant_planner.DOCUMENT_SEARCH_FAILED_MESSAGE
+                    if grounded is not None and not grounded.found:
+                        # Story 7.5: not enough evidence, so no guess and no citation.
+                        document_answer = assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
+                    elif grounded is not None:
+                        document_answer = grounded.rendered
+                        yield _sse({
+                            "retrieval": {
+                                "query": req.message,
+                                "snippet": grounded.citations[0]["quote"],
+                                "source": grounded.citations[0]["source"],
+                                "sources": list(dict.fromkeys(
+                                    citation["source"] for citation in grounded.citations
+                                )),
+                            }
+                        })
+                        yield _sse({"citations": grounded.citations})
                 elif policy_question:
                     document_answer = assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
                 # Any other question with no readable match continues as ordinary
@@ -895,11 +911,6 @@ def stream_assistant_chat(
                 response_stream = iter([effective_forced])
             elif document_answer is not None:
                 response_stream = iter([document_answer])
-            elif rag_matches:
-                response_stream = assistant_service.stream_chat_completion(
-                    context_messages,
-                    rag_context=rag_matches,
-                )
             elif understanding is not None:
                 response_stream = iter([explain_understanding(understanding)])
             else:

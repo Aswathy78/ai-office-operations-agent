@@ -42,6 +42,7 @@ from typing import Literal
 
 from sqlalchemy.orm import Session
 
+from app import rag_citations
 from app.assistant_understanding import AssistantUnderstanding
 from app.meeting.models import AssistantConversation
 
@@ -207,17 +208,31 @@ def retrieve_semantic_document_context(
         query=query,
         limit=DOCUMENT_SEARCH_RETRIEVAL_LIMIT,
     )
-    return [
-        {
-            "source": result.filename,
-            "snippet": result.content,
-            "score": result.score,
-            "document_id": result.document_id,
-            "heading": result.heading,
-            "document_version": result.document_version,
-        }
-        for result in retrieved[:DOCUMENT_SEARCH_CONTEXT_LIMIT]
-    ]
+    context = []
+    for result in retrieved[:DOCUMENT_SEARCH_CONTEXT_LIMIT]:
+        # Story 7.5: retrieved text is data. Instruction-like sentences are removed
+        # before the passage reaches any prompt, draft or citation.
+        snippet, redacted = rag_citations.sanitize_passage(result.content)
+        if redacted:
+            logger.warning(
+                "Removed %d instruction-like sentence(s) from a passage of document %s.",
+                redacted,
+                result.document_id,
+            )
+        context.append(
+            {
+                "source": result.filename,
+                "snippet": snippet,
+                "score": result.score,
+                "document_id": result.document_id,
+                "heading": result.heading,
+                "document_version": result.document_version,
+                "page_label": result.page_label,
+                "chunk_index": result.chunk_index,
+                "redacted_instructions": redacted,
+            }
+        )
+    return context
 
 
 def search_company_knowledge(
@@ -318,11 +333,8 @@ def retrieve_company_knowledge(
 
 # Story 7.3: answers come only from documents the employee may read. When the
 # search finds nothing relevant the assistant says so instead of guessing.
-DOCUMENT_NOT_FOUND_MESSAGE = (
-    "I couldn't find relevant information in the indexed company documents you have "
-    "access to, so I won't guess an answer. Try rephrasing the question, or ask "
-    "HR / Operations to upload the document that covers it."
-)
+# Story 7.5: insufficient evidence is answered with "Not found", never a guess.
+DOCUMENT_NOT_FOUND_MESSAGE = rag_citations.NOT_FOUND_MESSAGE
 DOCUMENT_SEARCH_FAILED_MESSAGE = (
     "I couldn't search the company documents right now, so I won't guess an answer. "
     "Please try again in a moment."

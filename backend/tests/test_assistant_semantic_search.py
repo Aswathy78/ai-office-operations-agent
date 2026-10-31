@@ -448,7 +448,7 @@ def test_chat_uses_semantic_document_context(
 
     def generate(messages, **kwargs):
         generated_context.append(kwargs.get("rag_context"))
-        return iter(["Grounded answer."])
+        return iter(["Verified source passage."])
 
     monkeypatch.setattr(assistant_planner, "retrieve_semantic_document_context", retrieve)
     monkeypatch.setattr(assistant_service, "stream_chat_completion", generate)
@@ -462,7 +462,7 @@ def test_chat_uses_semantic_document_context(
     assert response.status_code == 200
     assert retrieval_calls == [("semantic-employee", query)]
     assert generated_context == [context]
-    assert any("Grounded answer." in event.get("token", "") for event in events)
+    assert any("Verified source passage." in event.get("token", "") for event in events)
 
 
 def test_assistant_retrieves_an_indexed_document_through_semantic_search(

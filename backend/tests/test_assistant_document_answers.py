@@ -188,7 +188,8 @@ def test_chat_passes_exactly_the_best_four_of_eight_matches_to_the_model(
         return [
             SemanticSearchResult(
                 document_id=f"doc-{i}", filename=f"policy-{i}.pdf", heading=None,
-                content=f"Passage {i}", score=1.0 - i / 10, document_version=1,
+                content=f"The carry forward limit is {i} days.", score=1.0 - i / 10,
+                document_version=1,
             )
             for i in range(limit)
         ]
@@ -197,15 +198,19 @@ def test_chat_passes_exactly_the_best_four_of_eight_matches_to_the_model(
     monkeypatch.setattr(indexing, "search_documents", search)
     monkeypatch.setattr(
         assistant_service, "stream_chat_completion",
-        lambda messages, **kwargs: received.append(kwargs.get("rag_context")) or iter(["ok"]),
+        lambda messages, **kwargs: received.append(kwargs.get("rag_context"))
+        or iter(["The carry forward limit is 0 days."]),
     )
 
     events = _ask(client, "What does the leave policy say about carry forward?")
 
     assert limits == [8]
-    assert [item["snippet"] for item in received[0]] == [f"Passage {i}" for i in range(4)]
+    assert [item["snippet"] for item in received[0]] == [
+        f"The carry forward limit is {i} days." for i in range(4)
+    ]
+    # Four passages reach the model, but only the one that states the answer is cited.
     [retrieval] = [event["retrieval"] for event in events if "retrieval" in event]
-    assert retrieval["sources"] == [f"policy-{i}.pdf" for i in range(4)]
+    assert retrieval["sources"] == ["policy-0.pdf"]
 
 
 @pytest.mark.parametrize(
@@ -282,7 +287,8 @@ def test_model_is_told_to_answer_only_from_the_cited_passages(monkeypatch: pytes
 
     grounding = next(m["content"] for m in sent[0] if "passages" in m["content"])
     assert "ONLY these passages" in grounding
-    assert "couldn't find it in the indexed company documents" in grounding
+    assert "reply with exactly: Not found" in grounding
+    assert "UNTRUSTED DATA" in grounding
     assert all(f"doc-{i}.pdf" in grounding and f"Fact {i}." in grounding for i in range(4))
 
 
@@ -293,7 +299,7 @@ def test_offline_answer_cites_the_other_sources_too(no_llm):
         {"source": "a.pdf", "snippet": "Third."},
     ]
     answer = "".join(assistant_service.stream_chat_completion([], rag_context=context))
-    assert "First." in answer and "a.pdf" in answer
+    assert "First." in answer
     assert "Also relevant: b.pdf." in answer
 
 

@@ -479,3 +479,84 @@ describe('Epic 6.1 — AI Assistant Floating Chat Widget', () => {
     })
   })
 })
+
+
+describe('Story 7.5 — answers cite their sources', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear()
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    cleanup()
+    window.sessionStorage.clear()
+  })
+
+  const citation: assistantApi.Citation = {
+    id: 1,
+    document_id: 'doc-1',
+    document_version: 1,
+    source: '1_HR_Remote_Work_Policy.pdf',
+    page: 'Page 1',
+    section: 'Remote Work',
+    label: '1_HR_Remote_Work_Policy.pdf, Page 1, section "Remote Work"',
+    quote: 'Employees may work remotely for up to 15 days per year.',
+  }
+  const reply = [
+    'Employees may work remotely for up to 15 days per year. [1]',
+    '',
+    'Sources:',
+    `[1] ${citation.label}`,
+  ].join('\n')
+
+  async function ask(question: string) {
+    const user = userEvent.setup()
+    renderWidget()
+    await user.click(screen.getByRole('button', { name: /open ai assistant/i }))
+    await user.type(screen.getByRole('textbox', { name: /message ai assistant/i }), question)
+    await user.click(screen.getByRole('button', { name: /send message/i }))
+  }
+
+  it('shows the cited document, page, section and passage under the answer', async () => {
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      options.onCitations?.([citation])
+      options.onChunk(reply)
+      options.onComplete?.(reply)
+    })
+
+    await ask('How many remote work days are allowed per year?')
+
+    const sources = await screen.findByRole('region', { name: 'Sources' })
+    expect(sources).toHaveTextContent('1_HR_Remote_Work_Policy.pdf')
+    expect(sources).toHaveTextContent('Page 1 · Section: Remote Work')
+    expect(sources).toHaveTextContent('up to 15 days per year')
+    // The plain-text list is not shown a second time next to the structured one.
+    expect(screen.queryByText(/^Sources:$/)).not.toBeInTheDocument()
+    expect(screen.getAllByText('1_HR_Remote_Work_Policy.pdf')).toHaveLength(1)
+  })
+
+  it('shows a Not found answer without any sources', async () => {
+    const notFound =
+      "Not found. I couldn't find relevant information in the indexed company documents you have access to, so I won't guess an answer."
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      options.onChunk(notFound)
+      options.onComplete?.(notFound)
+    })
+
+    await ask('What is the parental leave policy?')
+
+    expect(await screen.findByText(/^Not found\./)).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Sources' })).not.toBeInTheDocument()
+  })
+
+  it('keeps the plain-text sources when no structured citations arrived', async () => {
+    vi.spyOn(assistantApi, 'streamAssistantChat').mockImplementation(async (options) => {
+      options.onChunk(reply)
+      options.onComplete?.(reply)
+    })
+
+    await ask('How many remote work days are allowed per year?')
+
+    expect(await screen.findByText(/1_HR_Remote_Work_Policy\.pdf, Page 1/)).toBeInTheDocument()
+  })
+})

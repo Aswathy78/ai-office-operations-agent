@@ -223,6 +223,9 @@ class DocumentChunk(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     department: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Story 7.5: "Page 3" / "Slide 2" / "Sheet: Rooms" for citations; NULL for
+    # formats without pages and for chunks indexed before this column existed.
+    page_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
     acl_employee_ids: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     embedding: Mapped[list[float]] = mapped_column(JSON, nullable=False)
     embedding_model: Mapped[str] = mapped_column(String(255), nullable=False)

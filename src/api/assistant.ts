@@ -22,6 +22,23 @@
 
 import { API_BASE_URL, apiFetch } from './client'
 
+/**
+ * Story 7.5: one source an answer relies on. `[id]` in the answer text points here.
+ * `page` is a page, slide or sheet; `section` the heading it sits under; `quote`
+ * the passage that supports the claim. Either `page` or `section` is usually set;
+ * `label` always names where to look.
+ */
+export interface Citation {
+  id: number
+  document_id: string | null
+  document_version: number | null
+  source: string
+  page: string | null
+  section: string | null
+  label: string
+  quote: string
+}
+
 export interface AssistantChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -29,6 +46,8 @@ export interface AssistantChatMessage {
   timestamp: string
   isStreaming?: boolean
   error?: boolean
+  /** Story 7.5: the sources cited in `content`, verified by the server. */
+  citations?: Citation[]
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +136,8 @@ export interface StreamAssistantChatOptions {
   onStepStart?: (event: StepStartEvent) => void
   /** Called when a step successfully retrieves company knowledge. */
   onRetrieval?: (event: RetrievalEvent) => void
+  /** Story 7.5: called with the verified citations of a document-based answer. */
+  onCitations?: (citations: Citation[]) => void
   /** Called when a step completes successfully. */
   onStepDone?: (event: StepDoneEvent) => void
   /** Called when a step fails (earlier checkpoints are preserved). */
@@ -182,6 +203,7 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
     onPlan,
     onStepStart,
     onRetrieval,
+    onCitations,
     onStepDone,
     onStepError,
     onHalted,
@@ -295,6 +317,11 @@ export async function streamAssistantChat(options: StreamAssistantChatOptions): 
                 // ---- Story 6.4: Retrieval ----
                 if (parsed.retrieval && typeof parsed.retrieval === 'object') {
                   onRetrieval?.(parsed.retrieval as RetrievalEvent)
+                }
+
+                // ---- Story 7.5: Citations ----
+                if (Array.isArray(parsed.citations)) {
+                  onCitations?.(parsed.citations as Citation[])
                 }
 
                 // ---- Story 6.4: Step done ----

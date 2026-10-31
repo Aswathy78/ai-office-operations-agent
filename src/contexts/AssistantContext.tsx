@@ -316,6 +316,11 @@ export function AssistantProvider({ children }: { children: ReactNode }) {
           onRetrieval: (event: RetrievalEvent) => {
             setLastRetrieval(event)
           },
+          onCitations: (citations) => {
+            setMessages((prev) =>
+              prev.map((msg) => (msg.id === assistantMsgId ? { ...msg, citations } : msg)),
+            )
+          },
           onStepDone: (event: StepDoneEvent) => {
             setCurrentPlan((prev) =>
               prev

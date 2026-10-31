@@ -50,7 +50,8 @@ export function isMeetingSchedulingIntent(prompt: string): boolean {
   return false
 }
 
-import { streamAssistantChat } from '../api/assistant'
+import { streamAssistantChat, type Citation } from '../api/assistant'
+import { CitationList, withoutSourcesBlock } from '../components/assistant/CitationList'
 
 export function isKnowledgeOrQuestionIntent(prompt: string): boolean {
   const p = prompt.trim()
@@ -78,6 +79,7 @@ type ChatMessage =
       meetingResult?: ScheduleResult
       meetingPrompt?: string
       retrievalSource?: string
+      citations?: Citation[]
       tone?: 'error' | 'warning'
     }
 
@@ -289,6 +291,7 @@ export function ChatPage() {
 
       let accumulated = ''
       let retrievalSource: string | undefined = undefined
+      let citations: Citation[] | undefined = undefined
 
       try {
         await streamAssistantChat({
@@ -296,12 +299,20 @@ export function ChatPage() {
           onRetrieval: (event) => {
             retrievalSource = (event as any).source || 'Company Files'
           },
+          onCitations: (verified) => {
+            citations = verified
+            setMessages((current) =>
+              current.map((msg) =>
+                msg.id === assistantMsgId ? { ...msg, citations: verified } : msg,
+              ),
+            )
+          },
           onChunk: (chunk) => {
             accumulated += chunk
             setMessages((current) =>
               current.map((msg) =>
                 msg.id === assistantMsgId
-                  ? { ...msg, text: accumulated, retrievalSource }
+                  ? { ...msg, text: accumulated, retrievalSource, citations }
                   : msg,
               ),
             )
@@ -310,7 +321,7 @@ export function ChatPage() {
             setMessages((current) =>
               current.map((msg) =>
                 msg.id === assistantMsgId
-                  ? { ...msg, text: full || accumulated, retrievalSource }
+                  ? { ...msg, text: full || accumulated, retrievalSource, citations }
                   : msg,
               ),
             )
@@ -444,7 +455,14 @@ export function ChatPage() {
                       📄 Verified from {message.retrievalSource}
                     </div>
                   )}
-                  <p style={{ whiteSpace: 'pre-wrap' }}>{message.text}</p>
+                  <p style={{ whiteSpace: 'pre-wrap' }}>
+                    {message.role === 'assistant' && message.citations?.length
+                      ? withoutSourcesBlock(message.text)
+                      : message.text}
+                  </p>
+                  {message.role === 'assistant' && message.citations && (
+                    <CitationList citations={message.citations} />
+                  )}
                   {draft && (
                     <EmailDraftPreview draft={draft} actor={actor} groups={groups} onChange={storeDraft} />
                   )}
