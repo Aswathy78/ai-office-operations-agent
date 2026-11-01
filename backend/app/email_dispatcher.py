@@ -45,6 +45,9 @@ def run_once() -> dict:
 
     with SessionLocal() as db:
         summary = process_due_emails(db).as_dict()
+        from app.notification_service import process_due_notification_emails
+
+        summary["notification_emails_attempted"] = process_due_notification_emails(db)
     if summary["claimed"] or summary["recovered"]:
         logger.info("E-mail dispatch pass: %s", summary)
     return summary

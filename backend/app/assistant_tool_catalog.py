@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
-import smtplib
 import uuid
 
 from sqlalchemy import func
@@ -677,8 +676,6 @@ def search_documents(context: ToolContext, arguments: dict) -> dict:
 
 
 def send_task_notice(context: ToolContext, arguments: dict) -> dict:
-    from app.task_service import deliver_email
-
     db = context.db
     task = db.get(Task, arguments["task_id"])
     if task is None:
@@ -715,18 +712,25 @@ def send_task_notice(context: ToolContext, arguments: dict) -> dict:
         db.add(notification)
         db.commit()
 
-    if notification.status != "sent":
-        try:
-            deliver_email(assignee.email, notification.subject, notification.body)
-        except (OSError, smtplib.SMTPException, ValueError) as exc:
-            notification.status = "failed"
-            notification.error = str(exc)[:1000]
-            db.commit()
-            # Retried by the policy; the same notification row is reused.
-            raise ToolTransientError(f"The notification could not be delivered: {exc}") from exc
-        notification.status = "sent"
-        notification.error = None
-        db.commit()
+    from app.notification_service import create_task_notification, deliver_notification
+
+    inbox_item = create_task_notification(
+        db,
+        notification,
+        event_type="task_update",
+        summary=notification.subject,
+    )
+    db.commit()
+    if inbox_item.email_status in ("pending", "retrying", "failed"):
+        deliver_notification(
+            db,
+            inbox_item.id,
+            force_retry=inbox_item.email_status in ("retrying", "failed"),
+        )
+    if inbox_item.email_status in ("retrying", "failed"):
+        raise ToolTransientError(
+            f"The notification could not be delivered: {inbox_item.email_error or 'delivery failed'}"
+        )
 
     return {
         "notification_id": notification.id,

@@ -2918,7 +2918,7 @@ npx tsc --noEmit -p .
 
 # 📌 Current Project Status
 
-Last updated 1 November 2026. Story 7.5 is implemented on branch `feature/story-7.5-source-citations` and is not merged yet; FR-42 (Story 7.6) is implemented in this working tree.
+Last updated 2 November 2026. FR-42 (Story 7.6) and FR-43 (Story 8.1) are implemented in this working tree.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -2977,6 +2977,33 @@ Last updated 1 November 2026. Story 7.5 is implemented on branch `feature/story-
 - Story 7.4 — Access control at retrieval and again at answer time ✅
 - Story 7.5 — Citations with page / section, "Not found" instead of guessing, prompt-injection defence — implemented, awaiting merge
 - Story 7.6 — Re-index replacement versions; exclude superseded content and purge deleted document vectors (FR-42)
+
+### Epic 8 — Notifications
+
+- Story 8.1 — Recipient-scoped inbox, per-channel delivery status, preferences, and quiet hours (FR-43)
+
+Notification inbox and preferences are stored in `user_notifications` and
+`notification_preferences`. The Alembic migration `20261101_02` follows the
+existing head `20261101_01`. Assignment, reassignment, approval, reminder,
+escalation, and terminal workflow-failure events use idempotency keys; existing
+task and email lifecycle records remain the source of truth for their workflows.
+
+Quiet hours use each employee's IANA `timezone_name`. When that field is unset,
+quiet-hours calculations use UTC. Local quiet periods may cross midnight. During
+daylight-saving gaps or repeated wall-clock times, email is deferred until the
+first real UTC instant at which local time is outside the quiet interval. Deferred
+and retrying deliveries remain visible with their next attempt time. Notification
+email retries reuse the existing email provider and retry-backoff configuration;
+failed notification emails do not generate further failure notifications.
+
+The authenticated API exposes `GET /api/v1/notifications`, `GET
+/api/v1/notifications/unread-count`, `PATCH
+/api/v1/notifications/{id}/read`, and `GET` / `PUT
+/api/v1/notifications/preferences`. Inbox and preference operations are always
+scoped to the authenticated employee. In the UI, the header bell opens the
+inbox, notification settings are at `/settings/notifications`, and requester-
+owned assistant approvals are available at `/my-approvals` without exposing
+the team approval queue.
 
 ### Known gaps
 

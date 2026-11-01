@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 import logging
 import os
-import smtplib
 from urllib.parse import quote, urlencode
 import uuid
 
@@ -236,8 +235,7 @@ def attempt_assignment_email(
         .filter(TaskNotification.idempotency_key == idempotency_key)
         .one_or_none()
     )
-    notification_created = notification is None
-    if notification_created:
+    if notification is None:
         subject, body = render_assignment_email(task, employee, meeting.title if meeting else "")
         notification = TaskNotification(
             id=str(uuid.uuid4()),
@@ -266,51 +264,18 @@ def attempt_assignment_email(
             )
             if notification is None:
                 raise
-            notification_created = False
     if notification is None:
         raise RuntimeError("Assignment notification could not be persisted.")
-    if notification.status == "sent":
-        task.assignment_email_status = "sent"
-        task.assignment_email_error = None
-        db.commit()
-        db.refresh(task)
-        return task
+    from app.notification_service import create_task_notification, deliver_notification
 
-    if not notification_created and not retry_failed:
-        task.assignment_email_status = notification.status
-        task.assignment_email_error = notification.error
-        db.commit()
-        db.refresh(task)
-        return task
-    if notification.status == "failed" and not retry_failed:
-        task.assignment_email_status = "failed"
-        task.assignment_email_error = notification.error
-        db.commit()
-        db.refresh(task)
-        return task
-
-    task.assignment_email_status = "pending"
-    task.assignment_email_error = None
+    inbox_item = create_task_notification(
+        db,
+        notification,
+        event_type="task_assignment",
+        summary=f"You have been assigned: {task.title}",
+    )
     db.commit()
-    db.refresh(notification)
-
-    try:
-        send_email(employee.email, notification.subject, notification.body)
-    except (OSError, smtplib.SMTPException, ValueError) as exc:
-        notification.status = "failed"
-        notification.error = str(exc)
-        task.assignment_email_status = "failed"
-        task.assignment_email_error = str(exc)
-        logger.exception(
-            "Task assignment email failed task_id=%s assignee_id=%s",
-            task.id,
-            task.assignee_id,
-        )
-    else:
-        notification.status = "sent"
-        notification.error = None
-        task.assignment_email_status = "sent"
-        task.assignment_email_error = None
-    db.commit()
+    if notification.status != "sent" and (notification.status != "failed" or retry_failed):
+        deliver_notification(db, inbox_item.id, force_retry=retry_failed)
     db.refresh(task)
     return task

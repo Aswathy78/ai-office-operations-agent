@@ -15,7 +15,6 @@ Rules:
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
-import smtplib
 import uuid
 
 from sqlalchemy.orm import Session
@@ -27,6 +26,7 @@ from app.meeting.models import (
     TaskAuditLog,
     TaskNotification,
     TaskReassignmentRequest,
+    UserNotification,
     TASK_AUDIT_OUTCOME_APPLIED,
     TASK_AUDIT_OUTCOME_DENIED,
     TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
@@ -40,7 +40,6 @@ from app.meeting.models import (
 from app.task_service import (
     assignment_notification_key,
     render_assignment_email,
-    send_email,
 )
 
 logger = logging.getLogger(__name__)
@@ -216,6 +215,14 @@ def _queue_notification(
     body: str,
     idempotency_key: str | None = None,
 ) -> TaskNotification:
+    if idempotency_key:
+        existing = (
+            db.query(TaskNotification)
+            .filter(TaskNotification.idempotency_key == idempotency_key)
+            .one_or_none()
+        )
+        if existing is not None:
+            return existing
     notification = TaskNotification(
         id=str(uuid.uuid4()),
         task_id=task.id,
@@ -228,6 +235,19 @@ def _queue_notification(
         created_at=_now(),
     )
     db.add(notification)
+    from app.notification_service import create_task_notification
+
+    event_type = {
+        NOTIFICATION_REASSIGNED_AWAY: "task_reassignment",
+        NOTIFICATION_REASSIGNED_TO: "task_assignment",
+        NOTIFICATION_DUE_DATE_CHANGED: "task_due_date_changed",
+    }.get(kind, "task_update")
+    create_task_notification(
+        db,
+        notification,
+        event_type=event_type,
+        summary=subject,
+    )
     return notification
 
 
@@ -235,34 +255,17 @@ def _deliver_notifications(
     db: Session,
     notifications: list[TaskNotification],
 ) -> list[TaskNotification]:
-    """Send queued notifications after the change itself has been committed."""
+    """Deliver queued notification e-mails after the task change is committed."""
+    from app.notification_service import deliver_notification
+
     for notification in notifications:
-        recipient = db.get(Employee, notification.recipient_employee_id)
-        try:
-            if recipient is None:
-                raise ValueError("Notification recipient no longer exists.")
-            send_email(recipient.email, notification.subject, notification.body)
-        except (OSError, smtplib.SMTPException, ValueError) as exc:
-            notification.status = "failed"
-            notification.error = str(exc)
-            logger.exception(
-                "Task notification failed notification_id=%s task_id=%s",
-                notification.id,
-                notification.task_id,
-            )
-        else:
-            notification.status = "sent"
-            notification.error = None
-        if notification.idempotency_key is not None:
-            task = db.get(Task, notification.task_id)
-            if (
-                task is not None
-                and task.assignee_id == notification.recipient_employee_id
-                and assignment_notification_key(task) == notification.idempotency_key
-            ):
-                task.assignment_email_status = notification.status
-                task.assignment_email_error = notification.error
-        db.commit()
+        inbox_item = (
+            db.query(UserNotification)
+            .filter(UserNotification.task_notification_id == notification.id)
+            .one_or_none()
+        )
+        if inbox_item is not None and notification.status != "sent":
+            deliver_notification(db, inbox_item.id)
     return notifications
 
 
@@ -304,6 +307,7 @@ def _apply_reassignment(
             f"The task \"{task.title}\" has been reassigned to {new_assignee.name}. "
             "It is no longer on your task list or calendar.\n"
             f"{source}",
+            f"reassigned-away:{task.id}:a{task.assignment_version}:{old_assignee.id}",
         ),
         _queue_notification(
             db,
@@ -367,6 +371,9 @@ def reassign_task(
         )
         db.commit()
         db.refresh(task)
+        from app.notification_service import notify_task_reassignment_approvers
+
+        notify_task_reassignment_approvers(db, request)
         return TaskChangeResult(
             outcome=TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
             message=(
@@ -444,6 +451,9 @@ def decide_reassignment_request(
             f"requested by {request.requested_by}.{note_text}",
         )
         db.commit()
+        from app.notification_service import notify_task_reassignment_decision
+
+        notify_task_reassignment_decision(db, request, outcome="rejected")
         db.refresh(task)
         return TaskChangeResult(
             outcome=TASK_AUDIT_OUTCOME_APPLIED,
@@ -473,6 +483,9 @@ def decide_reassignment_request(
     )
     db.commit()
     _deliver_notifications(db, notifications)
+    from app.notification_service import notify_task_reassignment_decision
+
+    notify_task_reassignment_decision(db, request, outcome="approved")
     db.refresh(task)
     return TaskChangeResult(
         outcome=TASK_AUDIT_OUTCOME_APPLIED,
@@ -532,6 +545,7 @@ def change_task_due_date(
         f"New due date: {_format_due(new_due)}\n"
         f"{('Reason: ' + reason.strip() + chr(10)) if reason and reason.strip() else ''}"
         "Your task calendar feed has been updated with the new deadline.\n",
+        f"due-date-changed:{task.id}:s{task.calendar_sequence}:{assignee.id}",
     )
     db.commit()
     _deliver_notifications(db, [notification])

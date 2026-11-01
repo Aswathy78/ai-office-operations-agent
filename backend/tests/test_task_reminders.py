@@ -26,8 +26,9 @@ from app.meeting.models import (
     TRANSCRIPT_STATUS_COMPLETED,
     Task,
     TaskNotification,
+    UserNotification,
 )
-from app.task_reminder_service import current_stage, run_task_reminders
+from app.task_reminder_service import count_missed_reminders, current_stage, run_task_reminders
 
 DUE = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)
 MANAGER = {"actor_id": "user-002", "actor_role": "manager", "actor_team": "Engineering"}
@@ -254,6 +255,58 @@ def test_escalation_to_manager_after_two_missed_reminders(db_session, rahul, may
     assert f"Assignee: Rahul Kumar <{rahul.email}>" in body
     assert "Due date: 20 Oct 2026 12:00 UTC" in body
     assert "2 reminders" in body
+
+
+def test_escalation_inbox_delivery_and_idempotency_after_two_missed_windows(
+    db_session, rahul, maya, outbox, monkeypatch
+):
+    task = _task(db_session, rahul)
+    clock = [DUE - timedelta(hours=24)]
+    monkeypatch.setattr("app.notification_service._now", lambda: clock[0])
+
+    for at in (DUE - timedelta(hours=24), DUE - timedelta(hours=2)):
+        clock[0] = at
+        _run(db_session, at)
+
+    clock[0] = DUE
+    assert count_missed_reminders(db_session, task, DUE) == 2
+    first_pass = _run(db_session, DUE)
+
+    assert first_pass.escalations_sent == 1
+    assert db_session.query(TaskNotification).filter_by(
+        task_id=task.id,
+        kind="escalation",
+        recipient_employee_id=maya.id,
+        status="sent",
+    ).count() == 1
+    inbox_item = (
+        db_session.query(UserNotification)
+        .filter_by(
+            recipient_employee_id=maya.id,
+            event_type="task_escalation",
+            entity_id=task.id,
+        )
+        .one()
+    )
+    assert inbox_item.in_app_status == "delivered"
+    assert inbox_item.email_status == "sent"
+    assert inbox_item.email_attempts == 1
+    assert [recipient for recipient, _, _ in outbox].count(maya.email) == 1
+
+    second_pass = _run(db_session, DUE)
+
+    assert second_pass.escalations_sent == 0
+    assert db_session.query(TaskNotification).filter_by(
+        task_id=task.id,
+        kind="escalation",
+        recipient_employee_id=maya.id,
+    ).count() == 1
+    assert db_session.query(UserNotification).filter_by(
+        recipient_employee_id=maya.id,
+        event_type="task_escalation",
+        entity_id=task.id,
+    ).count() == 1
+    assert [recipient for recipient, _, _ in outbox].count(maya.email) == 1
 
 
 def test_escalation_is_sent_only_once(db_session, rahul, maya, outbox):

@@ -425,8 +425,12 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
             receipt = email_providers.send_email(address, draft.subject, draft.body)
         except (OSError, smtplib.SMTPException, ValueError) as exc:
             errors.append(exc)
-            logger.warning("E-mail delivery failed draft_id=%s recipient=%s: %s",
-                           draft.id, address, exc)
+            logger.warning(
+                "E-mail delivery failed draft_id=%s operation=%s error_type=%s",
+                draft.id,
+                getattr(exc, "smtp_operation", "unknown"),
+                type(exc).__name__,
+            )
             results.append({
                 "email": address, "status": "failed", "error": _describe(exc)[:500],
                 "message_id": None, "accepted_at": None, "attempt": draft.attempt_count,

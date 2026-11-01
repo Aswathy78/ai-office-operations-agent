@@ -17,6 +17,7 @@ from app.auth_router import router as auth_router
 from app.documents.router import router as documents_router
 from app.email_draft_router import router as email_draft_router
 from app.meeting.router import router as meeting_router
+from app.notification_router import router as notification_router
 from app.task_router import router as task_router
 from app.email_dispatcher import start_email_dispatcher, stop_email_dispatcher
 from app.documents.processor import start_document_processor, stop_document_processor
@@ -72,6 +73,7 @@ if not STORY_6_3_TEST_MODE:
     app.include_router(task_router)
     app.include_router(email_draft_router)
 app.include_router(auth_router)
+app.include_router(notification_router)
 app.include_router(assistant_router)
 app.include_router(assistant_tools_router)
 app.include_router(assistant_approvals_router)

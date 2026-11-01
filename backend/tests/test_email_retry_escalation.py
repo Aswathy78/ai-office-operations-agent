@@ -372,6 +372,9 @@ class RoutingSMTP:
     def __exit__(self, *exc):
         return False
 
+    def close(self):
+        pass
+
     def starttls(self):
         pass
 
@@ -421,6 +424,23 @@ def test_falls_back_to_ses_when_gmail_unavailable(two_providers, primary_error):
 def test_primary_used_when_available(two_providers):
     receipt = email_providers.send_email("ava@northstar.example", "Hi", "Body")
     assert (receipt.provider, receipt.fallback_used) == ("gmail", False)
+    assert RoutingSMTP.sent == [("smtp.gmail.com", "ava@northstar.example")]
+
+
+def test_disconnect_during_smtp_context_exit_cannot_retry_an_accepted_message(
+    two_providers, monkeypatch,
+):
+    class DisconnectOnExitSMTP(RoutingSMTP):
+        def __exit__(self, *exc):
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    RoutingSMTP.sent = []
+    monkeypatch.setattr(smtplib, "SMTP", DisconnectOnExitSMTP)
+
+    receipt = email_providers.send_email("ava@northstar.example", "Hi", "Body")
+
+    assert receipt.provider == "gmail"
+    assert receipt.fallback_used is False
     assert RoutingSMTP.sent == [("smtp.gmail.com", "ava@northstar.example")]
 
 

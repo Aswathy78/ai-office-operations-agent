@@ -506,6 +506,9 @@ def test_assignment_email_uses_configured_smtp(
         def __exit__(self, *_exc_info):
             return False
 
+        def close(self):
+            pass
+
         def starttls(self):
             nonlocal tls_started
             tls_started = True

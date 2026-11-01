@@ -33,8 +33,8 @@ function statusTone(status: AgentApprovalStatus): string {
 }
 
 /** Story 6.6: assistant actions waiting for approval, and the user's own requests. */
-export function AgentApprovalsSection() {
-  const [scope, setScope] = useState<'queue' | 'mine'>('queue')
+export function AgentApprovalsSection({ initialScope = 'queue' }: { initialScope?: 'queue' | 'mine' }) {
+  const [scope, setScope] = useState<'queue' | 'mine'>(initialScope)
   const [filter, setFilter] = useState<AgentApprovalStatus | ''>('pending')
   const [items, setItems] = useState<AgentActionApproval[]>([])
   const [loading, setLoading] = useState(true)
@@ -122,14 +122,16 @@ export function AgentApprovalsSection() {
           </div>
         </div>
         <div className="task-workspace-actions">
-          <select
-            aria-label="Assistant approvals view"
-            value={scope}
-            onChange={(event) => setScope(event.target.value as 'queue' | 'mine')}
-          >
-            <option value="queue">Waiting for my approval</option>
-            <option value="mine">My requests</option>
-          </select>
+          {initialScope !== 'mine' && (
+            <select
+              aria-label="Assistant approvals view"
+              value={scope}
+              onChange={(event) => setScope(event.target.value as 'queue' | 'mine')}
+            >
+              <option value="queue">Waiting for my approval</option>
+              <option value="mine">My requests</option>
+            </select>
+          )}
           <select
             aria-label="Assistant approval status"
             value={filter}

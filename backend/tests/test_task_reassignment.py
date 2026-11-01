@@ -94,7 +94,7 @@ def client(db_session: Session):
 def sent_emails(monkeypatch):
     sent: list[tuple[str, str, str]] = []
     monkeypatch.setattr(
-        "app.task_reassignment_service.send_email",
+        "app.task_service.send_email",
         lambda recipient, subject, body: sent.append((recipient, subject, body)),
     )
     return sent
@@ -526,7 +526,7 @@ def test_failed_notification_is_recorded_without_undoing_reassignment(
     def failing_send(recipient, subject, body):
         raise OSError("SMTP unavailable")
 
-    monkeypatch.setattr("app.task_reassignment_service.send_email", failing_send)
+    monkeypatch.setattr("app.task_service.send_email", failing_send)
     rahul = _employee(db_session, "Rahul", "Engineering")
     ava = _employee(db_session, "Ava Patel", "Engineering")
     task = _task(db_session, rahul)

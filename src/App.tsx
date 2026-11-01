@@ -19,6 +19,9 @@ import { ApprovalsPage } from './pages/ApprovalsPage'
 import { ChatPage } from './pages/ChatPage'
 import { DocumentsPage } from './pages/DocumentsPage'
 import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
+import { NotificationsPage } from './pages/NotificationsPage'
+import { NotificationPreferencesPage } from './pages/NotificationPreferencesPage'
+import { MyApprovalsPage } from './pages/MyApprovalsPage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -69,6 +72,9 @@ function AppRoutes() {
       <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
       <Route path="/documents" element={<ProtectedAppPage path="/documents"><DocumentsPage /></ProtectedAppPage>} />
       <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><ApprovalsPage /></ProtectedAppPage>} />
+      <Route path="/my-approvals" element={<ProtectedAppPage path="/my-approvals"><MyApprovalsPage /></ProtectedAppPage>} />
+      <Route path="/notifications" element={<ProtectedAppPage path="/notifications"><NotificationsPage /></ProtectedAppPage>} />
+      <Route path="/settings/notifications" element={<ProtectedAppPage path="/settings/notifications"><NotificationPreferencesPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><PlaceholderPage /></ProtectedAppPage>} />
