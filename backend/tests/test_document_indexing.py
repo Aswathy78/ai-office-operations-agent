@@ -705,6 +705,83 @@ def test_policy_queries_rank_the_matching_section_and_filter_unrelated_chunks(
             assert all(result.heading not in {"Casual Leave", "Onboarding"} for result in results)
 
 
+def test_factual_casual_leave_paraphrase_accepts_measure_before_type_and_filters_stale(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    doc = _ready_document(db_session, text="Leave entitlement.")
+    doc.indexing_status = INDEX_STATUS_READY
+    content = "Employees receive 9 days of casual leave per calendar year."
+    sick_content = "Employees receive 8 days of sick leave per calendar year."
+    historical_content = "Employees receive 30 days of casual leave per calendar year."
+    db_session.add_all([
+        DocumentChunk(
+            id=str(uuid.uuid4()),
+            document_id=doc.id,
+            document_version=doc.version,
+            chunk_index=0,
+            heading="Leave entitlement",
+            content=content,
+            token_count=_word_token_count(content),
+            department="Operations",
+            acl_employee_ids=[doc.owner_id],
+            embedding=[1.0, 0.0],
+            embedding_model=indexing.EMBEDDING_MODEL,
+        ),
+        DocumentChunk(
+            id=str(uuid.uuid4()),
+            document_id=doc.id,
+            document_version=doc.version,
+            chunk_index=1,
+            heading="Leave entitlement",
+            content=sick_content,
+            token_count=_word_token_count(sick_content),
+            department="Operations",
+            acl_employee_ids=[doc.owner_id],
+            embedding=[1.0, 0.0],
+            embedding_model=indexing.EMBEDDING_MODEL,
+        ),
+        DocumentChunk(
+            id=str(uuid.uuid4()),
+            document_id=doc.id,
+            document_version=doc.version - 1,
+            chunk_index=0,
+            heading="Leave entitlement",
+            content=historical_content,
+            token_count=_word_token_count(historical_content),
+            department="Operations",
+            soft_deleted_at=doc.updated_at,
+            acl_employee_ids=[doc.owner_id],
+            embedding=[1.0, 0.0],
+            embedding_model=indexing.EMBEDDING_MODEL,
+        ),
+    ])
+    db_session.commit()
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [1.0, 0.0])
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+
+    for query in (
+        "What is Casual leave entitlement?",
+        "How many casual leave days do employees get?",
+    ):
+        results = search_documents(
+            db_session,
+            actor_id=doc.owner_id,
+            query=query,
+            limit=5,
+        )
+        assert results, query
+        assert any("9 days" in result.content for result in results)
+        assert all("sick leave" not in result.content.casefold() for result in results)
+        assert all("30 days" not in result.content for result in results)
+
+
 def test_search_rejects_misleading_and_unrelated_passages_and_keeps_current_chunks(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,

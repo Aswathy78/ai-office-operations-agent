@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -34,6 +35,7 @@ from app.documents import indexing
 from app.documents.indexing import SemanticSearchResult
 from app.documents.models import (
     DOC_STATUS_READY,
+    INDEX_STATUS_PENDING,
     INDEX_STATUS_READY,
     Document,
     DocumentACLEntry,
@@ -259,6 +261,80 @@ def test_question_verbs_do_not_hide_the_handbook_answer(
     assert "Casual leave: 8 days" in answer
 
 
+def test_indexed_handbook_table_row_is_searchable_for_acl_authorized_employee(
+    client: TestClient,
+    db_session: Session,
+    deterministic_embeddings,
+    no_llm,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source_text = (
+        "3. Leave, Attendance and Holidays\n\n"
+        "Casual leave | 8 days | Maximum 3 consecutive days"
+    )
+    document = Document(
+        id=str(uuid.uuid4()),
+        original_filename="HR_Operations_Knowledge_Handbook.pdf",
+        stored_filename=f"{uuid.uuid4()}.pdf",
+        file_size=100,
+        mime_type="application/pdf",
+        owner_id="doc-hr",
+        status=DOC_STATUS_READY,
+        indexing_status=INDEX_STATUS_PENDING,
+        version=2,
+        extracted_text=source_text,
+        shared_with_all_employees=False,
+    )
+    db_session.add(document)
+    db_session.flush()
+    db_session.add(DocumentACLEntry(
+        id=str(uuid.uuid4()),
+        document_id=document.id,
+        employee_id="doc-emp",
+    ))
+    db_session.add(DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=document.id,
+        document_version=1,
+        chunk_index=0,
+        heading="Leave entitlements",
+        content="Casual leave | 30 days | Historical, superseded value",
+        token_count=9,
+        department="HR",
+        soft_deleted_at=datetime.now(timezone.utc),
+        acl_employee_ids=["doc-hr", "doc-emp"],
+        embedding=[1.0, 0.0],
+        embedding_model=indexing.EMBEDDING_MODEL,
+    ))
+    db_session.commit()
+
+    monkeypatch.setattr(indexing, "count_tokens", lambda text: len(text.split()))
+    assert indexing.index_document(db_session, document.id)
+    db_session.refresh(document)
+    assert document.indexing_status == INDEX_STATUS_READY
+
+    results = indexing.search_documents(
+        db_session,
+        actor_id="doc-emp",
+        query="How many casual leave days do employees get?",
+    )
+    assert results
+    assert "8 days" in results[0].content
+    assert "Maximum 3 consecutive days" in results[0].content
+    assert all("30 days" not in result.content for result in results)
+    assert indexing.search_documents(
+        db_session,
+        actor_id="doc-maya",
+        query="How many casual leave days do employees get?",
+    ) == []
+
+    answer = _answer(
+        _ask(client, "How many casual leave days do employees get?")
+    )
+    assert "8 days" in answer
+    assert "Maximum 3 consecutive days" in answer
+
+
 # ---------------------------------------------------------------------------
 # Grounding instructions
 # ---------------------------------------------------------------------------
@@ -357,6 +433,35 @@ def test_private_documents_are_not_used_for_other_employees(
                   shared=False, text="# Pay Bands\n\nCasual Leave: Employees may take up to 30 days.")
 
     answer = _answer(_ask(client, "How many days of casual leave can an employee take?"))
+
+    assert answer == assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
+    assert "30 days" not in answer
+
+
+def test_superseded_document_content_is_not_used_in_generated_answers(
+    client: TestClient, db_session: Session, deterministic_embeddings, no_llm,
+):
+    document = _add_document(
+        db_session,
+        filename="old-leave-policy.pdf",
+        text=(
+            "# Leave Policy\n\n"
+            "Casual Leave: Employees may take up to 30 days per calendar year."
+        ),
+    )
+    old_chunk = (
+        db_session.query(DocumentChunk)
+        .filter(DocumentChunk.document_id == document.id)
+        .one()
+    )
+    old_chunk.soft_deleted_at = datetime.now(timezone.utc)
+    document.version = 2
+    document.indexing_status = INDEX_STATUS_PENDING
+    db_session.commit()
+
+    answer = _answer(
+        _ask(client, "How many days of casual leave can an employee take?")
+    )
 
     assert answer == assistant_planner.DOCUMENT_NOT_FOUND_MESSAGE
     assert "30 days" not in answer

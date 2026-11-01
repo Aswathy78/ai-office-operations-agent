@@ -163,6 +163,24 @@ def _contains_search_term(term: str, content_terms: set[str]) -> bool:
     )
 
 
+def _leave_type_has_nearby_measure(content: str, leave_type: str) -> bool:
+    """Whether a matching leave entitlement measure occurs within 80 characters."""
+    for leave_match in re.finditer(
+        rf"\b{re.escape(leave_type)}\s+leave\b",
+        content,
+        re.I,
+    ):
+        for measure_match in _MEASURE_VALUE.finditer(content):
+            distance = max(
+                leave_match.start() - measure_match.end(),
+                measure_match.start() - leave_match.end(),
+                0,
+            )
+            if distance <= 80:
+                return True
+    return False
+
+
 def _search_passages(content: str) -> list[tuple[str | None, str]]:
     sections: list[tuple[str | None, list[str]]] = []
     current_heading: str | None = None
@@ -401,7 +419,8 @@ def index_document(db: Session, document_id: str) -> bool:
             return False
 
         db.query(DocumentChunk).filter(
-            DocumentChunk.document_id == document_id
+            DocumentChunk.document_id == document_id,
+            DocumentChunk.soft_deleted_at.is_(None),
         ).delete(synchronize_session=False)
         now = datetime.now(timezone.utc)
         db.add_all(
@@ -482,6 +501,7 @@ def search_documents(
         .filter(
             _document_access_filter(actor_id),
             DocumentChunk.document_version == Document.version,
+            DocumentChunk.soft_deleted_at.is_(None),
             DocumentChunk.embedding_model == EMBEDDING_MODEL,
             Document.indexing_status == INDEX_STATUS_READY,
         )
@@ -607,18 +627,7 @@ def search_documents(
             ):
                 continue
             if query_leave_types and not any(
-                (leave_match := re.search(
-                    rf"\b{re.escape(leave_type)}\s+leave\b",
-                    content,
-                    re.I,
-                ))
-                and (
-                    measure_match := _MEASURE_VALUE.search(
-                        content,
-                        leave_match.end(),
-                    )
-                )
-                and measure_match.start() - leave_match.end() <= 80
+                _leave_type_has_nearby_measure(content, leave_type)
                 for leave_type in query_leave_types
             ):
                 continue

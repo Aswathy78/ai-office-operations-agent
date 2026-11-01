@@ -2886,6 +2886,8 @@ The AI Assistant and the Corporate Chatbox show a **Sources** block under each a
 
 Migration `20261031_01` adds `document_chunks.page_label` and queues already indexed documents for a re-index so they get page labels. Until a document is re-indexed, its old chunks keep serving searches and its citations fall back to section only (or to the page named in the chunk text, when it names exactly one).
 
+Migration `20261101_01` adds `document_chunks.soft_deleted_at` for superseded versions. Replacing a document retires its previous chunks as the new version is queued; semantic retrieval uses only the current, successfully indexed version. Deleting a document removes all of its chunk and embedding rows in the deletion transaction.
+
 ### Testing
 
 `backend/tests/test_rag_citations.py` covers citation accuracy, page and section metadata, insufficient evidence, hallucination prevention (wrong figures, unsupported sentences), the citation styles real models use (`【1】`, `[Passage 1]`), and prompt injection (redaction, forged delimiters, a model that obeys an injected instruction anyway). Frontend: `CitationList.test.tsx`, `AssistantWidget.test.tsx`, `assistant.citations.test.ts`.
@@ -2916,7 +2918,7 @@ npx tsc --noEmit -p .
 
 # 📌 Current Project Status
 
-Last updated 31 October 2026. Story 7.5 is implemented on branch `feature/story-7.5-source-citations` and is not merged yet; everything else listed here is on `main`.
+Last updated 1 November 2026. Story 7.5 is implemented on branch `feature/story-7.5-source-citations` and is not merged yet; FR-42 (Story 7.6) is implemented in this working tree.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -2974,6 +2976,7 @@ Last updated 31 October 2026. Story 7.5 is implemented on branch `feature/story-
 - Story 7.3 — Answers grounded in company documents ✅
 - Story 7.4 — Access control at retrieval and again at answer time ✅
 - Story 7.5 — Citations with page / section, "Not found" instead of guessing, prompt-injection defence — implemented, awaiting merge
+- Story 7.6 — Re-index replacement versions; exclude superseded content and purge deleted document vectors (FR-42)
 
 ### Known gaps
 
