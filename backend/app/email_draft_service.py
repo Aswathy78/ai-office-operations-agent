@@ -903,6 +903,9 @@ def submit_for_approval(db: Session, draft_id: str, actor: EmailActor) -> EmailD
                         detail="Submitted for approval: " + " ".join(draft.approval_reasons))
     db.commit()
     db.refresh(draft)
+    from app.notification_service import notify_email_approval_request
+
+    notify_email_approval_request(db, draft)
     return draft
 
 
@@ -940,6 +943,9 @@ def decide_draft(
     )
     db.commit()
     db.refresh(draft)
+    from app.notification_service import notify_email_approval_decision
+
+    notify_email_approval_decision(db, draft)
     return draft
 
 

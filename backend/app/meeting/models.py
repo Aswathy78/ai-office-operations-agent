@@ -971,6 +971,112 @@ class TaskNotification(Base):
     )
 
 
+USER_NOTIFICATION_EMAIL_STATUSES = (
+    "disabled",
+    "pending",
+    "deferred",
+    "sending",
+    "retrying",
+    "sent",
+    "failed",
+)
+
+
+class UserNotification(Base):
+    """Recipient-scoped inbox item and its independent channel delivery state."""
+
+    __tablename__ = "user_notifications"
+    __table_args__ = (
+        CheckConstraint(
+            "in_app_status IN ('delivered', 'disabled')",
+            name="ck_user_notifications_in_app_status",
+        ),
+        CheckConstraint(
+            f"email_status IN ({', '.join(repr(status) for status in USER_NOTIFICATION_EMAIL_STATUSES)})",
+            name="ck_user_notifications_email_status",
+        ),
+        UniqueConstraint("idempotency_key", name="uq_user_notifications_idempotency_key"),
+        UniqueConstraint("task_notification_id", name="uq_user_notifications_task_notification"),
+        Index(
+            "ix_user_notifications_recipient_created",
+            "recipient_employee_id",
+            "created_at",
+        ),
+        Index(
+            "ix_user_notifications_email_due",
+            "email_status",
+            "email_next_attempt_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    recipient_employee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    event_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    entity_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    entity_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(300), nullable=False)
+    in_app_status: Mapped[str] = mapped_column(String(20), nullable=False, default="delivered")
+    email_status: Mapped[str] = mapped_column(String(20), nullable=False, default="disabled")
+    email_subject: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    email_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    email_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    email_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_notification_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("task_notifications.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    email_failure_notification_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("email_failure_notifications.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class NotificationPreference(Base):
+    """Per-employee channel preferences and local quiet hours."""
+
+    __tablename__ = "notification_preferences"
+    __table_args__ = (
+        CheckConstraint(
+            "(quiet_hours_start IS NULL AND quiet_hours_end IS NULL) OR "
+            "(quiet_hours_start IS NOT NULL AND quiet_hours_end IS NOT NULL)",
+            name="ck_notification_preferences_quiet_hours_pair",
+        ),
+    )
+
+    employee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    in_app_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    email_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    quiet_hours_start: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    quiet_hours_end: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
 class MeetingTranscriptCorrection(Base):
     __tablename__ = "meeting_transcript_corrections"
     __table_args__ = (

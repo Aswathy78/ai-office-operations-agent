@@ -940,6 +940,48 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .meeting-approval-actions .button { flex: 1; }
 }
 
+.notification-bell { position: relative; }
+.notification-badge {
+  position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px;
+  display: grid; place-items: center; padding: 0 4px; border: 2px solid #fff;
+  border-radius: 999px; background: #c62828; color: #fff; font-size: 9px; font-weight: 800;
+}
+.notification-page-heading h2 { margin: 0; color: var(--navy); font-size: 22px; }
+.notification-page-heading p:not(.eyebrow) { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+.notification-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.notification-card {
+  padding: 16px 18px; background: #fff; border: 1px solid var(--border);
+  border-radius: 10px; border-left: 4px solid #b8c5d6;
+}
+.notification-card.unread { border-left-color: var(--blue); background: #fbfdff; }
+.notification-card-main { display: grid; justify-items: start; gap: 8px; }
+.notification-card-title { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.notification-card-title strong { font-size: 14px; }
+.notification-card-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 2px; }
+.notification-card-actions .button { min-height: 34px; }
+.notification-preferences-card { align-items: stretch; flex-direction: column; gap: 24px; }
+.notification-preference-options { display: grid; gap: 14px; }
+.notification-preference-toggle { display: flex; align-items: flex-start; gap: 11px; cursor: pointer; }
+.notification-preference-toggle input { margin-top: 3px; accent-color: var(--blue); }
+.notification-preference-toggle strong, .notification-preference-toggle small { display: block; }
+.notification-preference-toggle small { margin-top: 4px; color: var(--muted); }
+.notification-quiet-hours { display: grid; gap: 10px; max-width: 560px; }
+.notification-quiet-hours h3, .notification-quiet-hours p { margin: 0; }
+.notification-quiet-hours h3 { color: var(--navy); font-size: 16px; }
+.notification-quiet-hours p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.notification-quiet-hours label { display: grid; gap: 5px; color: #34445b; font-size: 12px; font-weight: 700; }
+.notification-quiet-hours input {
+  min-height: 40px; padding: 0 10px; border: 1px solid #cfd8e6; border-radius: 7px;
+  background: #fff; color: #26364d;
+}
+.notification-time-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.notification-preferences-card > .button { align-self: flex-start; }
+@media (max-width: 640px) {
+  .notification-page-heading { align-items: flex-start; }
+  .notification-page-heading > .button { width: auto; }
+  .notification-time-grid { grid-template-columns: 1fr; }
+}
+
 /* Danger button variant */
 .button.danger {
   background: #b91c1c; border: 1px solid #991b1b; color: #fff;

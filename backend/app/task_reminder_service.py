@@ -29,13 +29,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
-import smtplib
 import uuid
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import task_service
 from app.meeting.models import (
     Employee,
     Meeting,
@@ -273,15 +271,11 @@ def _deliver_once(
     body: str,
     now: datetime,
 ) -> TaskNotification | None:
-    """Send one e-mail at most once per idempotency key.
-
-    Returns the notification when an e-mail was attempted, ``None`` when it was
-    skipped (already sent / claimed by another run, or the task is completed).
-    A *failed* attempt for the same key is retried on the next run.
-    """
+    """Create one inbox event and let the shared e-mail dispatcher deliver it."""
     notification = (
         db.query(TaskNotification).filter(TaskNotification.idempotency_key == key).one_or_none()
     )
+    retry_existing = notification is not None and notification.status == STATUS_FAILED
     if notification is not None and notification.status != STATUS_FAILED:
         return None
 
@@ -307,21 +301,26 @@ def _deliver_once(
         notification.body = body
         notification.error = None
     try:
-        # Claim the key before sending so concurrent runs cannot both send.
-        db.commit()
+        db.flush()
     except IntegrityError:
         db.rollback()
         return None
+    from app.notification_service import create_task_notification, deliver_notification
 
-    try:
-        task_service.send_email(recipient.email, subject, body)
-    except (OSError, smtplib.SMTPException, ValueError) as exc:
-        notification.status = STATUS_FAILED
-        notification.error = str(exc)[:1000]
-        logger.warning("Task %s e-mail failed task_id=%s to=%s: %s", kind, task.id, recipient.email, exc)
-    else:
-        notification.status = STATUS_SENT
+    inbox_item = create_task_notification(
+        db,
+        notification,
+        event_type="task_escalation" if kind == KIND_ESCALATION else "task_reminder",
+        summary=subject,
+    )
     db.commit()
+    if retry_existing:
+        deliver_notification(db, inbox_item.id, force_retry=True)
+    elif inbox_item.email_status in ("pending", "retrying") and (
+        inbox_item.email_next_attempt_at is None
+        or _as_utc(inbox_item.email_next_attempt_at) <= _as_utc(now)
+    ):
+        deliver_notification(db, inbox_item.id, now=now)
     return notification
 
 
@@ -343,7 +342,7 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
         if notification is not None:
             if notification.status == STATUS_SENT:
                 summary.reminders_sent += 1
-            else:
+            elif notification.status == STATUS_FAILED:
                 summary.failed += 1
             summary.notifications.append(notification.id)
 
@@ -370,7 +369,7 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
     if notification is not None:
         if notification.status == STATUS_SENT:
             summary.escalations_sent += 1
-        else:
+        elif notification.status == STATUS_FAILED:
             summary.failed += 1
         summary.notifications.append(notification.id)
 

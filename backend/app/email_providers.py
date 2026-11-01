@@ -26,8 +26,11 @@ from email.utils import make_msgid
 import logging
 import os
 import smtplib
+from collections.abc import Callable
+from typing import TypeVar
 
 logger = logging.getLogger(__name__)
+_Result = TypeVar("_Result")
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,24 @@ def fallback_settings() -> SmtpSettings | None:
     return _settings("FALLBACK_", default_sender=os.getenv("SMTP_FROM_EMAIL", "").strip())
 
 
+def _smtp_operation(
+    provider: str,
+    operation: str,
+    call: Callable[[], _Result],
+) -> _Result:
+    try:
+        return call()
+    except (OSError, smtplib.SMTPException) as exc:
+        setattr(exc, "smtp_operation", operation)
+        logger.warning(
+            "SMTP delivery operation failed provider=%s operation=%s error_type=%s",
+            provider,
+            operation,
+            type(exc).__name__,
+        )
+        raise
+
+
 def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) -> str:
     """Hand one plain-text e-mail to ``settings``'s server; return its Message-ID.
 
@@ -113,12 +134,36 @@ def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) ->
     message["Message-ID"] = message_id
     message.set_content(body)
 
-    with smtplib.SMTP(settings.host, settings.port, timeout=10) as smtp:
+    smtp = _smtp_operation(
+        settings.name,
+        "connect",
+        lambda: smtplib.SMTP(settings.host, settings.port, timeout=10),
+    )
+    try:
         if settings.starttls:
-            smtp.starttls()
+            _smtp_operation(settings.name, "STARTTLS", smtp.starttls)
         if settings.username:
-            smtp.login(settings.username, settings.password)
-        refused = smtp.send_message(message)
+            _smtp_operation(
+                settings.name,
+                "login",
+                lambda: smtp.login(settings.username, settings.password),
+            )
+        refused = _smtp_operation(
+            settings.name,
+            "sendmail/response handling",
+            lambda: smtp.send_message(message),
+        )
+    finally:
+        # A context manager sends QUIT; a disconnect during that cleanup can
+        # falsely turn an accepted message into a retry and send it twice.
+        try:
+            smtp.close()
+        except OSError as exc:
+            logger.warning(
+                "SMTP connection cleanup failed provider=%s error_type=%s",
+                settings.name,
+                type(exc).__name__,
+            )
     if refused:
         # The server answered but did not accept this recipient.
         raise smtplib.SMTPRecipientsRefused(refused)
@@ -158,8 +203,12 @@ def send_email(recipient: str, subject: str, body: str) -> DeliveryReceipt:
         fallback = fallback_settings()
         if fallback is None or not is_provider_unavailable(primary_error):
             raise
-        logger.warning("Primary mail provider %s unavailable (%s); using fallback %s",
-                       primary.name, primary_error, fallback.name)
+        logger.warning(
+            "Primary mail provider unavailable provider=%s error_type=%s fallback=%s",
+            primary.name,
+            type(primary_error).__name__,
+            fallback.name,
+        )
         message_id = send_via(fallback, recipient, subject, body)
         return DeliveryReceipt(
             message_id,

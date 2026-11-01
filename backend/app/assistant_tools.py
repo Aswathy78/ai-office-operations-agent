@@ -988,6 +988,9 @@ def _request_approval(
                 f"This request was already {existing.status}.{note} "
                 "Send it again with a new idempotency key to start over."
             )
+        from app.notification_service import notify_assistant_approval_request
+
+        notify_assistant_approval_request(db, existing)
         return existing
 
     approval = AssistantActionApproval(
@@ -1017,6 +1020,9 @@ def _request_approval(
         return _request_approval(
             db, spec, principal, arguments, digest, idempotency_key, conversation_id, decision
         )
+    from app.notification_service import notify_assistant_approval_request
+
+    notify_assistant_approval_request(db, approval)
     who = "your confirmation" if approval.approver_kind == "requester" else (
         "approval by HR / Operations, an admin, or your team's manager"
     )

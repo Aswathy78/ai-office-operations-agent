@@ -353,6 +353,26 @@ def _sync_one(db: Session, sync_id: str, summary: SyncSummary) -> None:
         summary.completed += 1
     summary.task_ids.append(sync.task_id)
     db.commit()
+    if sync.status == CALENDAR_SYNC_STATUS_FAILED:
+        _notify_calendar_failure(db, sync)
+
+
+def _notify_calendar_failure(db: Session, sync: TaskCalendarSync) -> None:
+    task = db.get(Task, sync.task_id)
+    employee = db.get(Employee, task.assignee_id) if task else None
+    if task is None or employee is None or not employee.is_active:
+        return
+    from app.notification_service import notify_workflow_failure
+
+    notify_workflow_failure(
+        db,
+        recipient=employee,
+        summary=f"Calendar sync failed for task: {task.title}. {sync.last_error or ''}".strip(),
+        idempotency_key=f"calendar-sync-failure:{sync.id}:a{sync.attempt_count}:{employee.id}",
+        entity_type="task",
+        entity_id=task.id,
+        entity_url=f"/tasks?task_id={task.id}",
+    )
 
 
 def process_due(db: Session, now: datetime | None = None, limit: int = 50) -> SyncSummary:
@@ -384,6 +404,7 @@ def recover_stuck_processing(db: Session, older_than_seconds: int = 300) -> int:
                 TaskCalendarSync.status_changed_at < cutoff)
         .all()
     )
+    terminal_failures: list[TaskCalendarSync] = []
     for sync in stuck:
         sync.last_error = "Interrupted while syncing; will retry."
         if sync.attempt_count < max_attempts():
@@ -391,8 +412,11 @@ def recover_stuck_processing(db: Session, older_than_seconds: int = 300) -> int:
             sync.next_attempt_at = _now()
         else:
             transition(sync, CALENDAR_SYNC_STATUS_FAILED)
+            terminal_failures.append(sync)
     if stuck:
         db.commit()
+    for sync in terminal_failures:
+        _notify_calendar_failure(db, sync)
     return len(stuck)
 
 

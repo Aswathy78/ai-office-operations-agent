@@ -197,6 +197,9 @@ def decide_approval(
             detail=f"Rejected by {decider.name} ({decider.role})"
                    + (f": {approval.decision_note}" if approval.decision_note else "."),
         )
+        from app.notification_service import notify_assistant_approval_decision
+
+        notify_assistant_approval_decision(db, approval, outcome="rejected")
         return ApprovalDecisionResult(approval, None, "Rejected. Nothing was run.")
 
     db.commit()
@@ -232,8 +235,15 @@ def decide_approval(
                 risk_level=approval.risk_level, approval_id=approval.id,
                 conversation_id=approval.conversation_id, detail=exc.message,
             )
+        if approval.status == "failed":
+            from app.notification_service import notify_assistant_approval_decision
+
+            notify_assistant_approval_decision(db, approval, outcome="failed")
         return ApprovalDecisionResult(approval, None, f"Approved, but it could not run: {exc.message}")
     db.refresh(approval)
+    from app.notification_service import notify_assistant_approval_decision
+
+    notify_assistant_approval_decision(db, approval, outcome="executed")
     return ApprovalDecisionResult(approval, outcome, "Approved and done.")
 
 

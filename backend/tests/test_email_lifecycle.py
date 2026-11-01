@@ -473,6 +473,9 @@ class FakeSMTP:
     def __exit__(self, *exc):
         return False
 
+    def close(self):
+        pass
+
     def starttls(self):
         pass
 

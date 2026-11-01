@@ -108,6 +108,9 @@ def notify_failure(db: Session, draft: EmailDraft) -> list[EmailFailureNotificat
         .all()
     )
     if existing:
+        from app.notification_service import record_email_draft_failure
+
+        record_email_draft_failure(db, draft, existing)
         return existing
 
     now = _now()
@@ -156,10 +159,32 @@ def notify_failure(db: Session, draft: EmailDraft) -> list[EmailFailureNotificat
     for row in rows:
         if row.channel == "email":
             _send_notification(db, row, now)
+    from app.notification_service import record_email_draft_failure
+
+    record_email_draft_failure(db, draft, rows)
     return rows
 
 
 def _send_notification(db: Session, row: EmailFailureNotification, now: datetime) -> None:
+    from app.notification_service import email_delivery_policy
+
+    policy, next_attempt_at, policy_error = email_delivery_policy(
+        db,
+        row.recipient_email or "",
+        now,
+    )
+    if policy == "disabled":
+        row.status = "recorded"
+        row.error = policy_error
+        row.next_attempt_at = None
+        db.commit()
+        return
+    if policy == "deferred":
+        row.status = "pending"
+        row.error = policy_error
+        row.next_attempt_at = next_attempt_at
+        db.commit()
+        return
     row.attempts += 1
     try:
         receipt = email_providers.send_email(row.recipient_email, row.subject, row.body)
@@ -194,13 +219,18 @@ def retry_due_notifications(db: Session, now: datetime | None = None) -> int:
              & EmailFailureNotification.next_attempt_at.isnot(None)
              & (EmailFailureNotification.next_attempt_at <= now))
             | ((EmailFailureNotification.status == "pending")
-               & (EmailFailureNotification.created_at < stale_pending))
+                & (EmailFailureNotification.created_at < stale_pending)
+                & ((EmailFailureNotification.next_attempt_at.is_(None))
+                   | (EmailFailureNotification.next_attempt_at <= now)))
         )
         .limit(20)
         .all()
     )
     for row in due:
         _send_notification(db, row, now)
+        from app.notification_service import sync_email_failure_notification
+
+        sync_email_failure_notification(db, row.id)
     return len(due)
 
 
