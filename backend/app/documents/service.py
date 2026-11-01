@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import filetype
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, inspect, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.documents.models import (
@@ -322,6 +322,15 @@ def update_document_file(
 
     warnings: list[str] = []
     try:
+        now = datetime.now(timezone.utc)
+        # Retire prior chunks in the same transaction as the version change.
+        db.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document.id,
+            DocumentChunk.soft_deleted_at.is_(None),
+        ).update(
+            {DocumentChunk.soft_deleted_at: now},
+            synchronize_session=False,
+        )
         document.original_filename = filename
         document.stored_filename = new_stored_filename
         document.file_size = len(data)
@@ -337,10 +346,7 @@ def update_document_file(
             document.shared_with_all_employees = shared_with_all_employees
         document.processing_started_at = None
         document.processing_completed_at = None
-        document.updated_at = datetime.now(timezone.utc)
-        db.query(DocumentChunk).filter(
-            DocumentChunk.document_id == document.id
-        ).delete(synchronize_session=False)
+        document.updated_at = now
 
         if acl_employee_ids is not None:
             warnings.extend(_replace_acl_entries(db, document, acl_employee_ids))
@@ -479,13 +485,31 @@ def queue_document_reindex(db: Session, document: Document) -> bool:
 
 
 def remove_document(db: Session, document: Document) -> None:
-    """Delete a document record and its stored file from disk."""
-    delete_document_file(document.stored_filename)
+    """Delete a document and all indexed versions; safe to retry after commit."""
+    state = inspect(document)
+    identity = state.identity
+    document_id = identity[0] if identity else state.dict.get("id")
+    if document_id is None:
+        raise ValueError("Cannot delete a document without a database identity.")
+
+    current_document = db.get(Document, document_id)
+    stored_filename = (
+        current_document.stored_filename if current_document is not None else None
+    )
     db.query(DocumentChunk).filter(
-        DocumentChunk.document_id == document.id
+        DocumentChunk.document_id == document_id
     ).delete(synchronize_session=False)
-    db.delete(document)
+    if current_document is not None:
+        db.delete(current_document)
     db.commit()
+    if stored_filename is not None:
+        try:
+            delete_document_file(stored_filename)
+        except OSError:
+            logger.exception(
+                "Failed to remove stored file for deleted document %s.",
+                document_id,
+            )
 
 
 def reset_documents(db: Session) -> int:

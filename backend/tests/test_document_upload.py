@@ -35,12 +35,14 @@ from app.documents.models import (
     DOC_STATUS_PROCESSING,
     DOC_STATUS_READY,
     DOC_STATUS_UPLOADED,
+    INDEX_STATUS_FAILED,
     INDEX_STATUS_PENDING,
     INDEX_STATUS_READY,
     Document,
     DocumentACLEntry,
     DocumentChunk,
 )
+from app.documents.indexing import search_documents
 from app.documents.processor import process_one_document
 from app.documents.service import (
     DocumentAccessDenied,
@@ -48,6 +50,8 @@ from app.documents.service import (
     check_document_access,
     create_document,
     list_accessible_documents,
+    remove_document,
+    retry_document_index,
     update_document_file,
     validate_upload,
 )
@@ -601,7 +605,10 @@ def test_private_document_visibility_matches_acl_for_listing_and_semantic_search
 def test_replacement_increments_version_and_preserves_existing_acl(
     db_session: Session,
     sample_employees,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    import app.documents.indexing as indexing
+
     png_bytes = _create_minimal_png_bytes()
     doc = create_document(
         db_session,
@@ -610,21 +617,279 @@ def test_replacement_increments_version_and_preserves_existing_acl(
         owner_id="emp-owner",
         acl_employee_ids=["emp-viewer"],
     ).document
+    doc.status = DOC_STATUS_READY
+    doc.indexing_status = INDEX_STATUS_READY
+    old_chunk = DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=doc.id,
+        document_version=doc.version,
+        chunk_index=0,
+        content=(
+            "Confidential test phrase: ORCHID-4829. "
+            "Test question: What is the confidential test phrase in this document? "
+            "Expected answer for an authorized user: ORCHID-4829"
+        ),
+        token_count=25,
+        department="Operations",
+        acl_employee_ids=["emp-owner", "emp-viewer"],
+        embedding=[1.0, 0.0],
+        embedding_model=indexing.EMBEDDING_MODEL,
+    )
+    db_session.add(old_chunk)
+    db_session.commit()
+
+    embed_calls: list[list[str]] = []
+
+    def embed_passages(passages):
+        contents = list(passages)
+        embed_calls.append(contents)
+        return [[0.0, 1.0] for _ in contents]
+
+    monkeypatch.setattr(indexing, "count_tokens", lambda text: len(text.split()))
+    monkeypatch.setattr(indexing, "embed_passages", embed_passages)
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [0.0, 1.0])
 
     updated = update_document_file(
         db_session,
         doc,
-        filename="new.png",
-        data=png_bytes,
+        filename="new.docx",
+        data=_create_minimal_docx_bytes([
+            "Confidential test phrase: COBALT-7316.",
+            "Test question: What is the confidential test phrase in this document?",
+            "Expected answer for an authorized user: COBALT-7316",
+        ]),
     ).document
 
     assert updated.id == doc.id
     assert updated.version == 2
-    assert updated.original_filename == "new.png"
+    assert updated.original_filename == "new.docx"
     assert updated.status == DOC_STATUS_UPLOADED
     assert updated.indexing_status == "pending"
     assert updated.extracted_text is None
     assert [entry.employee_id for entry in updated.acl_entries] == ["emp-viewer"]
+    db_session.refresh(old_chunk)
+    assert old_chunk.soft_deleted_at is not None
+    assert search_documents(
+        db_session,
+        actor_id="emp-owner",
+        query="What is the confidential test phrase in this document?",
+    ) == []
+
+    process_one_document(db_session, updated)
+    db_session.refresh(updated)
+    assert updated.status == DOC_STATUS_READY
+    assert updated.indexing_status == INDEX_STATUS_READY
+    assert "COBALT-7316" in updated.extracted_text
+    assert len(embed_calls) == 1
+    assert "COBALT-7316" in " ".join(embed_calls[0])
+
+    results = search_documents(
+        db_session,
+        actor_id="emp-owner",
+        query="What is the confidential test phrase in this document?",
+    )
+    assert results
+    assert any("COBALT-7316" in result.content for result in results)
+    assert all("ORCHID-4829" not in result.content for result in results)
+    assert db_session.query(DocumentChunk).filter(
+        DocumentChunk.document_id == doc.id,
+        DocumentChunk.soft_deleted_at.is_(None),
+    ).count() == 1
+
+
+def test_replacement_index_failure_keeps_old_version_hidden_and_can_retry(
+    db_session: Session,
+    sample_employees,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    doc = create_document(
+        db_session,
+        filename="old.png",
+        data=_create_minimal_png_bytes(),
+        owner_id="emp-owner",
+    ).document
+    doc.status = DOC_STATUS_READY
+    doc.indexing_status = INDEX_STATUS_READY
+    old_chunk = DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=doc.id,
+        document_version=doc.version,
+        chunk_index=0,
+        content=(
+            "Confidential test phrase: ORCHID-4829. "
+            "Test question: What is the confidential test phrase in this document? "
+            "Expected answer for an authorized user: ORCHID-4829"
+        ),
+        token_count=25,
+        department="Operations",
+        acl_employee_ids=["emp-owner"],
+        embedding=[1.0, 0.0],
+        embedding_model=indexing.EMBEDDING_MODEL,
+    )
+    db_session.add(old_chunk)
+    db_session.commit()
+
+    monkeypatch.setattr(indexing, "count_tokens", lambda text: len(text.split()))
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: (_ for _ in ()).throw(RuntimeError("model unavailable")),
+    )
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [1.0, 0.0])
+    updated = update_document_file(
+        db_session,
+        doc,
+        filename="new.docx",
+        data=_create_minimal_docx_bytes([
+            "Confidential test phrase: COBALT-7316.",
+            "Test question: What is the confidential test phrase in this document?",
+            "Expected answer for an authorized user: COBALT-7316",
+        ]),
+    ).document
+
+    process_one_document(db_session, updated)
+    db_session.refresh(updated)
+    db_session.refresh(old_chunk)
+    assert updated.status == DOC_STATUS_READY
+    assert updated.indexing_status == INDEX_STATUS_FAILED
+    assert old_chunk.soft_deleted_at is not None
+    assert search_documents(
+        db_session,
+        actor_id="emp-owner",
+        query="What is the confidential test phrase in this document?",
+    ) == []
+
+    assert retry_document_index(db_session, updated)
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+    assert indexing.index_document(db_session, updated.id)
+    db_session.refresh(updated)
+    assert updated.indexing_status == INDEX_STATUS_READY
+    results = search_documents(
+        db_session,
+        actor_id="emp-owner",
+        query="What is the confidential test phrase in this document?",
+    )
+    assert results
+    assert any("COBALT-7316" in result.content for result in results)
+    assert all("ORCHID-4829" not in result.content for result in results)
+
+
+def test_delete_document_purges_all_versions_and_is_safe_to_retry(
+    db_session: Session,
+    sample_employees,
+    doc_storage_dir: Path,
+):
+    doc = create_document(
+        db_session,
+        filename="handbook.png",
+        data=_create_minimal_png_bytes(),
+        owner_id="emp-owner",
+    ).document
+    active_chunk = DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=doc.id,
+        document_version=doc.version,
+        chunk_index=0,
+        content="Current confidential policy content.",
+        token_count=4,
+        department="Operations",
+        acl_employee_ids=["emp-owner"],
+        embedding=[1.0, 0.0],
+        embedding_model="jinaai/jina-embeddings-v2-small-en",
+    )
+    retired_chunk = DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=doc.id,
+        document_version=doc.version - 1,
+        chunk_index=0,
+        content="Retired confidential policy content.",
+        token_count=4,
+        department="Operations",
+        soft_deleted_at=doc.updated_at,
+        acl_employee_ids=["emp-owner"],
+        embedding=[1.0, 0.0],
+        embedding_model="jinaai/jina-embeddings-v2-small-en",
+    )
+    db_session.add_all([active_chunk, retired_chunk])
+    db_session.commit()
+    document_id = doc.id
+    stored_path = doc_storage_dir / doc.stored_filename
+    stored_path.unlink()
+
+    expiring_session = sessionmaker(
+        bind=db_session.get_bind(),
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=True,
+    )()
+    try:
+        expiring_document = expiring_session.get(Document, document_id)
+        assert expiring_document is not None
+        expiring_session.expire(expiring_document)
+
+        remove_document(expiring_session, expiring_document)
+
+        assert expiring_session.get(Document, document_id) is None
+        assert expiring_session.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document_id
+        ).count() == 0
+        assert not stored_path.exists()
+
+        remove_document(expiring_session, expiring_document)
+        assert expiring_session.query(DocumentChunk).filter(
+            DocumentChunk.document_id == document_id
+        ).count() == 0
+    finally:
+        expiring_session.close()
+
+
+def test_document_file_deletion_error_does_not_prevent_chunk_cleanup(
+    db_session: Session,
+    sample_employees,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.service as document_service
+
+    doc = create_document(
+        db_session,
+        filename="handbook.png",
+        data=_create_minimal_png_bytes(),
+        owner_id="emp-owner",
+    ).document
+    chunk = DocumentChunk(
+        id=str(uuid.uuid4()),
+        document_id=doc.id,
+        document_version=doc.version,
+        chunk_index=0,
+        content="Confidential policy content.",
+        token_count=3,
+        department="Operations",
+        soft_deleted_at=doc.updated_at,
+        acl_employee_ids=["emp-owner"],
+        embedding=[1.0, 0.0],
+        embedding_model="jinaai/jina-embeddings-v2-small-en",
+    )
+    db_session.add(chunk)
+    db_session.commit()
+    document_id = doc.id
+
+    def fail_file_deletion(stored_filename: str) -> None:
+        raise PermissionError("storage unavailable")
+
+    monkeypatch.setattr(document_service, "delete_document_file", fail_file_deletion)
+
+    remove_document(db_session, doc)
+
+    assert db_session.get(Document, document_id) is None
+    assert db_session.query(DocumentChunk).filter(
+        DocumentChunk.document_id == document_id
+    ).count() == 0
 
 
 def test_reindex_endpoint_requires_document_access_and_preserves_existing_chunks(
