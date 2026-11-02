@@ -362,6 +362,7 @@ class RoutingSMTP:
 
     def __init__(self, host, port, timeout):
         self.host = host
+        self.esmtp_features = {"auth": "PLAIN LOGIN"}
         error = RoutingSMTP.behaviour.get(host)
         if isinstance(error, (OSError, smtplib.SMTPConnectError)):
             raise error
@@ -375,13 +376,26 @@ class RoutingSMTP:
     def close(self):
         pass
 
+    def ehlo(self):
+        pass
+
     def starttls(self):
         pass
 
-    def login(self, username, password):
+    def has_extn(self, name):
+        return name == "auth"
+
+    def auth_plain(self, _challenge=None):
+        return "test"
+
+    def auth_login(self, _challenge=None):
+        return "test"
+
+    def auth(self, mechanism, _authobject):
         error = RoutingSMTP.behaviour.get(self.host)
         if isinstance(error, smtplib.SMTPAuthenticationError):
             raise error
+        return 235, b"Accepted"
 
     def send_message(self, message):
         error = RoutingSMTP.behaviour.get(self.host)

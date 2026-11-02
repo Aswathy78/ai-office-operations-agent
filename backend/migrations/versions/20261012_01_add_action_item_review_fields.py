@@ -31,7 +31,10 @@ def upgrade() -> None:
         for constraint in inspector.get_check_constraints("meeting_action_items")
     }
 
-    with op.batch_alter_table("meeting_action_items") as batch_op:
+    with op.batch_alter_table(
+        "meeting_action_items",
+        reflect_kwargs={"resolve_fks": False},
+    ) as batch_op:
         if "review_status" not in columns:
             batch_op.add_column(
                 sa.Column(

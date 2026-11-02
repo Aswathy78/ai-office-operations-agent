@@ -190,6 +190,7 @@ def create_notification(
     external_email_status: str | None = None,
     external_email_error: str | None = None,
     external_email_next_attempt_at: datetime | None = None,
+    now: datetime | None = None,
 ) -> UserNotification:
     """Create one inbox item per recipient; uniqueness makes event retries safe."""
     existing = (
@@ -203,6 +204,7 @@ def create_notification(
     if employee is None:
         raise ValueError(f"Notification recipient {recipient_id} does not exist.")
     preferences = _preferences(db, recipient_id)
+    created_at = _as_utc(now or _now())
     in_app_enabled = preferences.in_app_enabled if preferences else True
     email_enabled = preferences.email_enabled if preferences else True
     status = "disabled"
@@ -212,16 +214,15 @@ def create_notification(
         status = external_email_status
         next_attempt_at = external_email_next_attempt_at
     elif email_subject and email_body and email_enabled:
-        now = _now()
         defer_until = quiet_hours_end(
-            now,
+            created_at,
             preferences.quiet_hours_start if preferences else None,
             preferences.quiet_hours_end if preferences else None,
             employee.timezone_name,
         )
         if defer_until is None:
             status = "pending"
-            next_attempt_at = now
+            next_attempt_at = created_at
         else:
             status = "deferred"
             next_attempt_at = defer_until
@@ -242,7 +243,7 @@ def create_notification(
         email_error=error,
         task_notification_id=task_notification_id,
         email_failure_notification_id=email_failure_notification_id,
-        created_at=_now(),
+        created_at=created_at,
     )
     try:
         with db.begin_nested():
@@ -267,6 +268,7 @@ def create_task_notification(
     *,
     event_type: str,
     summary: str,
+    now: datetime | None = None,
 ) -> UserNotification:
     """Mirror an existing task e-mail record into the unified inbox."""
     return create_notification(
@@ -278,6 +280,7 @@ def create_task_notification(
         entity_type="task",
         entity_id=task_notification.task_id,
         entity_url=f"/tasks?task_id={task_notification.task_id}",
+        now=now,
         email_subject=task_notification.subject,
         email_body=task_notification.body,
         task_notification_id=task_notification.id,

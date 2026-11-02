@@ -747,6 +747,15 @@ def _mark_recording_failed(db: Session, recording_id: str, error_message: str) -
             logger.exception("Unable to roll back failed recording update %s", recording_id)
 
 
+def _enqueue_completed_meeting_workflow(db: Session, meeting_id: str) -> None:
+    try:
+        from app.workflow_service import enqueue_meeting_workflow
+
+        enqueue_meeting_workflow(db, meeting_id)
+    except Exception:
+        logger.exception("Could not enqueue meeting follow-up workflow meeting_id=%s", meeting_id)
+
+
 def upload_meeting_recording(
     db: Session,
     meeting_id: str,
@@ -875,6 +884,7 @@ def upload_meeting_recording(
                 previous_path = (storage_root / previous_uri).resolve()
                 if previous_path.is_relative_to(storage_root) and previous_path.is_file():
                     previous_path.unlink(missing_ok=True)
+            _enqueue_completed_meeting_workflow(db, meeting_id)
         finally:
             try:
                 if plaintext_path is not None:
@@ -1251,6 +1261,7 @@ def complete_meeting_if_empty(db: Session, meeting_id: str) -> bool:
         meeting.end_at = now
 
     db.commit()
+    _enqueue_completed_meeting_workflow(db, meeting_id)
     return True
 
 
@@ -1301,6 +1312,7 @@ def force_complete_meeting(db: Session, meeting_id: str, organizer_id: str) -> M
 
     db.commit()
     db.refresh(meeting)
+    _enqueue_completed_meeting_workflow(db, meeting_id)
     return meeting
 
 

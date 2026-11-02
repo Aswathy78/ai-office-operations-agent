@@ -22,7 +22,11 @@ def upgrade() -> None:
     task_columns = {column["name"] for column in inspector.get_columns("tasks")}
     task_checks = {check["name"] for check in inspector.get_check_constraints("tasks")}
     # SQLite cannot alter a CHECK constraint in place, so batch mode rebuilds the table.
-    with op.batch_alter_table("tasks", recreate="always") as batch:
+    with op.batch_alter_table(
+        "tasks",
+        recreate="always",
+        reflect_kwargs={"resolve_fks": False},
+    ) as batch:
         if "ck_tasks_status" in task_checks:
             batch.drop_constraint("ck_tasks_status", type_="check")
         batch.create_check_constraint(

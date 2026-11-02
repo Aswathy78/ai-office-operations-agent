@@ -58,6 +58,10 @@ vi.mock('../api/meetings', () => ({
   sendMeetingMinutes: vi.fn(),
   getMeetingMinutesRecipients: vi.fn(),
 }))
+vi.mock('../api/workflows', () => ({
+  getMeetingWorkflow: vi.fn().mockResolvedValue({ workflow: null }),
+  streamMeetingWorkflow: vi.fn().mockResolvedValue(undefined),
+}))
 
 const report: MeetingReport = {
   meeting_id: 'meeting-current',

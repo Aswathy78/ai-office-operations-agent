@@ -981,6 +981,9 @@ USER_NOTIFICATION_EMAIL_STATUSES = (
     "failed",
 )
 
+WORKFLOW_RUN_STATUSES = ("pending", "processing", "retrying", "completed", "failed")
+WORKFLOW_STEP_STATUSES = ("pending", "processing", "completed", "failed", "retrying")
+
 
 class UserNotification(Base):
     """Recipient-scoped inbox item and its independent channel delivery state."""
@@ -1074,6 +1077,76 @@ class NotificationPreference(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class WorkflowRun(Base):
+    """Durable, prioritized workflow job and its worker lease."""
+
+    __tablename__ = "workflow_runs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in WORKFLOW_RUN_STATUSES)})",
+            name="ck_workflow_runs_status",
+        ),
+        CheckConstraint("priority >= 0", name="ck_workflow_runs_priority"),
+        UniqueConstraint("idempotency_key", name="uq_workflow_runs_idempotency_key"),
+        Index("ix_workflow_runs_queue", "status", "next_attempt_at", "priority", "created_at"),
+        Index("ix_workflow_runs_meeting", "meeting_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    meeting_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("meetings.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class WorkflowStep(Base):
+    """Persisted checkpoint for one ordered step in a workflow run."""
+
+    __tablename__ = "workflow_steps"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in WORKFLOW_STEP_STATUSES)})",
+            name="ck_workflow_steps_status",
+        ),
+        UniqueConstraint("workflow_run_id", "step_key", name="uq_workflow_steps_run_key"),
+        Index("ix_workflow_steps_run_order", "workflow_run_id", "step_order"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    checkpoint: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 
 

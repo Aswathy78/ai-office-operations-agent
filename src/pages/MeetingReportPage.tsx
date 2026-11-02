@@ -22,6 +22,7 @@ import { TranscriptPanel } from '../components/meetings/TranscriptPanel'
 import { MeetingSummaryPanel } from '../components/meetings/MeetingSummaryPanel'
 import { MeetingActionItemsPanel } from '../components/meetings/MeetingActionItemsPanel'
 import { MeetingMinutesPanel } from '../components/meetings/MeetingMinutesPanel'
+import { MeetingWorkflowStatus } from '../components/meetings/MeetingWorkflowStatus'
 import { useAuth } from '../contexts/AuthContext'
 import type {
   MeetingActionItem,
@@ -560,6 +561,7 @@ export function MeetingReportPage() {
           <h2>Meeting Report</h2>
         </div>
       </header>
+      <MeetingWorkflowStatus meetingId={meetingId} />
 
       {loading ? (
         <section className="state-card" role="status">Loading report…</section>

@@ -289,14 +289,14 @@ def test_scheduler_polls_provider_every_five_minutes(monkeypatch):
     passes: list[bool] = []
     stop = threading.Event()
 
-    def fake_run_once(*, poll):
+    def fake_enqueue_once(*, poll):
         passes.append(poll)
         clock["now"] += 60  # each pass is one minute apart
         if len(passes) == 11:
             stop.set()
         return {}
 
-    monkeypatch.setattr(task_calendar_scheduler, "run_once", fake_run_once)
+    monkeypatch.setattr(task_calendar_scheduler, "enqueue_once", fake_enqueue_once)
     monkeypatch.setattr(task_calendar_scheduler.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(task_calendar_scheduler._wake_event, "wait", lambda timeout=None: stop.is_set())
     task_calendar_scheduler._loop(stop, sync_interval=60, poll_interval=300)

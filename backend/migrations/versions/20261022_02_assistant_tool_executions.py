@@ -73,7 +73,11 @@ def upgrade() -> None:
     if any(not nullable.get(name, True) for name, _ in _TASK_PROVENANCE_COLUMNS):
         # SQLite cannot relax NOT NULL in place; batch mode rebuilds the table
         # and keeps its data, indexes, foreign keys and named CHECK constraints.
-        with op.batch_alter_table("tasks", recreate="always") as batch:
+        with op.batch_alter_table(
+            "tasks",
+            recreate="always",
+            reflect_kwargs={"resolve_fks": False},
+        ) as batch:
             for name, type_ in _TASK_PROVENANCE_COLUMNS:
                 batch.alter_column(name, existing_type=type_, nullable=True)
 

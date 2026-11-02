@@ -344,11 +344,11 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
 
     task = db_session.query(Task).one()
     assert task.assignment_email_status == "failed"
-    assert task.assignment_email_error == "SMTP unavailable"
+    assert task.assignment_email_error == "OSError: SMTP unavailable"
     notification = db_session.query(TaskNotification).filter_by(task_id=task.id).one()
     notification_id = notification.id
     assert notification.status == "failed"
-    assert notification.error == "SMTP unavailable"
+    assert notification.error == "OSError: SMTP unavailable"
 
     retried = client.post(
         f"/api/v1/tasks/{task.id}/assignment-email/retry"
@@ -499,6 +499,7 @@ def test_assignment_email_uses_configured_smtp(
             assert host == "smtp.example.test"
             assert port == 2525
             assert timeout == 10
+            self.esmtp_features = {"auth": "PLAIN"}
 
         def __enter__(self):
             return self
@@ -509,15 +510,24 @@ def test_assignment_email_uses_configured_smtp(
         def close(self):
             pass
 
+        def ehlo(self):
+            pass
+
         def starttls(self):
             nonlocal tls_started
             tls_started = True
 
-        def login(self, username: str, password: str):
+        def has_extn(self, name: str):
+            return name == "auth"
+
+        def auth_plain(self, _challenge=None):
+            return "test"
+
+        def auth(self, mechanism: str, _authobject):
             nonlocal logged_in
-            assert username == "mailer"
-            assert password == "secret"
+            assert mechanism == "PLAIN"
             logged_in = True
+            return 235, b"Accepted"
 
         def send_message(self, message: EmailMessage):
             sent_messages.append(message)

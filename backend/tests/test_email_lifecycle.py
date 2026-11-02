@@ -476,6 +476,9 @@ class FakeSMTP:
     def close(self):
         pass
 
+    def ehlo(self):
+        pass
+
     def starttls(self):
         pass
 
@@ -493,7 +496,7 @@ def smtp_config(monkeypatch):
     monkeypatch.setenv("SMTP_FROM_EMAIL", "noreply@northstar.example")
     monkeypatch.delenv("SMTP_USERNAME", raising=False)
     monkeypatch.delenv("SMTP_PASSWORD", raising=False)
-    monkeypatch.setattr(task_service.smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
     FakeSMTP.sent = []
     FakeSMTP.refused = {}
 

@@ -17,10 +17,10 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    columns = {
-        column["name"]
-        for column in sa.inspect(op.get_bind()).get_columns("meeting_recordings")
-    }
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("meeting_recordings"):
+        return
+    columns = {column["name"] for column in inspector.get_columns("meeting_recordings")}
     if "participant_name" not in columns:
         op.add_column(
             "meeting_recordings",
