@@ -312,6 +312,7 @@ def _deliver_once(
         notification,
         event_type="task_escalation" if kind == KIND_ESCALATION else "task_reminder",
         summary=subject,
+        now=now,
     )
     db.commit()
     if retry_existing:

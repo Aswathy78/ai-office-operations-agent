@@ -26,6 +26,7 @@ from app.meeting.models import (
     RECORDING_STATUS_PROCESSING,
     RECORDING_STATUS_RECORDING,
     TRANSCRIPT_STATUS_PENDING,
+    WorkflowRun,
 )
 from app.meeting import service as meeting_service
 from app.meeting.recording_encryption import decrypt_recording_file
@@ -62,6 +63,13 @@ def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeyp
         "seed_development_employees",
         lambda db: events.append(("seed_employees",)),
     )
+    import app.db.seed_documents as document_seed_module
+
+    monkeypatch.setattr(
+        document_seed_module,
+        "seed_company_documents",
+        lambda db: events.append(("seed_documents",)),
+    )
 
     monkeypatch.setattr(
         main_module,
@@ -73,16 +81,40 @@ def test_api_startup_loads_backend_dotenv_before_database_initialization(monkeyp
         "start_email_dispatcher",
         lambda: events.append(("start_email_dispatcher",)),
     )
+    monkeypatch.setattr(
+        main_module,
+        "start_task_calendar_scheduler",
+        lambda: events.append(("start_calendar_scheduler",)),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_transcription_worker",
+        lambda: events.append(("start_transcription_worker",)),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "start_document_processor",
+        lambda: events.append(("start_document_processor",)),
+    )
+    monkeypatch.setattr(
+        "app.workflow_worker.start_workflow_workers",
+        lambda: events.append(("start_workflow_workers",)),
+    )
 
     main_module.startup()
 
-    # backend/.env deliberately overrides stale shell variables.
+    # Explicit process environment takes precedence over backend/.env.
     assert events == [
-        ("load_dotenv", expected_env, True),
+        ("load_dotenv", expected_env, False),
         ("create_tables",),
         ("seed_employees",),
+        ("seed_documents",),
         ("start_reminder_scheduler",),
         ("start_email_dispatcher",),
+        ("start_calendar_scheduler",),
+        ("start_transcription_worker",),
+        ("start_document_processor",),
+        ("start_workflow_workers",),
     ]
 
 
@@ -195,6 +227,10 @@ def test_successful_upload_persists_file_uri_and_metadata(
     assert len(transcripts) == 1
     assert transcripts[0].status == TRANSCRIPT_STATUS_PENDING
     assert transcripts[0].language == "en"
+    queued_runs = db_session.query(WorkflowRun).filter_by(meeting_id=meeting.id).all()
+    assert len(queued_runs) == 1
+    assert queued_runs[0].workflow_type == "meeting_follow_up"
+    assert queued_runs[0].status == "pending"
 
 
 def test_successful_audio_video_webm_upload(

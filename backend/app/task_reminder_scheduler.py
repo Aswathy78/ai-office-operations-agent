@@ -46,15 +46,25 @@ def run_once() -> dict:
     return summary
 
 
+def enqueue_once() -> str:
+    """Submit a reminder pass to the shared, prioritized workflow queue."""
+    from app.db.database import SessionLocal
+    from app.workflow_service import enqueue_task_reminders
+
+    with SessionLocal() as db:
+        run = enqueue_task_reminders(db, interval_seconds=scheduler_interval_seconds())
+    return run.id
+
+
 def _loop(stop: threading.Event, interval: int) -> None:
     # Short delay so startup (migrations, seeding) finishes first.
     if stop.wait(5):
         return
     while not stop.is_set():
         try:
-            run_once()
+            enqueue_once()
         except Exception:  # noqa: BLE001 - keep the scheduler alive
-            logger.exception("Task reminder pass failed")
+            logger.exception("Could not enqueue task reminder pass")
         stop.wait(interval)
 
 

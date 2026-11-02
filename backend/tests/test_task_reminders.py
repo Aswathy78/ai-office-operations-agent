@@ -485,17 +485,17 @@ def test_scheduler_does_not_start_when_disabled(monkeypatch):
     assert task_reminder_scheduler.start_task_reminder_scheduler() is False
 
 
-def test_scheduler_loop_runs_passes_until_stopped(monkeypatch):
+def test_scheduler_loop_enqueues_passes_until_stopped(monkeypatch):
     stop = threading.Event()
-    passes: list[int] = []
+    enqueued: list[int] = []
 
-    def fake_run_once():
-        passes.append(1)
-        if len(passes) == 2:
+    def fake_enqueue_once():
+        enqueued.append(1)
+        if len(enqueued) == 2:
             stop.set()
-        return {}
+        return "workflow-run"
 
-    monkeypatch.setattr(task_reminder_scheduler, "run_once", fake_run_once)
+    monkeypatch.setattr(task_reminder_scheduler, "enqueue_once", fake_enqueue_once)
     monkeypatch.setattr(stop, "wait", lambda timeout=None: stop.is_set())
     task_reminder_scheduler._loop(stop, interval=30)
-    assert len(passes) == 2
+    assert len(enqueued) == 2

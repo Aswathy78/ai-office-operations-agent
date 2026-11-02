@@ -18,9 +18,23 @@ The application still calls `Base.metadata.create_all` at startup for newly
 introduced tables. Alembic migrations are required to apply schema changes to
 databases that already exist.
 
+## SMTP connectivity check
+
+From the `backend` directory, run:
+
+```powershell
+..\.venv\Scripts\python.exe -m app.email_providers
+```
+
+The check loads `backend/.env`, connects to the configured primary SMTP host,
+negotiates STARTTLS when enabled, and authenticates when credentials are
+configured. It does not send an e-mail and reports only the provider, operation,
+and error type; it never prints credentials. Run it only when you intend to
+authenticate to the configured SMTP service.
+
 ## Recording encryption configuration
 
-Recording encryption requires `RECORDING_ENCRYPTION_KEY`. The value is expected to be a base64-encoded 32-byte key when AES-256-GCM storage is implemented. The application currently has no `.env` loader, so supply the real value directly through the backend process or deployment environment. Do not put a real key in `.env.example`, commit it to Git, or store it in the database. The example file contains only a placeholder.
+Recording encryption requires `RECORDING_ENCRYPTION_KEY`. The value is expected to be a base64-encoded 32-byte key when AES-256-GCM storage is implemented. The application loads `backend/.env`; supply the real value there or through the deployment environment. Do not put a real key in `.env.example`, commit it to Git, or store it in the database. The example file contains only a placeholder.
 
 This configuration preparation does not implement encryption or change recording upload behavior.
 

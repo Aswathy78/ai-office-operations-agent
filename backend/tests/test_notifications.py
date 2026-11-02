@@ -21,6 +21,7 @@ from app.notification_router import (
     update_preferences,
 )
 from app.notification_service import (
+    _as_utc,
     create_notification,
     deliver_notification,
     process_due_notification_emails,
@@ -115,7 +116,9 @@ def test_notification_is_idempotent_and_email_waits_until_quiet_hours_end(
 
     assert duplicate.id == notification.id
     assert notification.email_status == "deferred"
-    assert notification.email_next_attempt_at == datetime(2026, 11, 2, 6, 0, tzinfo=timezone.utc)
+    assert _as_utc(notification.email_next_attempt_at) == datetime(
+        2026, 11, 2, 6, 0, tzinfo=timezone.utc
+    )
     assert db_session.query(UserNotification).count() == 1
     assert deliver_notification(db_session, notification.id, now=now).email_status == "deferred"
     assert sent == []
@@ -150,6 +153,9 @@ def test_smtp_send_disconnect_is_staged_and_notification_retry_waits_for_backoff
 
     class DisconnectingSMTP:
         def __init__(self, *_args, **_kwargs):
+            pass
+
+        def ehlo(self):
             pass
 
         def starttls(self):

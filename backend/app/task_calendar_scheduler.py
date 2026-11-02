@@ -56,17 +56,31 @@ def run_once(*, poll: bool = False) -> dict:
     return summary
 
 
+def enqueue_once(*, poll: bool = False) -> str:
+    """Submit a due-date/calendar monitor pass to the shared workflow queue."""
+    from app.db.database import SessionLocal
+    from app.workflow_service import enqueue_calendar_monitor
+
+    with SessionLocal() as db:
+        run = enqueue_calendar_monitor(
+            db,
+            interval_seconds=int(sync_interval_seconds()),
+            poll=poll,
+        )
+    return run.id
+
+
 def _loop(stop: threading.Event, sync_interval: float, poll_interval: float) -> None:
     last_poll: float | None = None  # poll on the first pass
     while not stop.is_set():
         started = time.monotonic()
         poll_due = last_poll is None or started - last_poll >= poll_interval
         try:
-            run_once(poll=poll_due)
+            enqueue_once(poll=poll_due)
             if poll_due:
                 last_poll = started  # measured from the start, so polls stay 5 minutes apart
         except Exception:  # noqa: BLE001 - keep the scheduler alive
-            logger.exception("Task calendar sync pass failed")
+            logger.exception("Could not enqueue task calendar monitor pass")
         _wake_event.wait(sync_interval)
         _wake_event.clear()
 

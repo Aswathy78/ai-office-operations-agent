@@ -2918,7 +2918,7 @@ npx tsc --noEmit -p .
 
 # 📌 Current Project Status
 
-Last updated 2 November 2026. FR-42 (Story 7.6) and FR-43 (Story 8.1) are implemented in this working tree.
+Last updated 2 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -2981,6 +2981,8 @@ Last updated 2 November 2026. FR-42 (Story 7.6) and FR-43 (Story 8.1) are implem
 ### Epic 8 — Notifications
 
 - Story 8.1 — Recipient-scoped inbox, per-channel delivery status, preferences, and quiet hours (FR-43)
+- Story 8.2 — Automatic meeting follow-up workflows with durable per-step checkpoints and verified completion
+- Story 8.3 — Priority queue, configurable worker concurrency, scheduled reminders / due-date monitors, and live status updates
 
 Notification inbox and preferences are stored in `user_notifications` and
 `notification_preferences`. The Alembic migration `20261101_02` follows the
@@ -3004,6 +3006,27 @@ scoped to the authenticated employee. In the UI, the header bell opens the
 inbox, notification settings are at `/settings/notifications`, and requester-
 owned assistant approvals are available at `/my-approvals` without exposing
 the team approval queue.
+
+Workflow runs and checkpoints are stored in `workflow_runs` and
+`workflow_steps` by migration `20261102_01`. The meeting follow-up job is
+idempotent per meeting and waits for both meeting completion and a completed
+primary recording. The existing transcription worker persists the transcript;
+the shared workflow queue then generates and verifies the summary and action
+items, and synchronizes only confirmed task items through the existing task
+service. Each successful step is read back from the database before its
+checkpoint is marked `completed`. Failed work is retried with bounded
+backoff; expired worker leases are recovered at startup.
+
+The shared queue orders higher-priority jobs first and applies a database-backed
+claim limit across API worker processes. `WORKFLOW_CONCURRENCY` controls that
+limit (default `2`, accepted range `1`–`8`). The existing reminder and
+task-calendar schedulers enqueue jobs instead of running their services
+outside the queue. Workflow status is available through authenticated
+`GET /api/v1/workflows/meetings/{meeting_id}` and the corresponding `/events`
+stream. The meeting report subscribes to that stream and falls back to
+two-second polling, so progress and terminal failures reach the UI within
+five seconds. Workflow completion/failure notices use the existing
+recipient-scoped notification service.
 
 ### Known gaps
 

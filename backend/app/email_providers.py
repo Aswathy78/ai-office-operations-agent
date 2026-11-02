@@ -31,6 +31,7 @@ from typing import TypeVar
 
 logger = logging.getLogger(__name__)
 _Result = TypeVar("_Result")
+_UNSUPPORTED_AUTH_CODES = frozenset({500, 502, 504})
 
 
 @dataclass(frozen=True)
@@ -106,13 +107,169 @@ def _smtp_operation(
         return call()
     except (OSError, smtplib.SMTPException) as exc:
         setattr(exc, "smtp_operation", operation)
+        if isinstance(exc, smtplib.SMTPResponseException):
+            setattr(exc, "smtp_response_code", exc.smtp_code)
         logger.warning(
-            "SMTP delivery operation failed provider=%s operation=%s error_type=%s",
+            "SMTP delivery operation failed provider=%s operation=%s response_code=%s error_type=%s",
             provider,
             operation,
+            getattr(exc, "smtp_response_code", None),
             type(exc).__name__,
         )
         raise
+
+
+def _close_smtp_connection(smtp: smtplib.SMTP, provider: str) -> None:
+    try:
+        smtp.close()
+    except OSError as exc:
+        logger.warning(
+            "SMTP connection cleanup failed provider=%s error_type=%s",
+            provider,
+            type(exc).__name__,
+        )
+
+
+def _smtp_login(
+    smtp: smtplib.SMTP,
+    username: str,
+    password: str,
+    *,
+    auth_attempts: list[str] | None = None,
+    auth_results: list[str] | None = None,
+) -> tuple[int, bytes]:
+    if not smtp.has_extn("auth"):
+        raise smtplib.SMTPNotSupportedError("SMTP AUTH extension not supported by server.")
+
+    advertised = set(smtp.esmtp_features["auth"].upper().split())
+    supported = [
+        mechanism
+        for mechanism in ("CRAM-MD5", "PLAIN", "LOGIN")
+        if mechanism in advertised
+        and hasattr(smtp, f"auth_{mechanism.lower().replace('-', '_')}")
+    ]
+    if not supported:
+        raise smtplib.SMTPException("No suitable SMTP authentication method was advertised.")
+
+    smtp.user = username
+    smtp.password = password
+    last_error: smtplib.SMTPAuthenticationError | None = None
+    for mechanism in supported:
+        if auth_attempts is not None:
+            auth_attempts.append(mechanism)
+        try:
+            response = smtp.auth(
+                mechanism,
+                getattr(smtp, f"auth_{mechanism.lower().replace('-', '_')}"),
+            )
+        except smtplib.SMTPAuthenticationError as exc:
+            if auth_results is not None:
+                auth_results.append(f"{mechanism}:{exc.smtp_code}")
+            if exc.smtp_code not in _UNSUPPORTED_AUTH_CODES:
+                raise
+            last_error = exc
+            continue
+        except smtplib.SMTPNotSupportedError:
+            if auth_results is not None:
+                auth_results.append(f"{mechanism}:unsupported")
+            continue
+        except smtplib.SMTPServerDisconnected:
+            if auth_results is not None:
+                auth_results.append(f"{mechanism}:disconnected")
+            raise
+
+        code = response[0]
+        if auth_results is not None:
+            auth_results.append(f"{mechanism}:{code}")
+        if code in (235, 503):
+            return response
+        raise smtplib.SMTPAuthenticationError(code, response[1])
+
+    if last_error is not None:
+        raise last_error
+    raise smtplib.SMTPException("No supported SMTP authentication method succeeded.")
+
+
+def _open_smtp_connection(
+    settings: SmtpSettings,
+    *,
+    capture_auth_methods: bool = False,
+) -> smtplib.SMTP:
+    if not settings.host or not settings.sender:
+        raise ValueError("SMTP_HOST and SMTP_FROM_EMAIL must be configured.")
+    if bool(settings.username) != bool(settings.password):
+        raise ValueError("Configure both SMTP_USERNAME and SMTP_PASSWORD.")
+    if settings.username and not settings.starttls:
+        raise ValueError("SMTP authentication requires STARTTLS.")
+
+    smtp = _smtp_operation(
+        settings.name,
+        "connect",
+        lambda: smtplib.SMTP(settings.host, settings.port, timeout=10),
+    )
+    trace: list[str] = []
+    auth_methods: list[str] = []
+    auth_results: list[str] = []
+    advertised_auth_methods: tuple[str, ...] = ()
+
+    def run(operation: str, call: Callable[[], _Result]) -> _Result:
+        response = _smtp_operation(settings.name, operation, call)
+        code = response[0] if isinstance(response, tuple) and response else None
+        trace.append(f"{operation}:{code if isinstance(code, int) else 'ok'}")
+        logger.info(
+            "SMTP operation succeeded provider=%s operation=%s response_code=%s",
+            settings.name,
+            operation,
+            code if isinstance(code, int) else None,
+        )
+        return response
+
+    try:
+        run("EHLO", smtp.ehlo)
+        if settings.starttls:
+            run("STARTTLS", smtp.starttls)
+            run("EHLO after STARTTLS", smtp.ehlo)
+        if settings.username:
+            advertised_auth_methods = tuple(
+                smtp.esmtp_features.get("auth", "").upper().split()
+            )
+            run(
+                "login",
+                lambda: _smtp_login(
+                    smtp,
+                    settings.username,
+                    settings.password,
+                    auth_attempts=auth_methods if capture_auth_methods else None,
+                    auth_results=auth_results if capture_auth_methods else None,
+                ),
+            )
+    except (OSError, smtplib.SMTPException) as exc:
+        setattr(exc, "smtp_trace", tuple(trace))
+        setattr(exc, "smtp_connection_open", getattr(smtp, "sock", None) is not None)
+        setattr(exc, "smtp_advertised_auth_methods", advertised_auth_methods)
+        setattr(exc, "smtp_auth_attempts", tuple(auth_methods))
+        setattr(exc, "smtp_auth_results", tuple(auth_results))
+        _close_smtp_connection(smtp, settings.name)
+        raise
+    setattr(smtp, "smtp_trace", tuple(trace))
+    setattr(smtp, "smtp_advertised_auth_methods", advertised_auth_methods)
+    setattr(smtp, "smtp_auth_attempts", tuple(auth_methods))
+    setattr(smtp, "smtp_auth_results", tuple(auth_results))
+    return smtp
+
+
+def check_smtp_connection(
+    settings: SmtpSettings | None = None,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Verify SMTP connection, TLS, and configured login without sending a message."""
+    settings = settings or primary_settings()
+    smtp = _open_smtp_connection(settings, capture_auth_methods=True)
+    trace = getattr(smtp, "smtp_trace", ())
+    advertised_auth_methods = getattr(smtp, "smtp_advertised_auth_methods", ())
+    auth_attempts = getattr(smtp, "smtp_auth_attempts", ())
+    auth_results = getattr(smtp, "smtp_auth_results", ())
+    _close_smtp_connection(smtp, settings.name)
+    return settings.name, trace, advertised_auth_methods, auth_attempts, auth_results
 
 
 def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) -> str:
@@ -121,11 +278,6 @@ def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) ->
     Returns only once the server accepted the message for the recipient; any
     refusal raises ``smtplib.SMTPRecipientsRefused`` instead.
     """
-    if not settings.host or not settings.sender:
-        raise ValueError("SMTP_HOST and SMTP_FROM_EMAIL must be configured.")
-    if bool(settings.username) != bool(settings.password):
-        raise ValueError("Configure both SMTP_USERNAME and SMTP_PASSWORD.")
-
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = settings.sender
@@ -134,20 +286,8 @@ def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) ->
     message["Message-ID"] = message_id
     message.set_content(body)
 
-    smtp = _smtp_operation(
-        settings.name,
-        "connect",
-        lambda: smtplib.SMTP(settings.host, settings.port, timeout=10),
-    )
+    smtp = _open_smtp_connection(settings)
     try:
-        if settings.starttls:
-            _smtp_operation(settings.name, "STARTTLS", smtp.starttls)
-        if settings.username:
-            _smtp_operation(
-                settings.name,
-                "login",
-                lambda: smtp.login(settings.username, settings.password),
-            )
         refused = _smtp_operation(
             settings.name,
             "sendmail/response handling",
@@ -156,14 +296,7 @@ def send_via(settings: SmtpSettings, recipient: str, subject: str, body: str) ->
     finally:
         # A context manager sends QUIT; a disconnect during that cleanup can
         # falsely turn an accepted message into a retry and send it twice.
-        try:
-            smtp.close()
-        except OSError as exc:
-            logger.warning(
-                "SMTP connection cleanup failed provider=%s error_type=%s",
-                settings.name,
-                type(exc).__name__,
-            )
+        _close_smtp_connection(smtp, settings.name)
     if refused:
         # The server answered but did not accept this recipient.
         raise smtplib.SMTPRecipientsRefused(refused)
@@ -216,3 +349,51 @@ def send_email(recipient: str, subject: str, body: str) -> DeliveryReceipt:
             fallback_used=True,
             primary_error=f"{type(primary_error).__name__}: {primary_error}"[:300],
         )
+
+
+def _run_connectivity_check() -> int:
+    from pathlib import Path
+    from dotenv import load_dotenv
+
+    load_dotenv(
+        dotenv_path=Path(__file__).resolve().parents[1] / ".env",
+        override=False,
+    )
+    settings = primary_settings()
+    try:
+        provider, trace, advertised_auth, auth_attempts, auth_results = check_smtp_connection(
+            settings
+        )
+    except (OSError, smtplib.SMTPException, ValueError) as exc:
+        logger.warning(
+            "SMTP connectivity check failed provider=%s operation=%s error_type=%s",
+            settings.name,
+            getattr(exc, "smtp_operation", "configuration"),
+            type(exc).__name__,
+        )
+        print(
+            "SMTP connectivity check failed "
+            f"provider={settings.name} "
+            f"operation={getattr(exc, 'smtp_operation', 'configuration')} "
+            f"response_code={getattr(exc, 'smtp_response_code', None)} "
+            f"connection_open={getattr(exc, 'smtp_connection_open', None)} "
+            f"completed_stages={','.join(getattr(exc, 'smtp_trace', ())) or 'none'} "
+            f"advertised_auth={','.join(getattr(exc, 'smtp_advertised_auth_methods', ())) or 'none'} "
+            f"auth_attempts={','.join(getattr(exc, 'smtp_auth_attempts', ())) or 'none'} "
+            f"auth_results={','.join(getattr(exc, 'smtp_auth_results', ())) or 'none'} "
+            f"error_type={type(exc).__name__}"
+        )
+        return 1
+    print(
+        "SMTP connectivity check succeeded "
+        f"provider={provider} "
+        f"stages={','.join(trace) or 'none'} "
+        f"advertised_auth={','.join(advertised_auth) or 'none'} "
+        f"auth_attempts={','.join(auth_attempts) or 'none'} "
+        f"auth_results={','.join(auth_results) or 'none'}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_run_connectivity_check())

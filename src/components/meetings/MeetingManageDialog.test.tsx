@@ -34,7 +34,12 @@ describe('MeetingManageDialog audit history', () => {
         meeting_id: 'meeting-1',
         actor_id: 'employee-1',
         action: 'participant_added',
-        details: { email: 'guest@example.test' },
+        details: {
+          user_id: 'guest-1',
+          email: 'guest@example.test',
+          notifications: [{ recipient: 'guest@example.test', status: 'sent', error: '' }],
+          internal_payload: { secret: 'must not render' },
+        },
         created_at: '2026-10-19T00:00:00Z',
       }])
     vi.mocked(addMeetingParticipants).mockResolvedValue({
@@ -67,7 +72,12 @@ describe('MeetingManageDialog audit history', () => {
 
     expect(await screen.findByText('1 participant added; 0 addresses were invalid or failed.')).toBeInTheDocument()
     await waitFor(() => expect(getMeetingAudit).toHaveBeenCalledTimes(2))
-    expect(screen.getByText('{"email":"guest@example.test"}')).toBeInTheDocument()
+    expect(screen.getByText('Participant Added')).toBeInTheDocument()
+    expect(screen.getByText('Meeting ID: meeting-1')).toBeInTheDocument()
+    expect(screen.getByText('User ID: guest-1')).toBeInTheDocument()
+    expect(screen.getByText('User Email: guest@example.test')).toBeInTheDocument()
+    expect(screen.getByText('Email notification status: Sent')).toBeInTheDocument()
+    expect(screen.queryByText(/internal_payload|must not render|employee-1/)).not.toBeInTheDocument()
   })
 
   it('keeps the dialog open while adding two participants consecutively', async () => {
@@ -165,7 +175,11 @@ describe('MeetingManageDialog audit history', () => {
         meeting_id: 'meeting-1',
         actor_id: 'employee-1',
         action: 'participant_removed',
-        details: { email: 'guest@example.test' },
+        details: {
+          user_id: 'guest-1',
+          email: 'guest@example.test',
+          notifications: [{ recipient: 'guest@example.test', status: 'failed', error: 'SMTP detail' }],
+        },
         created_at: '2026-10-19T00:00:00Z',
       }])
     vi.mocked(removeMeetingParticipant).mockResolvedValue({
@@ -192,13 +206,60 @@ describe('MeetingManageDialog audit history', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Remove Guest' }))
 
     expect(await screen.findByText('No participants are currently invited.')).toBeInTheDocument()
-    expect(await screen.findByText('participant removed')).toBeInTheDocument()
+    expect(await screen.findByText('Participant Removed')).toBeInTheDocument()
+    expect(screen.getByText('User ID: guest-1')).toBeInTheDocument()
+    expect(screen.getByText('User Email: guest@example.test')).toBeInTheDocument()
+    expect(screen.getByText('Email notification status: Failed')).toBeInTheDocument()
+    expect(screen.queryByText(/SMTP detail|employee-1/)).not.toBeInTheDocument()
     expect(await screen.findByText('Update sent to guest@example.test.')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(removeMeetingParticipant).toHaveBeenCalledWith('meeting-1', 'participant-1')
     expect(getMeetingParticipants).toHaveBeenCalledTimes(2)
     expect(getMeetingAudit).toHaveBeenCalledTimes(2)
     expect(onChanged).not.toHaveBeenCalled()
+  })
+
+  it('shows pending and not-sent statuses and handles missing participant details', async () => {
+    vi.mocked(getMeetingParticipants).mockResolvedValue([])
+    vi.mocked(getMeetingAudit).mockResolvedValue([
+      {
+        id: 'audit-pending',
+        meeting_id: 'meeting-1',
+        actor_id: 'actor-1',
+        action: 'participant_added',
+        details: {
+          user_id: 'guest-2',
+          email: 'pending@example.test',
+          notifications: [{ recipient: 'pending@example.test', status: 'pending' }],
+        },
+        created_at: '2026-10-19T00:00:00Z',
+      },
+      {
+        id: 'audit-no-email',
+        meeting_id: 'meeting-1',
+        actor_id: 'actor-1',
+        action: 'participant_removed',
+        details: {},
+        created_at: 'invalid-date',
+      },
+    ])
+
+    render(
+      <MeetingManageDialog
+        meetingId="meeting-1"
+        meetingTitle="Planning"
+        meetingStatus="scheduled"
+        cancellationPending={false}
+        onClose={vi.fn()}
+        onChanged={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByText('Email notification status: Pending')).toBeInTheDocument()
+    expect(screen.getByText('Email notification status: Not Sent')).toBeInTheDocument()
+    expect(screen.getAllByText('User ID: Not available')).toHaveLength(1)
+    expect(screen.getAllByText('User Email: Not available')).toHaveLength(1)
+    expect(screen.getByText('Date and time: Not available')).toBeInTheDocument()
   })
 
   it('normalizes bulk addresses, skips invalid and duplicate addresses, and reports partial failures', async () => {

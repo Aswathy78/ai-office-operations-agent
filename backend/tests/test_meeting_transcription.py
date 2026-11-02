@@ -18,6 +18,7 @@ from app.db import database
 from app.meeting.models import (
     Base,
     Meeting,
+    MeetingActionItemExtraction,
     MeetingRecording,
     MeetingSummary,
     MeetingTranscript,
@@ -503,8 +504,6 @@ def test_worker_loads_dotenv_before_decrypting_recording(
         "decrypt_recording_to_temporary_file",
         decrypt_after_configuration,
     )
-    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda *_: None)
-    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda *_: None)
 
     run_worker(
         poll_interval_seconds=0,
@@ -644,7 +643,7 @@ def test_worker_stores_english_timestamped_segments_and_cleans_plaintext(
     assert db_session.get(MeetingRecording, recording.id).status == RECORDING_STATUS_COMPLETED
 
 
-def test_worker_runs_action_item_extraction_after_persisting_transcript(
+def test_worker_persists_transcript_for_workflow_processing(
     db_session: Session,
     tmp_path,
     monkeypatch,
@@ -657,7 +656,6 @@ def test_worker_runs_action_item_extraction_after_persisting_transcript(
         media=b"meeting audio",
     )
     assert claim_pending_transcript(db_session) == transcript.id
-    calls: list[str] = []
     expected_segments = [
         {
             "start": 0.5,
@@ -674,29 +672,6 @@ def test_worker_runs_action_item_extraction_after_persisting_transcript(
                 [SimpleNamespace(start=0.5, end=2.25, text=" Maya, please send the agenda.")]
             ), SimpleNamespace(language="en")
 
-    def generate_summary(db: Session, transcript_id: str):
-        persisted = db.get(MeetingTranscript, transcript_id)
-        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
-        assert persisted.segments == expected_segments
-        calls.append("summary")
-
-    def extract_action_items(db: Session, transcript_id: str):
-        persisted = db.get(MeetingTranscript, transcript_id)
-        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
-        assert persisted.segments == expected_segments
-        calls.append("action_items")
-
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_summary",
-        generate_summary,
-    )
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_action_items",
-        extract_action_items,
-    )
-
     assert process_claimed_transcript(
         db_session,
         transcript.id,
@@ -708,67 +683,24 @@ def test_worker_runs_action_item_extraction_after_persisting_transcript(
     completed = db_session.get(MeetingTranscript, transcript.id)
     assert completed.status == TRANSCRIPT_STATUS_COMPLETED
     assert completed.segments == expected_segments
-    assert calls == ["summary", "action_items"]
+    assert (
+        db_session.query(MeetingSummary)
+        .filter(MeetingSummary.transcript_id == transcript.id)
+        .one_or_none()
+        is None
+    )
+    assert (
+        db_session.query(MeetingActionItemExtraction)
+        .filter(MeetingActionItemExtraction.transcript_id == transcript.id)
+        .one_or_none()
+        is None
+    )
     assert db_session.get(MeetingRecording, recording.id).status == RECORDING_STATUS_COMPLETED
 
 
-def test_summary_failure_does_not_prevent_action_item_extraction(
+def test_transcription_does_not_change_existing_summary(
     db_session: Session,
     tmp_path,
-    monkeypatch,
-    caplog,
-):
-    storage_root = tmp_path / "recordings"
-    storage_root.mkdir()
-    _, transcript = _create_completed_recording(db_session, storage_root)
-    assert claim_pending_transcript(db_session) == transcript.id
-    action_item_calls: list[str] = []
-
-    class FakeWhisperModel:
-        def transcribe(self, audio_path, *, language, word_timestamps):
-            return iter(
-                [SimpleNamespace(start=1.0, end=2.0, text="I will send the notes.")]
-            ), SimpleNamespace(language="en")
-
-    def fail_summary(db: Session, transcript_id: str):
-        raise RuntimeError("sensitive-summary-provider-detail")
-
-    def extract_action_items(db: Session, transcript_id: str):
-        persisted = db.get(MeetingTranscript, transcript_id)
-        assert persisted.status == TRANSCRIPT_STATUS_COMPLETED
-        action_item_calls.append(transcript_id)
-
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_summary",
-        fail_summary,
-    )
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_action_items",
-        extract_action_items,
-    )
-
-    with caplog.at_level("ERROR"):
-        assert process_claimed_transcript(
-            db_session,
-            transcript.id,
-            FakeWhisperModel(),
-            storage_root=storage_root,
-        )
-
-    db_session.expire_all()
-    assert db_session.get(MeetingTranscript, transcript.id).status == TRANSCRIPT_STATUS_COMPLETED
-    assert action_item_calls == [transcript.id]
-    assert "Meeting summary generation failed" in caplog.text
-    assert "sensitive-summary-provider-detail" not in caplog.text
-
-
-def test_action_item_failure_preserves_completed_transcript_and_summary(
-    db_session: Session,
-    tmp_path,
-    monkeypatch,
-    caplog,
 ):
     storage_root = tmp_path / "recordings"
     storage_root.mkdir()
@@ -794,28 +726,12 @@ def test_action_item_failure_preserves_completed_transcript_and_summary(
                 [SimpleNamespace(start=3.0, end=4.0, text="I will send the notes.")]
             ), SimpleNamespace(language="en")
 
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_summary",
-        lambda db, transcript_id: db.get(MeetingSummary, existing_summary.id),
+    assert process_claimed_transcript(
+        db_session,
+        transcript.id,
+        FakeWhisperModel(),
+        storage_root=storage_root,
     )
-
-    def fail_action_items(db: Session, transcript_id: str):
-        raise RuntimeError("sensitive-provider-detail")
-
-    monkeypatch.setattr(
-        transcription_worker,
-        "generate_meeting_action_items",
-        fail_action_items,
-    )
-
-    with caplog.at_level("ERROR"):
-        assert process_claimed_transcript(
-            db_session,
-            transcript.id,
-            FakeWhisperModel(),
-            storage_root=storage_root,
-        )
 
     db_session.expire_all()
     completed = db_session.get(MeetingTranscript, transcript.id)
@@ -826,8 +742,6 @@ def test_action_item_failure_preserves_completed_transcript_and_summary(
     assert persisted_summary.status == SUMMARY_STATUS_COMPLETED
     assert persisted_summary.overview == "Persisted summary must remain unchanged."
     assert persisted_summary.decisions == ["Keep the launch date."]
-    assert "sensitive-provider-detail" not in caplog.text
-    assert "Meeting action item extraction failed" in caplog.text
 
 
 def test_decryption_failure_is_persisted_and_plaintext_is_removed(
