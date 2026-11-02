@@ -25,6 +25,46 @@ function resultMessage(message: string, failures: string[]): string {
 }
 
 const EMAIL_PATTERN = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}$/i
+const PARTICIPANT_ACTIONS: Record<string, string> = {
+  participant_added: 'Participant Added',
+  participant_removed: 'Participant Removed',
+}
+
+function detailText(details: Record<string, unknown>, key: string): string {
+  const value = details[key]
+  return typeof value === 'string' && value.trim() ? value : 'Not available'
+}
+
+function actionTime(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'Not available' : date.toLocaleString()
+}
+
+function participantEmailStatus(entry: MeetingAuditEntry): string {
+  const notifications = entry.details.notifications
+  if (!Array.isArray(notifications)) return 'Not Sent'
+
+  const email = entry.details.email
+  const matchingNotification = notifications.find((notification) => (
+    typeof notification === 'object'
+    && notification !== null
+    && 'recipient' in notification
+    && typeof notification.recipient === 'string'
+    && typeof email === 'string'
+    && notification.recipient.toLowerCase() === email.toLowerCase()
+  ))
+  const notification = matchingNotification ?? notifications[0]
+  if (typeof notification !== 'object' || notification === null || !('status' in notification)) {
+    return 'Not Sent'
+  }
+
+  switch (notification.status) {
+    case 'sent': return 'Sent'
+    case 'failed': return 'Failed'
+    case 'pending': return 'Pending'
+    default: return 'Not Sent'
+  }
+}
 
 export function MeetingManageDialog({
   meetingId,
@@ -252,11 +292,18 @@ export function MeetingManageDialog({
             <ul className="meeting-manage-audit">
               {auditEntries.map((entry) => (
                 <li key={entry.id}>
-                  <strong>{entry.action.replaceAll('_', ' ')}</strong>
-                  <small>
-                    {entry.actor_id} · {new Date(entry.created_at).toLocaleString()}
-                  </small>
-                  <small>{JSON.stringify(entry.details)}</small>
+                  <strong>{PARTICIPANT_ACTIONS[entry.action] ?? entry.action.replaceAll('_', ' ')}</strong>
+                  <small>Meeting ID: {entry.meeting_id || 'Not available'}</small>
+                  <small>Date and time: {actionTime(entry.created_at)}</small>
+                  {PARTICIPANT_ACTIONS[entry.action] ? (
+                    <>
+                      <small>User ID: {detailText(entry.details, 'user_id')}</small>
+                      <small>User Email: {detailText(entry.details, 'email')}</small>
+                      <small>Email notification status: {participantEmailStatus(entry)}</small>
+                    </>
+                  ) : (
+                    <small>User ID: {entry.actor_id || 'Not available'}</small>
+                  )}
                 </li>
               ))}
             </ul>
