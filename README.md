@@ -1273,6 +1273,62 @@ cd backend
 ..\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
+## Stories 8.2 and 8.3 – Workflow Automation and Queue Management
+
+### Story 8.2 – Email Delivery and Retry Management
+
+Implemented email delivery management to improve the reliability and tracking of automated office notifications.
+
+**Key Features:**
+
+* Integrated email provider functionality for sending system-generated emails.
+* Implemented email delivery status tracking.
+* Added retry handling for failed email deliveries.
+* Implemented retry escalation to handle repeated delivery failures.
+* Integrated email notifications with meeting and task-related workflows.
+* Added logging and error handling for email delivery operations.
+
+**Benefits:**
+
+* Improves the reliability of automated email notifications.
+* Provides better visibility into email delivery outcomes.
+* Helps manage temporary email delivery failures through retry mechanisms.
+
+### Story 8.3 – Workflow Queue with Priorities and Real-Time Status
+
+Implemented a centralized workflow queue to manage background jobs, control processing load, and provide real-time workflow progress updates.
+
+**Key Features:**
+
+* Implemented a centralized workflow queue for background job processing.
+* Added priority-based job handling.
+* Implemented concurrency limits to control the number of simultaneously processed jobs.
+* Integrated background workflow workers.
+* Added scheduled reminder and due-date monitoring jobs.
+* Integrated workflow processing with meeting-related operations.
+* Implemented real-time workflow status updates using Server-Sent Events (SSE).
+* Added frontend workflow status monitoring.
+* Integrated workflow progress information into the Meeting Report interface.
+
+**Benefits:**
+
+* Improves background task management.
+* Controls system workload through concurrency limits.
+* Enables priority-based workflow processing.
+* Provides real-time visibility into workflow progress.
+* Helps administrators and employees monitor automated operations.
+
+### Technologies Used
+
+* **Backend:** Python, FastAPI, SQLAlchemy
+* **Frontend:** React, TypeScript, Vite
+* **Database:** SQLite
+* **Background Processing:** Workflow Queue, Background Workers
+* **Real-Time Communication:** Server-Sent Events (SSE)
+* **Testing:** Pytest, Vitest
+
+---
+
 ## 📌 Current Project Status
 
 > The complete, current status is in the last **Current Project Status** section at the end of this file.
