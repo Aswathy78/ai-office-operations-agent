@@ -1,6 +1,12 @@
 import { API_BASE_URL, apiFetch } from './client'
 
-export type WorkflowStatus = 'pending' | 'processing' | 'retrying' | 'completed' | 'failed'
+export type WorkflowStatus =
+  | 'pending'
+  | 'processing'
+  | 'retrying'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
 export type WorkflowStepStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'retrying'
 
 export interface WorkflowStep {
@@ -21,6 +27,9 @@ export interface WorkflowRun {
   priority: number
   status: WorkflowStatus
   attempt_count: number
+  /** Story 8.4: attempts allowed before the run is dead-lettered (at most 5). */
+  max_attempts?: number
+  next_attempt_at?: string | null
   last_error: string | null
   created_at: string
   updated_at: string
@@ -93,4 +102,95 @@ export async function streamMeetingWorkflow(
   } finally {
     await reader.cancel().catch(() => undefined)
   }
+}
+
+// ---------------------------------------------------------------------------
+// Story 8.4 - dead-letter queue (administrators)
+// ---------------------------------------------------------------------------
+
+export type DeadLetterStatus = 'open' | 'retried' | 'resumed' | 'cancelled'
+export type DeadLetterAction = 'retry' | 'resume' | 'cancel'
+
+export interface DeadLetterEntry {
+  id: string
+  run_id: string
+  workflow_type: string
+  workflow_label: string
+  meeting_id: string | null
+  meeting_title: string | null
+  failed_step_key: string | null
+  error_message: string | null
+  attempt_count: number
+  max_attempts: number
+  status: DeadLetterStatus
+  run_status: WorkflowStatus | null
+  notified_count: number
+  created_at: string
+  resolved_at: string | null
+  resolved_by: string | null
+  resolution_note: string | null
+}
+
+export interface DeadLetterQueue {
+  entries: DeadLetterEntry[]
+  counts: Record<DeadLetterStatus, number>
+}
+
+export interface WorkflowEvent {
+  id: string
+  step_key: string | null
+  attempt_number: number | null
+  event_type: string
+  message: string | null
+  error: string | null
+  retry_delay_seconds: number | null
+  next_attempt_at: string | null
+  actor_id: string | null
+  created_at: string
+}
+
+export interface DeadLetterDetail {
+  workflow: WorkflowRun
+  payload: Record<string, unknown>
+  idempotency_key: string
+  meeting_title: string | null
+  dead_letters: DeadLetterEntry[]
+  events: WorkflowEvent[]
+}
+
+export async function getDeadLetterQueue(
+  status: DeadLetterStatus | 'all' = 'open',
+): Promise<DeadLetterQueue> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/workflows/dead-letter?status=${encodeURIComponent(status)}`,
+  )
+  return readJson<DeadLetterQueue>(response)
+}
+
+export async function getDeadLetterDetail(runId: string): Promise<DeadLetterDetail> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/workflows/dead-letter/${encodeURIComponent(runId)}`,
+  )
+  return readJson<DeadLetterDetail>(response)
+}
+
+/**
+ * retry  - run again from the first step with a fresh attempt budget
+ * resume - continue from the last checkpoint
+ * cancel - give up; the run ends as cancelled
+ */
+export async function actOnDeadLetter(
+  runId: string,
+  action: DeadLetterAction,
+  note?: string,
+): Promise<DeadLetterDetail> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/workflows/dead-letter/${encodeURIComponent(runId)}/${action}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: note?.trim() || null }),
+    },
+  )
+  return readJson<DeadLetterDetail>(response)
 }

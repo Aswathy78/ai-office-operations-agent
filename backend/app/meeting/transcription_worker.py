@@ -8,7 +8,9 @@ Run from the backend directory with:
 from datetime import datetime, timedelta, timezone
 import ctypes
 from importlib.util import find_spec
+import inspect
 import logging
+import re
 import os
 from pathlib import Path, PurePosixPath
 import sys
@@ -294,6 +296,67 @@ class SilentRecordingError(ValueError):
     """The recording decoded fine but contains no audible sound."""
 
 
+NO_SPEECH_MESSAGE = (
+    "No speech was detected in the recording, so there is nothing to transcribe. Check that "
+    "the microphone is on and picking up your voice, then record the meeting again."
+)
+
+
+class NoSpeechDetectedError(ValueError):
+    """The recording has sound (room noise, hum) but nobody speaks in it."""
+
+
+# Whisper invents fluent text for audio with no speech, almost always the captions of
+# the videos it was trained on. These options make it skip such stretches up front.
+SPEECH_ONLY_OPTIONS = {
+    "vad_filter": True,  # drop everything the voice-activity detector calls non-speech
+    "vad_parameters": {"min_silence_duration_ms": 500},
+    "condition_on_previous_text": False,  # one invented line must not seed the next
+    "hallucination_silence_threshold": 2.0,
+}
+# Whisper rates each segment's chance of being silence. Real speech scores near 0.
+NO_SPEECH_PROBABILITY_LIMIT = 0.6
+# Boilerplate Whisper produces for noise, matched only against a whole segment.
+_INVENTED_PHRASES = re.compile(
+    r"^\W*(?:"
+    r"(?:thank you|thanks)(?: so much| very much)?(?: for (?:watching|listening|viewing)"
+    r"(?: this)?(?: video| one)?)?(?: and (?:i'?ll )?see you (?:in|on) the next (?:one|video|time))?"
+    r"|(?:please )?(?:like,? )?(?:and )?subscribe(?: to (?:my|the|our) channel)?"
+    r"|see you (?:in|on) the next (?:one|video|time)"
+    r"|bye(?:-bye)?|you|\.+"
+    r")\W*$",
+    re.IGNORECASE,
+)
+_INVENTED_CONTAINS = re.compile(
+    r"thank(?:s| you)[^.]{0,40}for (?:watching|listening)|see you in the next (?:video|one)"
+    r"|subscribe to (?:my|the|our) channel|like and subscribe",
+    re.IGNORECASE,
+)
+
+
+def supported_options(model, options: dict) -> dict:
+    """The subset of ``options`` this model's ``transcribe`` accepts."""
+    try:
+        parameters = inspect.signature(model.transcribe).parameters
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
+        return dict(options)
+    return {name: value for name, value in options.items() if name in parameters}
+
+
+def looks_invented(text: str, no_speech_probability: float, average_logprob: float) -> bool:
+    """True for a segment Whisper almost certainly made up from non-speech audio."""
+    if not text.strip():
+        return True
+    if no_speech_probability >= NO_SPEECH_PROBABILITY_LIMIT and average_logprob < -0.3:
+        return True
+    unsure = no_speech_probability >= 0.3 or average_logprob < -0.8
+    if unsure and (_INVENTED_PHRASES.match(text.strip()) or _INVENTED_CONTAINS.search(text)):
+        return True
+    return False
+
+
 def recording_is_silent(path: str | Path) -> bool:
     """True when the decoded audio has no sound at all; False if audible or not decodable."""
     try:
@@ -396,6 +459,7 @@ def process_claimed_transcript(
             str(plaintext_path),
             language="en",
             word_timestamps=True,
+            **supported_options(model, SPEECH_ONLY_OPTIONS),
         )
 
         # ---------------------------------------------------------
@@ -408,6 +472,16 @@ def process_claimed_transcript(
         for segment in segment_iterator:
 
             segment_text = str(segment.text).strip()
+
+            if looks_invented(
+                segment_text,
+                float(getattr(segment, "no_speech_prob", 0.0) or 0.0),
+                float(getattr(segment, "avg_logprob", 0.0) or 0.0),
+            ):
+                logger.info(
+                    "Dropped an invented segment from transcript %s: %r", transcript_id, segment_text
+                )
+                continue
 
             segment_data = {
                 "start": float(segment.start),
@@ -431,6 +505,9 @@ def process_claimed_transcript(
 
             if segment_text:
                 text_parts.append(segment_text)
+
+        if not text_parts:
+            raise NoSpeechDetectedError(NO_SPEECH_MESSAGE)
 
         # ---------------------------------------------------------
         # 8. Persist transcript

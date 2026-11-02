@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import re
 from typing import Literal
+from app.plain_errors import PlainError
 from app.time_utils import UtcDateTime
 from pydantic import (
     AliasChoices,
@@ -284,7 +285,7 @@ class MeetingTranscriptResponse(BaseModel):
     language: str
     transcript_text: str | None = None
     segments: list[TranscriptSegment] = Field(default_factory=list)
-    error_message: str | None = None
+    error_message: PlainError = None
     created_at: datetime
     processing_started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -304,7 +305,7 @@ class MeetingSummaryResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
-    error_message: str | None = None
+    error_message: PlainError = None
 
 
 class ActionItemOwnerConfirmationRequest(BaseModel):
@@ -367,7 +368,7 @@ class MeetingActionItemsResponse(BaseModel):
     updated_at: datetime
     processing_started_at: datetime | None = None
     completed_at: datetime | None = None
-    error_message: str | None = None
+    error_message: PlainError = None
     action_items: list[MeetingActionItemResponse] = Field(default_factory=list)
 
 
@@ -380,7 +381,7 @@ class TaskCalendarSyncResponse(BaseModel):
     attempt_count: int = 0
     max_attempts: int = 5
     next_attempt_at: UtcDateTime | None = None
-    last_error: str | None = None
+    last_error: PlainError = None
     last_synced_at: UtcDateTime | None = None
     last_polled_at: UtcDateTime | None = None
     external_change_detected_at: UtcDateTime | None = None
@@ -406,7 +407,7 @@ class TaskResponse(BaseModel):
     status: Literal["pending", "completed"]
     completed_at: datetime | None = None
     assignment_email_status: Literal["pending", "sent", "failed"]
-    assignment_email_error: str | None = None
+    assignment_email_error: PlainError = None
     created_at: datetime
     assignee_email: str | None = None
     assignee_team: str | None = None
@@ -494,7 +495,7 @@ class TaskNotificationResponse(BaseModel):
     kind: str
     subject: str
     status: Literal["pending", "sent", "failed"]
-    error: str | None = None
+    error: PlainError = None
     created_at: datetime
 
 
@@ -542,7 +543,7 @@ class MeetingRecordingResponse(BaseModel):
     created_at: datetime
     retention_expires_at: datetime
     storage_uri: str | None = None
-    error_message: str | None = None
+    error_message: PlainError = None
     # FR-8 participant-track fields
     participant_name: str | None = None
     connection_id: str | None = None
@@ -596,7 +597,7 @@ class MeetingMinutesRecipientResponse(BaseModel):
     recipient_email: str
     attendance_log_id: str | None = None
     delivery_status: Literal["pending", "sent", "failed"] = "pending"
-    error_message: str | None = None
+    error_message: PlainError = None
     idempotency_key: str | None = None
     sent_at: datetime | None = None
     created_at: datetime
@@ -615,7 +616,7 @@ class MeetingMinutesResponse(BaseModel):
     content_summary: str | None = None
     content_decisions: list[str] | None = None
     content_action_items: list[dict[str, object]] | None = None
-    error_message: str | None = None
+    error_message: PlainError = None
     created_at: datetime
     updated_at: datetime
     recipients: list[MeetingMinutesRecipientResponse] = Field(default_factory=list)

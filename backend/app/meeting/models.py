@@ -4,6 +4,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -981,7 +983,18 @@ USER_NOTIFICATION_EMAIL_STATUSES = (
     "failed",
 )
 
-WORKFLOW_RUN_STATUSES = ("pending", "processing", "retrying", "completed", "failed")
+WORKFLOW_RUN_STATUSES = (
+    "pending",
+    "processing",
+    "retrying",
+    "completed",
+    "failed",
+    # Story 8.4: an administrator cancelled a dead-lettered run. Not a failure
+    # and never a success.
+    "cancelled",
+)
+# Story 8.4: where a dead-lettered run stands. `open` is waiting for a human.
+WORKFLOW_DEAD_LETTER_STATUSES = ("open", "retried", "resumed", "cancelled")
 WORKFLOW_STEP_STATUSES = ("pending", "processing", "completed", "failed", "retrying")
 
 
@@ -1146,6 +1159,84 @@ class WorkflowStep(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+
+class WorkflowDeadLetter(Base):
+    """A workflow run that ran out of retries (Story 8.4 dead-letter queue).
+
+    The run itself stays in ``workflow_runs`` with status ``failed``; this row keeps
+    what a human needs to troubleshoot it (job details, last error, attempts) and
+    records how the administrator resolved it.
+    """
+
+    __tablename__ = "workflow_dead_letters"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ("
+            + ", ".join(repr(status) for status in WORKFLOW_DEAD_LETTER_STATUSES)
+            + ")",
+            name="ck_workflow_dead_letters_status",
+        ),
+        Index("ix_workflow_dead_letters_status", "status", "created_at"),
+        Index("ix_workflow_dead_letters_run", "workflow_run_id", "created_at"),
+        # A run has at most one open entry, even if two workers give up at once.
+        Index(
+            "uq_workflow_dead_letters_open_run",
+            "workflow_run_id",
+            unique=True,
+            sqlite_where=text("status = 'open'"),
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    workflow_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    meeting_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    failed_step_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    # How many administrators were told; 0 means nobody could be reached.
+    notified_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resolution_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkflowEvent(Base):
+    """Execution history of a workflow run: completions, retries, dead-lettering,
+    lease recoveries and administrator actions (Story 8.4)."""
+
+    __tablename__ = "workflow_events"
+    __table_args__ = (
+        Index("ix_workflow_events_run", "workflow_run_id", "sequence"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workflow_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    # 1, 2, 3 ... per run. Timestamps alone can tie, so this is the order of record.
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    step_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    attempt_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_delay_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
 

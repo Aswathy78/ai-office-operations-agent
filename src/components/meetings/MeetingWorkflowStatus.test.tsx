@@ -90,4 +90,41 @@ describe('MeetingWorkflowStatus', () => {
     expect(screen.getByText('Summary provider unavailable.')).toBeInTheDocument()
     expect(screen.getByText('Summary read-back failed.')).toBeInTheDocument()
   })
+
+  it('tells the organizer a failed run is in the dead-letter queue and was reported', async () => {
+    const failed = workflow('failed')
+    failed.workflow!.attempt_count = 5
+    failed.workflow!.max_attempts = 5
+    failed.workflow!.last_error = 'Summary provider unavailable.'
+    getWorkflow.mockResolvedValue(failed)
+
+    render(<MeetingWorkflowStatus meetingId="meeting-1" />)
+
+    expect(await screen.findByText(/failed after 5 of 5 attempts/)).toBeInTheDocument()
+    expect(screen.getByText(/dead-letter queue and an administrator has been notified/)).toBeInTheDocument()
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument()
+  })
+
+  it('shows the attempt count while a run retries automatically', async () => {
+    const retrying = workflow('retrying')
+    retrying.workflow!.attempt_count = 2
+    retrying.workflow!.max_attempts = 5
+    getWorkflow.mockResolvedValue(retrying)
+
+    render(<MeetingWorkflowStatus meetingId="meeting-1" />)
+
+    expect(await screen.findByText(/Attempt 2 of 5 failed; retrying automatically/)).toBeInTheDocument()
+    expect(screen.queryByText(/dead-letter/)).not.toBeInTheDocument()
+  })
+
+  it('shows a cancelled run as cancelled, not as failed or completed', async () => {
+    getWorkflow.mockResolvedValue(workflow('cancelled'))
+
+    render(<MeetingWorkflowStatus meetingId="meeting-1" />)
+
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument()
+    expect(screen.getByText('An administrator cancelled this workflow.')).toBeInTheDocument()
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument()
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument()
+  })
 })

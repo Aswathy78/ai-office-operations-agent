@@ -28,11 +28,26 @@ export function MeetingWorkflowStatus({ meetingId }: { meetingId: string }) {
         ) : (
           <>
             <p>
-              <span className={`status-pill ${workflow.status === 'failed' ? 'danger' : workflow.status === 'completed' ? 'muted' : 'warning'}`}>
+              <span className={`status-pill ${workflow.status === 'failed' ? 'danger' : workflow.status === 'completed' || workflow.status === 'cancelled' ? 'muted' : 'warning'}`}>
                 {label(workflow.status)}
               </span>
+              {workflow.status === 'retrying' && workflow.max_attempts ? (
+                <small> Attempt {workflow.attempt_count} of {workflow.max_attempts} failed; retrying automatically.</small>
+              ) : null}
             </p>
-            {workflow.last_error && <p className="email-status-error">{workflow.last_error}</p>}
+            {workflow.status === 'failed' && (
+              <p className="email-status-error" role="status">
+                This workflow failed after {workflow.attempt_count}
+                {workflow.max_attempts ? ` of ${workflow.max_attempts}` : ''} attempts. It was moved to the
+                dead-letter queue and an administrator has been notified.
+              </p>
+            )}
+            {workflow.status === 'cancelled' && (
+              <p role="status">An administrator cancelled this workflow.</p>
+            )}
+            {workflow.last_error && workflow.status !== 'completed' && (
+              <p className="email-status-error">{workflow.last_error}</p>
+            )}
             <ol className="workflow-step-list">
               {workflow.steps.map((step) => (
                 <li key={step.id}>

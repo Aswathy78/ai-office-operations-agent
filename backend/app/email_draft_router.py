@@ -7,6 +7,8 @@ from typing import Callable, Literal
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.plain_errors import PlainError
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
@@ -86,7 +88,7 @@ class DeliveryResult(BaseModel):
     # "sent" only once the mail provider accepted the message for this recipient;
     # "bounced" when a hard bounce was reported for it afterwards.
     status: Literal["sent", "failed", "bounced"]
-    error: str | None = None
+    error: PlainError = None
     message_id: str | None = None
     accepted_at: UtcDateTime | None = None
     attempt: int | None = None
@@ -116,7 +118,7 @@ class FailureNotificationResponse(BaseModel):
     attempts: int
     next_attempt_at: UtcDateTime | None
     provider: str | None
-    error: str | None
+    error: PlainError
     sent_at: UtcDateTime | None
     created_at: UtcDateTime
 
@@ -172,7 +174,7 @@ class EmailDraftResponse(BaseModel):
     attempt_count: int
     max_attempts: int
     next_attempt_at: UtcDateTime | None
-    last_error: str | None
+    last_error: PlainError
     acknowledged_sensitive: bool
     discarded_at: UtcDateTime | None
     bounces: list[BounceRecord]

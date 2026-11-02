@@ -8,7 +8,11 @@ import {
 const WORKFLOW_STATUS_POLL_MS = 2000
 
 function isFinished(workflow: WorkflowRun | null): boolean {
-  return workflow?.status === 'completed' || workflow?.status === 'failed'
+  return (
+    workflow?.status === 'completed' ||
+    workflow?.status === 'failed' ||
+    workflow?.status === 'cancelled'
+  )
 }
 
 export function useMeetingWorkflow(meetingId: string) {

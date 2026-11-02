@@ -492,3 +492,48 @@ def test_fallback_delivery_is_recorded_on_the_email(client, db_session, two_prov
     sent = _get(client, draft["id"])
     assert sent["status"] == "sent"
     assert [(r["provider"], r["fallback_used"]) for r in sent["delivery_results"]] == [("ses", True)]
+
+
+# --- A rejected mail login (the sender's problem, not the recipient's) ----------------
+
+
+def test_a_rejected_mail_login_is_not_retried_not_a_bounce_and_alerts_the_administrator(
+    client, db_session, monkeypatch,
+):
+    from app.meeting.models import AuthAccount, UserNotification
+    from app.plain_errors import SIGN_IN_REJECTED
+
+    admin = Employee(id=str(uuid.uuid4()), name="Ethan Walker", team="Operations", is_active=True,
+                     email="ethan.walker@northstar.example")
+    db_session.add(admin)
+    db_session.add(AuthAccount(id="acc-admin", employee_id=admin.id, email_normalized=admin.email,
+                               password_hash="x", role="admin", is_enabled=True))
+    db_session.commit()
+    provider = FakeProvider(monkeypatch, {"ava.patel@northstar.example": [
+        smtplib.SMTPAuthenticationError(535, b"5.7.8 Username and Password not accepted"),
+    ] * 5})
+    draft = _create(client, "Email Ava about the review meeting")
+    _send(client, draft["id"])
+
+    _dispatch(db_session)
+
+    failed = _get(client, draft["id"])
+    assert failed["status"] == "failed" and failed["attempt_count"] == 1, "no pointless retries"
+    assert len(provider.to("ava.patel@northstar.example")) == 1
+    assert failed["bounces"] == [], "the recipient's address was fine; the sender's login was not"
+    assert failed["last_error"] == "1 of 1 recipient(s) not delivered. " + SIGN_IN_REJECTED
+    alerts = db_session.query(UserNotification).filter_by(entity_type="system", entity_id="mail").all()
+    assert [a.recipient_employee_id for a in alerts] == [admin.id]
+    assert alerts[0].email_status == "disabled", "an alert about broken e-mail is not sent by e-mail"
+
+
+def test_a_real_recipient_rejection_is_still_a_bounce(client, db_session, monkeypatch):
+    FakeProvider(monkeypatch, {"ava.patel@northstar.example": [
+        smtplib.SMTPRecipientsRefused({"ava.patel@northstar.example": (550, b"5.1.1 No such user")}),
+    ]})
+    draft = _create(client, "Email Ava about the review meeting")
+    _send(client, draft["id"])
+
+    _dispatch(db_session)
+
+    assert [b["code"] for b in _get(client, draft["id"])["bounces"]] == [550]

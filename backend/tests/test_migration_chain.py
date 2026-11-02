@@ -19,10 +19,17 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261102_01"
+            ).scalar_one() == "20261102_02"
 
         Base.metadata.create_all(bind=engine)
         table_names = set(inspect(engine).get_table_names())
-        assert {"meetings", "user_notifications", "workflow_runs", "workflow_steps"} <= table_names
+        assert {
+            "meetings",
+            "user_notifications",
+            "workflow_runs",
+            "workflow_steps",
+            "workflow_dead_letters",
+            "workflow_events",
+        } <= table_names
     finally:
         engine.dispose()

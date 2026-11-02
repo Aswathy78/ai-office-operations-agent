@@ -6,6 +6,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.plain_errors import PlainError
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
@@ -39,7 +41,7 @@ class NotificationResponse(BaseModel):
     email_status: str
     email_attempts: int
     email_next_attempt_at: datetime | None
-    email_error: str | None
+    email_error: PlainError
     created_at: datetime
     read_at: datetime | None
 

@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import email_delivery_service as delivery
+from app.plain_errors import is_sign_in_failure, plain_error
 from app import email_providers
 from app.meeting.models import (
     EMAIL_DRAFT_STATUS_FAILED,
@@ -190,10 +191,11 @@ def _send_notification(db: Session, row: EmailFailureNotification, now: datetime
         receipt = email_providers.send_email(row.recipient_email, row.subject, row.body)
     except (OSError, smtplib.SMTPException, ValueError) as exc:
         row.status = "failed"
-        row.error = f"{type(exc).__name__}: {exc}"[:500]
+        row.error = plain_error(exc, email=True)[:500]
         row.next_attempt_at = (
             now + timedelta(seconds=delivery.retry_backoff_seconds(row.attempts))
             if row.attempts < delivery.max_attempts()
+            and not is_sign_in_failure(exc)  # retrying cannot help
             else None
         )
         logger.warning("Failure notification not sent draft_id=%s to=%s: %s",
