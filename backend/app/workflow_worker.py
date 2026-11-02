@@ -11,6 +11,7 @@ import time
 from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
+from app.plain_errors import plain_error
 from app.meeting.models import (
     ACTION_ITEM_EXTRACTION_STATUS_COMPLETED,
     Meeting,
@@ -27,9 +28,14 @@ from app.workflow_service import (
     CALENDAR_MONITOR_WORKFLOW,
     MEETING_WORKFLOW,
     TASK_REMINDER_WORKFLOW,
+    WORKFLOW_MAX_ATTEMPTS,
+    PermanentWorkflowError,
+    backoff_delay_seconds,
     claim_workflow,
+    dead_letter_run,
     get_workflow_steps,
     recover_stale_workflows,
+    record_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,11 +80,11 @@ def _verify_step(db: Session, run: WorkflowRun, step: WorkflowStep) -> dict:
 
             result = run_sync_pass(db, poll=bool(run.payload.get("poll")))
             return result.as_dict()
-        raise ValueError(f"Unsupported workflow step: {step.step_key}")
+        raise PermanentWorkflowError(f"Unsupported workflow step: {step.step_key}")
 
     meeting = db.get(Meeting, run.meeting_id)
     if meeting is None:
-        raise ValueError("The workflow meeting no longer exists.")
+        raise PermanentWorkflowError("The workflow meeting no longer exists.")
     if step.step_key == "transcription":
         if meeting.status != "completed":
             raise WorkflowNotReady("Waiting for the meeting to end.")
@@ -103,8 +109,10 @@ def _verify_step(db: Session, run: WorkflowRun, step: WorkflowStep) -> dict:
         if transcript is None or transcript.status in ("pending", "processing"):
             raise WorkflowNotReady("Waiting for the recording transcription.")
         if transcript.status != "completed":
-            raise RuntimeError(
-                transcript.error_message or "The meeting transcription failed."
+            # A failed transcript stays failed (for example, nobody spoke), so trying the
+            # workflow again cannot help: send it straight to the dead-letter queue.
+            raise PermanentWorkflowError(
+                plain_error(transcript.error_message) or "The meeting transcription failed."
             )
         return {"recording_id": recording.id, "transcript_id": transcript.id}
 
@@ -190,7 +198,7 @@ def _verify_step(db: Session, run: WorkflowRun, step: WorkflowStep) -> dict:
             )
         return {"task_ids": [task.id for task in verified_tasks]}
 
-    raise ValueError(f"Unsupported meeting workflow step: {step.step_key}")
+    raise PermanentWorkflowError(f"Unsupported meeting workflow step: {step.step_key}")
 
 
 def _notify_meeting_result(db: Session, run: WorkflowRun, *, failed: bool) -> None:
@@ -206,8 +214,10 @@ def _notify_meeting_result(db: Session, run: WorkflowRun, *, failed: bool) -> No
     from app.notification_service import create_notification, deliver_notification
 
     event_type = "meeting_workflow_failed" if failed else "meeting_workflow_completed"
+    reason = (plain_error(run.last_error) or "").strip() if failed else ""
     summary = (
         f"Follow-up workflow failed for {meeting.title}."
+        + (f" {reason}" if reason else "")
         if failed
         else f"Follow-up workflow completed for {meeting.title}."
     )
@@ -243,6 +253,13 @@ def _finish_step(db: Session, run: WorkflowRun, step: WorkflowStep, checkpoint: 
     if run is None:
         raise RuntimeError("Workflow run disappeared before checkpoint persistence.")
     run.updated_at = now
+    record_event(
+        db,
+        run.id,
+        "step_completed",
+        step_key=verified_step.step_key,
+        attempt_number=verified_step.attempt_count,
+    )
     db.commit()
 
 
@@ -269,17 +286,32 @@ def _fail_step(db: Session, run: WorkflowRun, step: WorkflowStep, error: Excepti
     step = db.get(WorkflowStep, step.id)
     if run is None or step is None:
         raise RuntimeError("Workflow state disappeared while recording a failure.")
-    message = str(error)[:4000] or type(error).__name__
+    # The technical detail is in the log (logger.exception below); people see plain words.
+    message = (plain_error(error) or type(error).__name__)[:4000]
+    # Story 8.4: a permanent failure skips the retries; a transient one is retried
+    # with exponential backoff and jitter until the attempts (at most five) run out.
+    permanent = isinstance(error, PermanentWorkflowError)
     step.last_error = message
     step.updated_at = now
     run.attempt_count += 1
     run.last_error = message
     run.updated_at = now
     run.claimed_at = None
-    if run.attempt_count < run.max_attempts:
+    if not permanent and run.attempt_count < min(run.max_attempts, WORKFLOW_MAX_ATTEMPTS):
+        delay = backoff_delay_seconds(run.attempt_count, _retry_seconds)
         step.status = "retrying"
         run.status = "retrying"
-        run.next_attempt_at = now + timedelta(seconds=min(300, _retry_seconds * 2 ** (run.attempt_count - 1)))
+        run.next_attempt_at = now + timedelta(seconds=delay)
+        record_event(
+            db,
+            run.id,
+            "retry_scheduled",
+            step_key=step.step_key,
+            attempt_number=run.attempt_count,
+            error=message,
+            retry_delay_seconds=delay,
+            next_attempt_at=run.next_attempt_at,
+        )
     else:
         step.status = "failed"
         step.completed_at = now
@@ -295,6 +327,13 @@ def _fail_step(db: Session, run: WorkflowRun, step: WorkflowStep, error: Excepti
         exc_info=error,
     )
     if run.status == "failed":
+        dead_letter_run(
+            db,
+            run.id,
+            step_key=step.step_key,
+            error_message=message,
+            permanent=permanent,
+        )
         _notify_meeting_result(db, run, failed=True)
 
 

@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Users,
   Video,
+  Workflow,
 } from 'lucide-react'
 import type { NavigationItem } from '../types/navigation'
 import type { UserRole } from '../types/user'
@@ -27,6 +28,7 @@ export const navigationItems: NavigationItem[] = [
   { id: 'notifications', label: 'Notifications', route: '/notifications', icon: Bell, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'notification-settings', label: 'Notification settings', route: '/settings/notifications', icon: Settings, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'users', label: 'Users', route: '/admin/users', icon: Users, allowedRoles: ['admin'] },
+  { id: 'workflows', label: 'Workflow queue', route: '/admin/workflows', icon: Workflow, allowedRoles: ['admin'] },
   { id: 'agent-monitor', label: 'Agent Monitor', route: '/admin/agent-monitor', icon: Activity, allowedRoles: ['admin'] },
   { id: 'audit', label: 'Audit Logs', route: '/admin/audit-logs', icon: Settings, allowedRoles: ['admin'] },
   { id: 'chat', label: 'Corporate Chatbox', route: '/chat', icon: MessageSquare, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },

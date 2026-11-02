@@ -496,7 +496,8 @@ def test_worker_loads_dotenv_before_decrypting_recording(
         def transcribe(self, _audio_path, *, language, word_timestamps):
             assert language == "en"
             assert word_timestamps is True
-            return iter(()), SimpleNamespace(language="en")
+            spoken = SimpleNamespace(start=0.0, end=1.0, text="Hello team.", words=[])
+            return iter([spoken]), SimpleNamespace(language="en")
 
     monkeypatch.setattr(transcription_worker, "load_dotenv", load_worker_environment)
     monkeypatch.setattr(

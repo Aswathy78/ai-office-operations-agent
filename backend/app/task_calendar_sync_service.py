@@ -29,6 +29,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
+from app.plain_errors import plain_error
 from app.meeting.calendar_provider import CalendarProviderError, get_calendar_provider
 from app.meeting.models import (
     CALENDAR_SYNC_STATUS_COMPLETED,
@@ -325,7 +326,7 @@ def _sync_one(db: Session, sync_id: str, summary: SyncSummary) -> None:
         db.rollback()
         sync = db.get(TaskCalendarSync, sync_id)
         db.refresh(sync)
-        sync.last_error = f"{type(exc).__name__}: {exc}"[:1000]
+        sync.last_error = plain_error(exc)[:1000]
         if sync.attempt_count < max_attempts():
             transition(sync, CALENDAR_SYNC_STATUS_RETRYING)
             sync.next_attempt_at = _now() + timedelta(seconds=backoff_seconds(sync.attempt_count))
@@ -443,7 +444,7 @@ def poll_external_changes(db: Session, summary: SyncSummary | None = None) -> Sy
             entry = provider.get_deadline_entry(db, sync.external_entry_id)
         except SYNC_ERRORS as exc:
             # Could not look; the last confirmed sync still stands, but say so.
-            sync.last_poll_error = f"{type(exc).__name__}: {exc}"[:500]
+            sync.last_poll_error = plain_error(exc)[:500]
             continue
         sync.last_poll_error = None
         detail = None

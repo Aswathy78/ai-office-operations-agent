@@ -22,6 +22,7 @@ import { TaskWorkspacePage } from './pages/TaskWorkspacePage'
 import { NotificationsPage } from './pages/NotificationsPage'
 import { NotificationPreferencesPage } from './pages/NotificationPreferencesPage'
 import { MyApprovalsPage } from './pages/MyApprovalsPage'
+import { WorkflowQueuePage } from './pages/WorkflowQueuePage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -76,6 +77,7 @@ function AppRoutes() {
       <Route path="/notifications" element={<ProtectedAppPage path="/notifications"><NotificationsPage /></ProtectedAppPage>} />
       <Route path="/settings/notifications" element={<ProtectedAppPage path="/settings/notifications"><NotificationPreferencesPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/workflows" element={<ProtectedAppPage path="/admin/workflows"><WorkflowQueuePage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />
       <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><PlaceholderPage /></ProtectedAppPage>} />
 

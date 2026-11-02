@@ -1318,6 +1318,56 @@ Implemented a centralized workflow queue to manage background jobs, control proc
 * Provides real-time visibility into workflow progress.
 * Helps administrators and employees monitor automated operations.
 
+### Story 8.4 – Automatic Retry and Dead-Letter Queue (FR-46)
+
+Failed workflow runs are retried automatically; when they cannot be saved they go to a dead-letter queue (DLQ), are shown as **Failed**, and a human administrator is told.
+
+**Automatic retry**
+
+* A transient failure is retried with exponential backoff and random jitter: the wait after the *n*-th failure is `5 s × 2^(n−1)` (capped at 300 s), scaled by a random factor between 0.5 and 1.0 so retries from many runs do not fire together.
+* A run gets at most **5 attempts** in total (`WORKFLOW_MAX_ATTEMPTS`); a larger `max_attempts` is clamped to 5.
+* A permanent failure that retrying cannot fix (an unsupported step, a missing meeting, a recording with no speech) skips the retries and goes straight to the DLQ.
+* Retries reuse the same run and its checkpoints, and steps already completed are not run again, so a retry never creates a second job or repeats finished work.
+
+**Dead-letter queue**
+
+* When the attempts are used up (or the failure is permanent, or an expired worker lease is out of attempts) the run ends as `failed` and a `workflow_dead_letters` entry keeps what is needed to troubleshoot: workflow type, failed step, last error, attempt count, a snapshot of the job payload and who was notified. Each run has at most one open entry.
+* `workflow_events` keeps the execution history of every run: steps completed, each retry with its error and wait, dead-lettering, lease recoveries and every administrator action, in order.
+* Active administrators are notified (`workflow_failure`, linking to `/admin/workflows`); HR / Operations are told instead when no administrator account is active. The meeting organizer still gets the existing failure notice. A notification problem never hides the entry.
+* A failed run is never shown as completed or successful. Runs that failed before this story are added to the queue by the migration.
+
+**Recordings with no speech**
+
+Whisper turns room noise into fluent text ("Thank you so much for watching this video…"), which used to reach the meeting page as if it had been said and let the follow-up workflow "complete". Now:
+
+* Whisper is asked to skip non-speech first (voice-activity filter) and not to carry one invented line into the next.
+* Each segment Whisper rates as probably silence is dropped, and so is boilerplate such as "thanks for watching" or "subscribe" when its confidence is low. A confidently spoken "Thank you." is kept.
+* If no real speech is left, the transcript fails with "No speech was detected in the recording … record the meeting again", no summary or action items are made, and the workflow goes straight to the dead-letter queue.
+* The organizer gets "Follow-up workflow failed for <meeting>. No speech was detected…" and the administrators get the dead-letter notification.
+
+**Administrator actions** (administrators only; `GET /api/v1/workflows/dead-letter?status=open|retried|resumed|cancelled|all`, `GET /api/v1/workflows/dead-letter/{run_id}`)
+
+| Action | Endpoint | Effect |
+|---|---|---|
+| Retry from start | `POST …/dead-letter/{run_id}/retry` | Every step runs again with a fresh budget of 5 attempts |
+| Resume from checkpoint | `POST …/dead-letter/{run_id}/resume` | Completed steps keep their checkpoints; the rest run |
+| Cancel run | `POST …/dead-letter/{run_id}/cancel` | The run ends as `cancelled` (not failed, not completed) |
+
+Each takes an optional note. Only a `failed` run can be acted on, in one conditional update, so a second click or a second administrator gets `409` and nothing runs twice. Earlier entries and events are kept, so a run that fails again gets a new entry and the history shows both.
+
+**Where to see it**
+
+* **Workflow queue** (`/admin/workflows`, administrators only): open entries with error and attempts, a detail panel with steps, execution history and job details, and the Retry / Resume / Cancel buttons.
+* The **Meeting report** shows a failed run as failed ("moved to the dead-letter queue and an administrator has been notified"), a retrying run with its attempt count, and a cancelled run as cancelled.
+
+**Database:** migration `20261102_02` adds `workflow_dead_letters` and `workflow_events`, allows the `cancelled` run status and backfills open entries for runs that had already failed. Run `alembic upgrade head` from `backend/`.
+
+> If the API was started before migrating, its startup creates the workflow tables itself and migration `20261102_01` then stops with "table workflow_runs already exists". Migrate before the first start, or, when those tables are still empty, drop them and run `alembic upgrade head`.
+
+**Try it:** nothing fails on demand in a healthy system, so `python -m app.db.demo_dead_letter` (from `backend/`) puts one failed demo run in the queue through the real code path, including the administrator notification; `python -m app.db.demo_dead_letter --remove` deletes the demo runs. Sign in as an administrator, open **Workflow queue**, and retry, resume or cancel it.
+
+**Tests:** `backend/tests/test_workflow_dead_letter.py` (backoff and jitter, the 5-attempt limit, permanent failures, DLQ contents, failure status accuracy, administrator notification, retry / resume / cancel, double-click and concurrent-administrator safety, history, migration) and `src/pages/WorkflowQueuePage.test.tsx`.
+
 ### Technologies Used
 
 * **Backend:** Python, FastAPI, SQLAlchemy
@@ -2974,7 +3024,7 @@ npx tsc --noEmit -p .
 
 # 📌 Current Project Status
 
-Last updated 2 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree.
+Last updated 2 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -3039,6 +3089,7 @@ Last updated 2 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) a
 - Story 8.1 — Recipient-scoped inbox, per-channel delivery status, preferences, and quiet hours (FR-43)
 - Story 8.2 — Automatic meeting follow-up workflows with durable per-step checkpoints and verified completion
 - Story 8.3 — Priority queue, configurable worker concurrency, scheduled reminders / due-date monitors, and live status updates
+- Story 8.4 — Automatic retry with exponential backoff and jitter (5 attempts), dead-letter queue, administrator notification, and manual retry / resume / cancel (FR-46) — implemented, awaiting merge
 
 Notification inbox and preferences are stored in `user_notifications` and
 `notification_preferences`. The Alembic migration `20261101_02` follows the

@@ -2051,3 +2051,13 @@ button, a { -webkit-tap-highlight-color: transparent; }
   color: var(--muted, #5b6b82);
   overflow-wrap: anywhere;
 }
+
+/* Story 8.4 - workflow dead-letter queue */
+.workflow-dlq-detail { display: block; }
+.workflow-dlq-detail h4 { margin: 18px 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.workflow-history { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.workflow-history li { display: grid; gap: 2px; padding-left: 12px; border-left: 3px solid var(--border); font-size: 13px; }
+.workflow-history li small { color: var(--muted); }
+.workflow-payload { max-height: 180px; overflow: auto; margin: 0; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #f7f9fc; font-size: 12px; }
+.workflow-dlq-actions { display: grid; gap: 8px; margin-top: 18px; }
+.workflow-dlq-actions textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font: inherit; }

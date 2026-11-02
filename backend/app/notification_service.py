@@ -12,6 +12,7 @@ from sqlalchemy import func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.plain_errors import is_sign_in_failure, plain_error
 from app.meeting.models import (
     AssistantActionApproval,
     AuthAccount,
@@ -534,6 +535,14 @@ def notify_email_approval_decision(db: Session, draft: EmailDraft) -> None:
     )
 
 
+def workflow_alert_recipients(db: Session) -> list[Employee]:
+    """Who is told when a workflow run is dead-lettered (Story 8.4): the active
+    administrators, or HR / Operations when no administrator account is active."""
+    return _employees_with_roles(db, {"admin"}) or _employees_with_roles(
+        db, {"hr_operations"}
+    )
+
+
 def notify_workflow_failure(
     db: Session,
     *,
@@ -776,6 +785,7 @@ def deliver_notification(
     if not _claim_notification(db, notification, now):
         return db.get(UserNotification, notification_id)
 
+    sign_in_rejected = False
     try:
         from app.task_service import send_email
 
@@ -787,8 +797,11 @@ def deliver_notification(
     except (OSError, smtplib.SMTPException, ValueError) as exc:
         from app.email_delivery_service import max_attempts, retry_backoff_seconds
 
-        notification.email_error = f"{type(exc).__name__}: {exc}"[:1000]
-        if notification.email_attempts < max_attempts():
+        notification.email_error = plain_error(exc, email=True)[:1000]
+        # A rejected mail login cannot succeed on retry, and every retry is another
+        # failed login that makes the mail provider lock the account for longer.
+        sign_in_rejected = is_sign_in_failure(exc)
+        if not sign_in_rejected and notification.email_attempts < max_attempts():
             notification.email_status = "retrying"
             notification.email_next_attempt_at = now + timedelta(
                 seconds=retry_backoff_seconds(notification.email_attempts)
@@ -797,14 +810,15 @@ def deliver_notification(
             notification.email_status = "failed"
             notification.email_next_attempt_at = None
         logger.warning(
-            "Notification e-mail failed operation=%s error_type=%s",
+            "Notification e-mail failed operation=%s error_type=%s detail=%s",
             getattr(exc, "smtp_operation", "unknown"),
             type(exc).__name__,
+            str(exc)[:300],
         )
     except Exception as exc:  # noqa: BLE001 - prevent a stuck Sending channel on unexpected provider errors
         from app.email_delivery_service import max_attempts, retry_backoff_seconds
 
-        notification.email_error = f"Unexpected {type(exc).__name__}: {exc}"[:1000]
+        notification.email_error = plain_error(exc, email=True)[:1000]
         if notification.email_attempts < max_attempts():
             notification.email_status = "retrying"
             notification.email_next_attempt_at = now + timedelta(
@@ -814,9 +828,10 @@ def deliver_notification(
             notification.email_status = "failed"
             notification.email_next_attempt_at = None
         logger.error(
-            "Unexpected notification e-mail failure operation=%s error_type=%s",
+            "Unexpected notification e-mail failure operation=%s error_type=%s detail=%s",
             getattr(exc, "smtp_operation", "unknown"),
             type(exc).__name__,
+            str(exc)[:300],
         )
     else:
         notification.email_status = "sent"
@@ -826,7 +841,51 @@ def deliver_notification(
         notification.email_next_attempt_at = None
     _sync_task_delivery(db, notification)
     db.commit()
+    if sign_in_rejected:
+        alert_mail_sign_in_rejected(db, now)
     return notification
+
+
+MAIL_SIGN_IN_ALERT = (
+    "E-mail sending is failing because the mail account's sign-in was rejected or blocked. "
+    "Check the e-mail username and app password (SMTP_USERNAME and SMTP_PASSWORD in "
+    "backend/.env), then restart the API. If the password is new and sign-in is still "
+    "refused, Google may have blocked sign-ins for a while after repeated failures: wait "
+    "about an hour. Until then no e-mail can be sent."
+)
+
+
+def alert_mail_sign_in_rejected(db: Session, now: datetime | None = None) -> int:
+    """Tell the administrators, once a day, that the system's mail login is rejected.
+
+    The alert is in-app only: sending is what is broken. Returns how many people were
+    alerted. Never raises, so a problem here cannot hide the delivery failure itself.
+    """
+    day = _as_utc(now or _now()).date().isoformat()
+    try:
+        recipients = workflow_alert_recipients(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("Could not look up who to tell that the mail sign-in was rejected")
+        return 0
+    alerted = 0
+    for recipient in recipients:
+        try:
+            create_notification(
+                db,
+                recipient_id=recipient.id,
+                event_type="workflow_failure",
+                summary=MAIL_SIGN_IN_ALERT,
+                idempotency_key=f"mail-sign-in-rejected:{day}:{recipient.id}",
+                entity_type="system",
+                entity_id="mail",
+                entity_url="/notifications",
+            )
+            db.commit()
+            alerted += 1
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception("Could not alert %s that the mail sign-in was rejected", recipient.id)
+    return alerted
 
 
 def process_due_notification_emails(

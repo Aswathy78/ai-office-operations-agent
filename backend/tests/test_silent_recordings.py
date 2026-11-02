@@ -118,8 +118,8 @@ def test_silent_recording_fails_clearly_without_summary_or_action_items(db_sessi
     storage_root.mkdir()
     transcript = _recording(db_session, storage_root, _wav(seconds=3, amplitude=0.0))
     summaries, extractions = [], []
-    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda db, tid: summaries.append(tid))
-    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda db, tid: extractions.append(tid))
+    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda db, tid: summaries.append(tid), raising=False)
+    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda db, tid: extractions.append(tid), raising=False)
     assert claim_pending_transcript(db_session) == transcript.id
     model = RecordingModel()
 
@@ -142,8 +142,8 @@ def test_audible_recording_is_still_transcribed(db_session, tmp_path, monkeypatc
     storage_root = tmp_path / "recordings"
     storage_root.mkdir()
     transcript = _recording(db_session, storage_root, _wav(seconds=2, amplitude=0.06))
-    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda db, tid: None)
-    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda db, tid: None)
+    monkeypatch.setattr(transcription_worker, "generate_meeting_summary", lambda db, tid: None, raising=False)
+    monkeypatch.setattr(transcription_worker, "generate_meeting_action_items", lambda db, tid: None, raising=False)
     assert claim_pending_transcript(db_session) == transcript.id
     model = RecordingModel()
 

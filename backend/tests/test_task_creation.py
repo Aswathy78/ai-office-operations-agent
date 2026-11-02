@@ -344,11 +344,11 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
 
     task = db_session.query(Task).one()
     assert task.assignment_email_status == "failed"
-    assert task.assignment_email_error == "OSError: SMTP unavailable"
+    assert task.assignment_email_error == "SMTP unavailable"
     notification = db_session.query(TaskNotification).filter_by(task_id=task.id).one()
     notification_id = notification.id
     assert notification.status == "failed"
-    assert notification.error == "OSError: SMTP unavailable"
+    assert notification.error == "SMTP unavailable"
 
     retried = client.post(
         f"/api/v1/tasks/{task.id}/assignment-email/retry"

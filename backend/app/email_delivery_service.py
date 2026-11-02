@@ -40,6 +40,7 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.plain_errors import is_sign_in_failure, plain_error
 from app import email_providers
 from app.meeting.models import (
     EMAIL_DRAFT_STATUS_APPROVAL,
@@ -333,6 +334,8 @@ def is_transient(error: Exception) -> bool:
         return bool(codes) and all(400 <= code < 500 for code in codes)
     if isinstance(error, smtplib.SMTPResponseException):
         return 400 <= error.smtp_code < 500
+    if is_sign_in_failure(error):
+        return False  # a retry is one more failed login
     if isinstance(error, (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError)):
         return True
     if isinstance(error, ValueError):
@@ -341,6 +344,20 @@ def is_transient(error: Exception) -> bool:
 
 
 def _describe(error: Exception) -> str:
+    """What a person sees for a failed delivery: plain words, not the server's reply.
+
+    The reply itself (for example ``535 5.7.8 Username and Password not accepted``) is
+    written to the server log where an administrator can read it.
+    """
+    return plain_error(error, email=True) or type(error).__name__
+
+
+def _server_reply(error: Exception) -> str:
+    """The mail server's own reason, for the bounce record an administrator reads.
+
+    Unlike ``_describe`` this keeps the server's words (``550 5.1.1 No such user``),
+    which say why a message was refused; only the Python wrapper around them is dropped.
+    """
     if isinstance(error, smtplib.SMTPRecipientsRefused):
         parts = [f"{code} {msg.decode(errors='replace') if isinstance(msg, bytes) else msg}"
                  for code, msg in error.recipients.values()]
@@ -350,7 +367,7 @@ def _describe(error: Exception) -> str:
         if isinstance(message, bytes):
             message = message.decode(errors="replace")
         return f"Mail server replied {error.smtp_code}: {message}"
-    return str(error) or type(error).__name__
+    return _describe(error)
 
 
 def _human_delay(seconds: int) -> str:
@@ -426,10 +443,11 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
         except (OSError, smtplib.SMTPException, ValueError) as exc:
             errors.append(exc)
             logger.warning(
-                "E-mail delivery failed draft_id=%s operation=%s error_type=%s",
+                "E-mail delivery failed draft_id=%s operation=%s error_type=%s detail=%s",
                 draft.id,
                 getattr(exc, "smtp_operation", "unknown"),
                 type(exc).__name__,
+                str(exc)[:300],
             )
             results.append({
                 "email": address, "status": "failed", "error": _describe(exc)[:500],
@@ -437,9 +455,13 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
                 "provider": None, "fallback_used": False,
             })
             code = email_providers.smtp_code(exc)
-            if code is not None and code >= 500:
+            if (
+                code is not None
+                and code >= 500
+                and not is_sign_in_failure(exc)
+            ):
                 _add_bounce(draft, recipient=address, bounce_type="hard", source="smtp",
-                            code=code, diagnostic=_describe(exc), message_id=None)
+                            code=code, diagnostic=_server_reply(exc), message_id=None)
         else:
             results.append({
                 "email": address, "status": "sent", "error": None,
@@ -487,6 +509,10 @@ def deliver(db: Session, draft: EmailDraft, now: datetime) -> str:
                               f"{_describe(errors[-1])}"[:1000],
                        now=finished)
     db.commit()
+    if any(is_sign_in_failure(error) for error in errors):
+        from app.notification_service import alert_mail_sign_in_rejected
+
+        alert_mail_sign_in_rejected(db)
     if draft.status == EMAIL_DRAFT_STATUS_FAILED:
         escalate(db, draft)
     return draft.status
@@ -544,7 +570,7 @@ def process_due_emails(db: Session, now: datetime | None = None, limit: int = 20
                 # Someone else already moved it (or the claim was lost); leave it as is.
                 logger.warning("Not marking draft_id=%s failed from status %s", draft_id, draft.status)
                 continue
-            draft.last_error = f"Unexpected error while sending: {exc}"[:1000]
+            draft.last_error = plain_error(exc, email=True)[:1000]
             draft.next_attempt_at = None
             transition(db, draft, EMAIL_DRAFT_STATUS_FAILED, actor_id=SYSTEM_ACTOR,
                        detail="Unexpected error while sending.")

@@ -413,6 +413,8 @@ def test_failed_workflow_uses_exponential_backoff_then_stops_retrying(
     monkeypatch,
 ):
     monkeypatch.setattr("app.workflow_worker._retry_seconds", 5)
+    # Jitter is random (Story 8.4); pin it so the doubling itself is exact here.
+    monkeypatch.setattr("app.workflow_service._jitter_factor", lambda: 1.0)
     run = enqueue_workflow(
         db_session,
         workflow_type="test_retry",
