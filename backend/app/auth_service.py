@@ -14,7 +14,7 @@ from pwdlib import PasswordHash
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.meeting.models import AuthAccount, AuthSession, Employee
+from app.meeting.models import AuthAccount, AuthSession, Employee, SystemAdministrator
 
 logger = logging.getLogger(__name__)
 PASSWORD_HASHER = PasswordHash.recommended()
@@ -121,6 +121,31 @@ def provision_account(
         is_enabled=True,
     )
     db.add(account)
+    if role == "admin":
+        now = datetime.now(timezone.utc)
+        admin_rec = (
+            db.query(SystemAdministrator)
+            .filter(SystemAdministrator.email_normalized == email)
+            .first()
+        )
+        if admin_rec:
+            admin_rec.password_hash = account.password_hash
+            admin_rec.full_name = employee.name
+            admin_rec.is_active = True
+            admin_rec.updated_at = now
+        else:
+            admin_rec = SystemAdministrator(
+                id=str(uuid.uuid4()),
+                employee_id=employee.id,
+                email_normalized=email,
+                password_hash=account.password_hash,
+                full_name=employee.name,
+                role="admin",
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(admin_rec)
     db.commit()
     db.refresh(account)
     return account
@@ -137,7 +162,18 @@ def authenticate_password(
         .filter(AuthAccount.email_normalized == normalized_email)
         .first()
     )
-    stored_hash = account.password_hash if account else _DUMMY_PASSWORD_HASH
+    admin_record = None
+    if account and account.role == "admin":
+        admin_record = (
+            db.query(SystemAdministrator)
+            .filter(SystemAdministrator.email_normalized == normalized_email)
+            .first()
+        )
+    stored_hash = (
+        (admin_record.password_hash if admin_record else account.password_hash)
+        if account
+        else _DUMMY_PASSWORD_HASH
+    )
     try:
         valid_password = PASSWORD_HASHER.verify(password, stored_hash)
     except Exception:

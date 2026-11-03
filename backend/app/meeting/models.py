@@ -1673,6 +1673,39 @@ class AuthAccount(Base):
     )
 
 
+class SystemAdministrator(Base):
+    """Dedicated record and credentials for System Administrator accounts."""
+
+    __tablename__ = "system_administrators"
+    __table_args__ = (
+        UniqueConstraint("email_normalized", name="uq_system_administrators_email"),
+        UniqueConstraint("employee_id", name="uq_system_administrators_employee_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    employee_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    email_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False, default="System Administrator")
+    role: Mapped[str] = mapped_column(String(30), nullable=False, default="admin")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
 class AuthSession(Base):
     """A signed access token's server-side revocation and expiry record."""
 

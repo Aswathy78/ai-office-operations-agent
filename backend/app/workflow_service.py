@@ -44,6 +44,22 @@ WORKFLOW_BACKOFF_CAP_SECONDS = 300
 # runs do not all fire together while the delay still doubles each time.
 WORKFLOW_JITTER_RATIO = 0.5
 
+MAX_WORKFLOW_STEPS = 12
+DEFAULT_WORKFLOW_COST_CAP_USD = 5.0
+DEFAULT_STEP_COST_USD = 0.25
+
+
+def workflow_cost_cap_usd() -> float:
+    raw = os.getenv("WORKFLOW_COST_CAP_USD", "").strip()
+    if not raw:
+        return DEFAULT_WORKFLOW_COST_CAP_USD
+    try:
+        val = float(raw)
+        return val if val > 0 else DEFAULT_WORKFLOW_COST_CAP_USD
+    except ValueError:
+        return DEFAULT_WORKFLOW_COST_CAP_USD
+
+
 WORKFLOW_LABELS = {
     MEETING_WORKFLOW: "Meeting follow-up workflow",
     TASK_REMINDER_WORKFLOW: "Task reminder workflow",
@@ -253,12 +269,11 @@ def claim_workflow(db: Session) -> WorkflowRun | None:
 
 
 def recover_stale_workflows(db: Session, stale_minutes: int = WORKFLOW_STALE_MINUTES) -> int:
-    cutoff = _now() - timedelta(minutes=max(1, stale_minutes))
-    stale = (
-        db.query(WorkflowRun)
-        .filter(WorkflowRun.status == "processing", WorkflowRun.claimed_at < cutoff)
-        .all()
-    )
+    cutoff = _now() - timedelta(minutes=max(0, stale_minutes))
+    stale_query = db.query(WorkflowRun).filter(WorkflowRun.status == "processing")
+    if stale_minutes > 0:
+        stale_query = stale_query.filter(WorkflowRun.claimed_at < cutoff)
+    stale = stale_query.all()
     now = _now()
     failed_steps: dict[str, str | None] = {}
     for run in stale:
@@ -306,6 +321,11 @@ def recover_stale_workflows(db: Session, stale_minutes: int = WORKFLOW_STALE_MIN
     if stale:
         logger.warning("Recovered %d stale workflow run(s)", len(stale))
     return len(stale)
+
+
+def recover_crashed_workflows(db: Session, max_lease_age_seconds: int = 0) -> int:
+    """Immediately recover runs that crashed while in processing state."""
+    return recover_stale_workflows(db, stale_minutes=max(0, max_lease_age_seconds // 60))
 
 
 def get_workflow_steps(db: Session, run_id: str) -> list[WorkflowStep]:
@@ -368,6 +388,20 @@ def record_event(
 ) -> WorkflowEvent:
     """Append to a run's history. The caller commits with its own change."""
     db.flush()  # count events added earlier in this transaction too
+    # Deduplicate lifecycle events for same run, step, attempt, and event_type
+    if event_type in ("step_completed", "run_completed", "delivery_confirmed", "notification_sent", "retry_scheduled"):
+        existing_event = (
+            db.query(WorkflowEvent)
+            .filter(
+                WorkflowEvent.workflow_run_id == run_id,
+                WorkflowEvent.step_key == step_key,
+                WorkflowEvent.attempt_number == attempt_number,
+                WorkflowEvent.event_type == event_type,
+            )
+            .first()
+        )
+        if existing_event is not None:
+            return existing_event
     sequence = (
         db.query(func.coalesce(func.max(WorkflowEvent.sequence), 0))
         .filter(WorkflowEvent.workflow_run_id == run_id)
@@ -491,7 +525,10 @@ def dead_letter_run(
         error_message=error_message,
         attempt_count=run.attempt_count,
         max_attempts=run.max_attempts,
-        payload=dict(run.payload or {}),
+        payload={
+            k: v for k, v in (run.payload or {}).items()
+            if k not in ("steps_executed", "cost_usd")
+        },
         status="open",
         notified_count=0,
         created_at=_now(),

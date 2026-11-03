@@ -26,6 +26,8 @@ from app.meeting.models import (
 )
 from app.workflow_service import (
     CALENDAR_MONITOR_WORKFLOW,
+    DEFAULT_STEP_COST_USD,
+    MAX_WORKFLOW_STEPS,
     MEETING_WORKFLOW,
     TASK_REMINDER_WORKFLOW,
     WORKFLOW_MAX_ATTEMPTS,
@@ -36,6 +38,7 @@ from app.workflow_service import (
     get_workflow_steps,
     recover_stale_workflows,
     record_event,
+    workflow_cost_cap_usd,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,25 @@ def worker_count() -> int:
 
 def _begin_step(db: Session, run: WorkflowRun, step: WorkflowStep) -> None:
     now = datetime.now(timezone.utc)
+    payload = dict(run.payload or {})
+    steps_executed = int(payload.get("steps_executed", 0)) + 1
+    payload["steps_executed"] = steps_executed
+
+    # AC 4: Limit to 12 steps
+    if steps_executed > MAX_WORKFLOW_STEPS:
+        raise PermanentWorkflowError(
+            f"Workflow aborted: step limit of {MAX_WORKFLOW_STEPS} steps exceeded (attempted step {steps_executed})."
+        )
+
+    # AC 4: Limit to cost cap
+    cost_usd = float(payload.get("cost_usd", 0.0))
+    cap_usd = workflow_cost_cap_usd()
+    if cost_usd >= cap_usd:
+        raise PermanentWorkflowError(
+            f"Workflow aborted: cost cap of ${cap_usd:.2f} exceeded (accumulated ${cost_usd:.2f})."
+        )
+
+    run.payload = payload
     step.status = "processing"
     step.started_at = now
     step.attempt_count += 1
@@ -252,6 +274,10 @@ def _finish_step(db: Session, run: WorkflowRun, step: WorkflowStep, checkpoint: 
     run = db.get(WorkflowRun, run.id)
     if run is None:
         raise RuntimeError("Workflow run disappeared before checkpoint persistence.")
+    payload = dict(run.payload or {})
+    step_cost = float(checkpoint.get("cost_usd", DEFAULT_STEP_COST_USD)) if isinstance(checkpoint, dict) else DEFAULT_STEP_COST_USD
+    payload["cost_usd"] = round(float(payload.get("cost_usd", 0.0)) + step_cost, 4)
+    run.payload = payload
     run.updated_at = now
     record_event(
         db,
@@ -404,7 +430,7 @@ def start_workflow_workers() -> bool:
     stop = threading.Event()
     _stop_event = stop
     with SessionLocal() as db:
-        recover_stale_workflows(db)
+        recover_stale_workflows(db, stale_minutes=0)
     _threads = [
         threading.Thread(
             target=_worker_loop,
