@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.meeting.models import Employee
 
 DEVELOPMENT_EMPLOYEES = [
+    {"name": "System Administrator", "email": "admin@northstar.example", "team": "Operations"},
     {"name": "Maya Thompson", "email": "manager@example.com", "team": "Engineering"},
     {"name": "Ava Patel", "email": "ava.patel@northstar.example", "team": "Engineering"},
     {"name": "Marcus Chen", "email": "marcus.chen@northstar.example", "team": "Engineering"},

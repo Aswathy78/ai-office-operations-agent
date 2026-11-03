@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import uuid
-
+import os
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-import os
-
-# Load .env before importing app modules
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=False)
 if "APP_ENV" not in os.environ:
     os.environ["APP_ENV"] = "development"
@@ -17,28 +15,35 @@ if "APP_ENV" not in os.environ:
 from app.auth_service import PASSWORD_HASHER, normalize_email
 from app.db.database import SessionLocal, create_tables
 from app.db.seed_employees import seed_development_employees
-from app.meeting.models import AuthAccount, Employee
+from app.meeting.models import AuthAccount, Employee, SystemAdministrator
 
 DEFAULT_ACCOUNTS = [
     {
-        "name": "Maya Thompson",
-        "email": "manager@example.com",
-        "password": "ManagerPassword123!",
-        "role": "manager",
-        "team": "Engineering",
+        "name": "System Administrator",
+        "email": "admin@northstar.example",
+        "password": "AdminSecurePass123!",
+        "role": "admin",
+        "team": "Operations",
     },
     {
-        "name": "Rahul",
-        "email": "rahulexample.test@gmail.com",
-        "password": "EmployeePassword123!",
+        "name": "Maya Thompson",
+        "email": "manager@example.com",
+        "password": "ManagerSecurePass123!",
         "role": "manager",
         "team": "Engineering",
     },
     {
         "name": "Ava Patel",
         "email": "ava.patel@northstar.example",
-        "password": "EmployeePassword123!",
+        "password": "EmployeeSecurePass123!",
         "role": "employee",
+        "team": "Engineering",
+    },
+    {
+        "name": "Rahul",
+        "email": "rahulexample.test@gmail.com",
+        "password": "EmployeeSecurePass123!",
+        "role": "manager",
         "team": "Engineering",
     },
 ]
@@ -94,6 +99,36 @@ def seed_accounts() -> None:
                 )
                 db.add(account)
                 print(f"[CREATED] {item['role'].capitalize()}: {item['email']} (Password: {item['password']})")
+
+            # Dedicated SystemAdministrator table persistence for admin accounts
+            if item["role"] == "admin":
+                admin_record = (
+                    db.query(SystemAdministrator)
+                    .filter(SystemAdministrator.email_normalized == norm_email)
+                    .first()
+                )
+                now = datetime.now(timezone.utc)
+                if admin_record:
+                    admin_record.password_hash = password_hash
+                    admin_record.full_name = item["name"]
+                    admin_record.is_active = True
+                    admin_record.employee_id = employee.id
+                    admin_record.updated_at = now
+                    print(f"[UPDATED SYSTEM_ADMINISTRATOR TABLE] {item['email']}")
+                else:
+                    admin_record = SystemAdministrator(
+                        id=str(uuid.uuid4()),
+                        employee_id=employee.id,
+                        email_normalized=norm_email,
+                        password_hash=password_hash,
+                        full_name=item["name"],
+                        role="admin",
+                        is_active=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(admin_record)
+                    print(f"[CREATED SYSTEM_ADMINISTRATOR TABLE] {item['email']}")
 
         db.commit()
 
