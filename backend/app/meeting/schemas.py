@@ -483,9 +483,23 @@ class TaskAuditLogResponse(BaseModel):
     actor_id: str
     actor_role: str
     action: str
-    outcome: Literal["applied", "pending_approval", "denied", "rejected"]
+    outcome: Literal["applied", "pending_approval", "denied", "rejected", "system_event"]
     detail: str
     created_at: datetime
+
+
+class EscalationResponse(BaseModel):
+    task_id: str
+    task_title: str
+    assignee_id: str
+    assignee_name: str
+    assignee_email: str
+    due_at: datetime
+    overdue_hours: int
+    missed_reminders: int
+    escalation_timestamp: datetime
+    escalation_status: str
+    escalation_notification_id: str
 
 
 class TaskNotificationResponse(BaseModel):

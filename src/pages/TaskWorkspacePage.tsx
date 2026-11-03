@@ -13,6 +13,7 @@ import {
   type TaskRecord,
 } from '../api/tasks'
 import { EmailDeliveryPanel } from '../components/email/EmailDeliveryPanel'
+import { EscalationPanel } from '../components/tasks/EscalationPanel'
 import { CALENDAR_SYNC_IN_FLIGHT, CalendarSyncStatus } from '../components/tasks/CalendarSyncStatus'
 import { TaskCalendarMonth } from '../components/tasks/TaskCalendarMonth'
 import { TaskManagePanel } from '../components/tasks/TaskManagePanel'
@@ -278,6 +279,8 @@ export function TaskWorkspacePage({ view }: TaskWorkspacePageProps) {
           </button>
         </div>
       </section>
+
+      {isDashboard && canManageTasks && <EscalationPanel />}
 
       {isDashboard && canManageTasks && actor && <EmailDeliveryPanel actor={actor} />}
 

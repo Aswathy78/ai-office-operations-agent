@@ -20,8 +20,10 @@ from app.meeting.models import (
     TaskReassignmentRequest,
     TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
     TASK_REASSIGNMENT_STATUS_PENDING,
+    TASK_STATUS_PENDING,
 )
 from app.meeting.schemas import (
+    EscalationResponse,
     TaskActorRole,
     TaskAuditLogResponse,
     TaskChangeResponse,
@@ -205,6 +207,74 @@ def get_assigned_tasks(
 def get_task_dashboard(db: Session = Depends(get_db)):
     rows = _task_query(db).all()
     return _task_responses(db, rows)
+
+
+@router.get("/escalations", response_model=list[EscalationResponse])
+def get_task_escalations(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    if principal.role == "employee":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Employees cannot access the manager escalation dashboard.",
+        )
+
+    query = (
+        db.query(TaskNotification, Task, Employee)
+        .join(Task, TaskNotification.task_id == Task.id)
+        .join(Employee, Task.assignee_id == Employee.id)
+        .filter(TaskNotification.kind == "escalation")
+        .filter(Task.status == TASK_STATUS_PENDING)
+    )
+
+    if principal.role == "manager":
+        current_emp = (
+            db.query(Employee)
+            .filter((Employee.id == principal.user_id) | (Employee.email == principal.email))
+            .first()
+        )
+        manager_ids = {principal.user_id}
+        if current_emp:
+            manager_ids.add(current_emp.id)
+        query = query.filter(Employee.manager_id.in_(list(manager_ids)))
+    elif principal.role not in ("hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized to access escalations.",
+        )
+
+    results = query.order_by(TaskNotification.created_at.desc()).all()
+    now = datetime.now(timezone.utc)
+    from app.task_reminder_service import count_missed_reminders, _as_utc
+
+    escalations = []
+    seen_tasks = set()
+    for notification, task, assignee in results:
+        if task.id in seen_tasks:
+            continue
+        seen_tasks.add(task.id)
+
+        due_utc = _as_utc(task.due_at)
+        overdue_hours = max(0, int((now - due_utc).total_seconds() // 3600))
+        missed = count_missed_reminders(db, task, now)
+
+        escalations.append(
+            EscalationResponse(
+                task_id=task.id,
+                task_title=task.title,
+                assignee_id=assignee.id,
+                assignee_name=assignee.name,
+                assignee_email=assignee.email,
+                due_at=task.due_at,
+                overdue_hours=overdue_hours,
+                missed_reminders=missed,
+                escalation_timestamp=notification.created_at,
+                escalation_status=notification.status,
+                escalation_notification_id=notification.id,
+            )
+        )
+    return escalations
 
 
 def _ical_stamp(value: datetime) -> str:

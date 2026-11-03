@@ -19,7 +19,7 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261102_02"
+            ).scalar_one() == "20261103_01"
 
         Base.metadata.create_all(bind=engine)
         table_names = set(inspect(engine).get_table_names())
