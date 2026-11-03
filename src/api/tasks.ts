@@ -270,3 +270,22 @@ export function setTaskStatus(
     },
   ).then((response) => readJson<TaskChangeResult>(response))
 }
+
+export interface EscalationRecord {
+  task_id: string
+  task_title: string
+  assignee_id: string
+  assignee_name: string
+  assignee_email: string
+  due_at: string
+  overdue_hours: number
+  missed_reminders: number
+  escalation_timestamp: string
+  escalation_status: string
+  escalation_notification_id: string
+}
+
+export function getTaskEscalations(): Promise<EscalationRecord[]> {
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/escalations`)
+    .then((response) => readJson<EscalationRecord[]>(response))
+}

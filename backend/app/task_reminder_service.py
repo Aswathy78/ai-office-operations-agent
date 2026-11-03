@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 import uuid
 
 from sqlalchemy.exc import IntegrityError
@@ -38,7 +39,9 @@ from app.meeting.models import (
     Employee,
     Meeting,
     Task,
+    TaskAuditLog,
     TaskNotification,
+    TASK_AUDIT_OUTCOME_SYSTEM_EVENT,
     TASK_STATUS_COMPLETED,
     TASK_STATUS_PENDING,
 )
@@ -47,14 +50,67 @@ logger = logging.getLogger(__name__)
 
 FIRST_REMINDER_BEFORE = timedelta(hours=24)
 SECOND_REMINDER_BEFORE = timedelta(hours=2)
+TEN_MIN_BEFORE = timedelta(minutes=10)
 OVERDUE_INTERVAL = timedelta(hours=24)
 MISSED_REMINDERS_BEFORE_ESCALATION = 2
 
+
+def missed_reminders_threshold() -> int:
+    raw = os.getenv("ESCALATION_MISSED_REMINDERS_THRESHOLD")
+    if raw is None or not str(raw).strip():
+        return MISSED_REMINDERS_BEFORE_ESCALATION
+    try:
+        val = int(str(raw).strip())
+        return max(1, val)
+    except (ValueError, TypeError):
+        return MISSED_REMINDERS_BEFORE_ESCALATION
+
+
+def _audit_task_event(
+    db: Session,
+    task_id: str,
+    action: str,
+    detail: str,
+    now: datetime,
+    idempotency_key: str | None = None,
+) -> TaskAuditLog | None:
+    """Write an automated task lifecycle event into TaskAuditLog without duplicating."""
+    if idempotency_key:
+        prefix = f"[{idempotency_key}]"
+        existing = (
+            db.query(TaskAuditLog.id)
+            .filter(
+                TaskAuditLog.task_id == task_id,
+                TaskAuditLog.action == action,
+                TaskAuditLog.detail.startswith(prefix),
+            )
+            .first()
+        )
+        if existing is not None:
+            return None
+        full_detail = f"{prefix} {detail}"
+    else:
+        full_detail = detail
+
+    entry = TaskAuditLog(
+        id=str(uuid.uuid4()),
+        task_id=task_id,
+        actor_id="system",
+        actor_role="system",
+        action=action,
+        outcome=TASK_AUDIT_OUTCOME_SYSTEM_EVENT,
+        detail=full_detail,
+        created_at=now,
+    )
+    db.add(entry)
+    return entry
+
 KIND_REMINDER_24H = "reminder_24h"
 KIND_REMINDER_2H = "reminder_2h"
+KIND_REMINDER_10MIN = "reminder_10min"
 KIND_REMINDER_OVERDUE = "reminder_overdue"
 KIND_ESCALATION = "escalation"
-REMINDER_KINDS = (KIND_REMINDER_24H, KIND_REMINDER_2H, KIND_REMINDER_OVERDUE)
+REMINDER_KINDS = (KIND_REMINDER_24H, KIND_REMINDER_2H, KIND_REMINDER_10MIN, KIND_REMINDER_OVERDUE)
 
 STATUS_PENDING = "pending"
 STATUS_SENT = "sent"
@@ -73,6 +129,8 @@ class ReminderStage:
             return "t24h"
         if self.kind == KIND_REMINDER_2H:
             return "t2h"
+        if self.kind == KIND_REMINDER_10MIN:
+            return "t10min"
         return f"overdue{self.day}"
 
 
@@ -113,8 +171,10 @@ def current_stage(due_at: datetime, now: datetime) -> ReminderStage | None:
         return None
     if now < due_at - SECOND_REMINDER_BEFORE:
         return ReminderStage(KIND_REMINDER_24H)
-    if now < due_at:
+    if now < due_at - TEN_MIN_BEFORE:
         return ReminderStage(KIND_REMINDER_2H)
+    if now < due_at:
+        return ReminderStage(KIND_REMINDER_10MIN)
     day = int((now - due_at) / OVERDUE_INTERVAL) + 1
     return ReminderStage(KIND_REMINDER_OVERDUE, day)
 
@@ -138,6 +198,8 @@ def _stage_from_key(key: str) -> ReminderStage | None:
         return ReminderStage(KIND_REMINDER_24H)
     if suffix == "t2h":
         return ReminderStage(KIND_REMINDER_2H)
+    if suffix == "t10min":
+        return ReminderStage(KIND_REMINDER_10MIN)
     if suffix.startswith("overdue") and suffix[7:].isdigit():
         return ReminderStage(KIND_REMINDER_OVERDUE, int(suffix[7:]))
     return None
@@ -199,6 +261,10 @@ def render_reminder(
             "Please complete it as soon as possible and mark it as Completed, or "
             "talk to your manager if the due date needs to change."
         )
+    elif stage.kind == KIND_REMINDER_10MIN:
+        subject = f"⏰ Starting in 10 minutes: {task.title}"
+        opening = f"Your task is due in approximately 10 minutes, on {due}."
+        closing = "When you are done, mark the task as Completed to stop further reminders."
     else:
         subject = f"Reminder: {task.title} is due {_time_until(task.due_at, now)}"
         opening = f"This is a reminder that your task is due {_time_until(task.due_at, now)}, on {due}."
@@ -280,6 +346,18 @@ def _deliver_once(
         return None
 
     if not _is_open(db, task):
+        _audit_task_event(
+            db,
+            task.id,
+            "reminder_skipped_completed",
+            f"Reminder {kind} skipped because task {task.id} is completed.",
+            now,
+            idempotency_key=f"{key}:skipped",
+        )
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         return None
 
     if notification is None:
@@ -295,6 +373,14 @@ def _deliver_once(
             created_at=now,
         )
         db.add(notification)
+        _audit_task_event(
+            db,
+            task.id,
+            "reminder_scheduled",
+            f"Scheduled {kind} for {recipient.email}.",
+            now,
+            idempotency_key=f"{key}:scheduled",
+        )
     else:
         notification.status = STATUS_PENDING
         notification.subject = subject
@@ -322,6 +408,45 @@ def _deliver_once(
         or _as_utc(inbox_item.email_next_attempt_at) <= _as_utc(now)
     ):
         deliver_notification(db, inbox_item.id, now=now)
+
+    db.refresh(notification)
+    if notification.status == STATUS_SENT:
+        if kind == KIND_ESCALATION:
+            _audit_task_event(
+                db,
+                task.id,
+                "manager_notified",
+                f"Manager {recipient.email} notified of escalation for task {task.title}.",
+                now,
+                idempotency_key=f"{key}:sent",
+            )
+        else:
+            _audit_task_event(
+                db,
+                task.id,
+                "reminder_sent",
+                f"Reminder {kind} sent to {recipient.email}.",
+                now,
+                idempotency_key=f"{key}:sent",
+            )
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+    elif notification.status == STATUS_FAILED:
+        _audit_task_event(
+            db,
+            task.id,
+            "reminder_failed",
+            f"Failed to deliver {kind} to {recipient.email}: {notification.error or 'delivery failed'}.",
+            now,
+            idempotency_key=f"{key}:failed",
+        )
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
     return notification
 
 
@@ -335,6 +460,20 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
 
     stage = current_stage(task.due_at, now)
     if stage is not None:
+        if stage.kind == KIND_REMINDER_OVERDUE and stage.day == 1:
+            _audit_task_event(
+                db,
+                task.id,
+                "task_overdue",
+                f"Task '{task.title}' reached deadline ({_format_due(task.due_at)}) and is overdue.",
+                now,
+                idempotency_key=f"task-overdue:{cycle_key(task)}",
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
         subject, body = render_reminder(task, assignee, meeting, stage, now)
         notification = _deliver_once(
             db, task, recipient=assignee, kind=stage.kind, key=reminder_key(task, stage),
@@ -348,7 +487,8 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
             summary.notifications.append(notification.id)
 
     missed = count_missed_reminders(db, task, now)
-    if missed < MISSED_REMINDERS_BEFORE_ESCALATION:
+    threshold = missed_reminders_threshold()
+    if missed < threshold:
         return
     already = (
         db.query(TaskNotification.status)
@@ -362,6 +502,20 @@ def process_task(db: Session, task: Task, now: datetime, summary: ReminderRunSum
         summary.skipped_no_manager += 1
         logger.warning("No active manager to escalate task_id=%s assignee=%s", task.id, assignee.email)
         return
+
+    _audit_task_event(
+        db,
+        task.id,
+        "escalation_triggered",
+        f"Escalated to manager {manager.email} after {missed} missed reminder(s) (threshold: {threshold}).",
+        now,
+        idempotency_key=f"escalation-triggered:{cycle_key(task)}",
+    )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+
     subject, body = render_escalation(task, assignee, manager, meeting, missed, now)
     notification = _deliver_once(
         db, task, recipient=manager, kind=KIND_ESCALATION, key=escalation_key(task),
