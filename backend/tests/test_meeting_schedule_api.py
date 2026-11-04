@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 from main import app
 from app.db.database import get_db
-from app.meeting.models import Base, Employee
+from app.meeting.models import Base, Employee, Meeting, MeetingParticipant
 
 
 @pytest.fixture()
@@ -194,6 +194,141 @@ def test_api_schedule_conflict_detected(client: TestClient, seeded_directory):
     assert len(data["conflicts"]) >= 1
     assert any(c["attendee_email"] == "marcus.chen@northstar.example" for c in data["conflicts"])
     assert "conflicts" in data["message"].lower()
+
+
+@pytest.mark.parametrize("time_text", ["2.30 PM", "2 30 PM"])
+def test_api_schedule_meeting_with_dot_or_spaced_minutes(
+    client: TestClient,
+    seeded_directory,
+    monkeypatch,
+    time_text: str,
+):
+    organization_timezone = ZoneInfo("Asia/Kolkata")
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", str(organization_timezone))
+    target_date = datetime.now(timezone.utc).astimezone(organization_timezone).date() + timedelta(days=1)
+    expected_start = datetime.combine(
+        target_date,
+        time(14, 30),
+        tzinfo=organization_timezone,
+    ).astimezone(timezone.utc)
+
+    response = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={
+            "prompt": (
+                f"Schedule a project meeting with Ava Patel tomorrow at {time_text}"
+            )
+        },
+        headers={"X-User-Id": "emp-1"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "Completed"
+    assert data["timezone"] == "Asia/Kolkata"
+    assert datetime.fromisoformat(data["meeting"]["start_at"]) == expected_start
+    assert datetime.fromisoformat(data["meeting"]["end_at"]) == (
+        expected_start + timedelta(minutes=30)
+    )
+
+
+def test_api_schedules_available_half_hour_evening_slot(
+    client: TestClient,
+    seeded_directory,
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "UTC")
+    target_date = datetime.now(timezone.utc).date() + timedelta(days=1)
+    date_text = target_date.strftime("%d %b %Y")
+
+    response = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={
+            "prompt": (
+                f"Schedule a project meeting with Ava Patel on {date_text} at 8:30 PM"
+            )
+        },
+        headers={"X-User-Id": "emp-1"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "Completed"
+    assert datetime.fromisoformat(data["meeting"]["start_at"]) == datetime.combine(
+        target_date,
+        time(20, 30),
+        tzinfo=timezone.utc,
+    )
+
+
+def test_api_reports_half_hour_conflict_and_schedules_after_it(
+    client: TestClient,
+    db_session: Session,
+    seeded_directory,
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "UTC")
+    target_date = datetime.now(timezone.utc).date() + timedelta(days=1)
+    busy_meeting = Meeting(
+        id="existing-evening-meeting",
+        organizer_id="emp-1",
+        title="Existing meeting",
+        start_at=datetime.combine(target_date, time(20, 0)),
+        end_at=datetime.combine(target_date, time(20, 50)),
+        join_url="http://localhost:5173/meetings/existing-evening-meeting",
+        status="scheduled",
+    )
+    db_session.add(busy_meeting)
+    db_session.add(
+        MeetingParticipant(
+            id="existing-evening-meeting-ava",
+            meeting_id=busy_meeting.id,
+            user_id="emp-2",
+            email="ava.patel@northstar.example",
+            role="participant",
+        )
+    )
+    db_session.commit()
+    date_text = target_date.strftime("%d %b %Y")
+
+    conflict_response = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={
+            "prompt": (
+                f"Schedule a project meeting with Ava Patel on {date_text} at 8:30 PM"
+            )
+        },
+        headers={"X-User-Id": "emp-1"},
+    )
+
+    assert conflict_response.status_code == 200
+    conflict = conflict_response.json()
+    assert conflict["status"] == "conflict"
+    assert conflict["meeting"] is None
+    assert "Existing meeting" in conflict["message"]
+    assert any(
+        item["attendee_email"] == "ava.patel@northstar.example"
+        for item in conflict["conflicts"]
+    )
+
+    available_response = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={
+            "prompt": (
+                f"Schedule a project meeting with Ava Patel on {date_text} at 9:00 PM"
+            )
+        },
+        headers={"X-User-Id": "emp-1"},
+    )
+
+    assert available_response.status_code == 200
+    available = available_response.json()
+    assert available["status"] == "Completed"
+    assert datetime.fromisoformat(available["meeting"]["start_at"]) == datetime.combine(
+        target_date,
+        time(21, 0),
+        tzinfo=timezone.utc,
+    )
 
 
 def _next_weekday_at_ten_utc() -> datetime:

@@ -103,6 +103,44 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .meeting-meta span { display: inline-flex; align-items: center; gap: 5px; }
 .quick-card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 20px; display: flex; justify-content: space-between; gap: 20px; align-items: center; }
 .quick-card p:not(.eyebrow) { margin: 7px 0 0; color: var(--muted); line-height: 1.55; max-width: 780px; font-size: 13px; }
+.employee-dashboard { gap: 14px; }
+.employee-dashboard > .hero-card { align-items: center; padding: 24px 28px; }
+.employee-dashboard > .hero-card .button { flex: 0 0 auto; }
+.employee-dashboard-timezone { margin: -5px 0 0; color: var(--muted); font-size: 12px; }
+.employee-dashboard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: 16px; }
+.employee-dashboard-section { display: flex; flex-direction: column; min-width: 0; background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: 0 2px 8px rgba(15,45,82,.035); }
+.employee-dashboard-section .section-heading { align-items: center; min-height: 42px; margin-bottom: 10px; }
+.employee-dashboard-section .section-heading > svg { color: var(--blue); }
+.employee-dashboard-section > .text-link { align-self: flex-start; margin-top: auto; padding-top: 16px; }
+.employee-dashboard-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.employee-dashboard-item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid var(--border); }
+.employee-dashboard-item > div:first-child { display: grid; min-width: 0; gap: 5px; }
+.employee-dashboard-item strong { color: var(--navy); font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
+.employee-dashboard-item > div:first-child > span { color: var(--muted); font-size: 12px; line-height: 1.4; }
+.employee-dashboard-item > .button { flex: 0 0 auto; min-height: 36px; }
+.employee-dashboard-task-summary, .employee-dashboard-task-status, .employee-dashboard-actions, .employee-dashboard-approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.employee-dashboard-task-summary { margin: 4px 0 14px; }
+.employee-dashboard-task-summary > span { display: inline-flex; gap: 5px; align-items: center; border-radius: 8px; background: #f3f6fa; padding: 10px 12px; color: var(--muted); font-size: 12px; }
+.employee-dashboard-task-summary strong { color: var(--navy); font-size: 16px; }
+.employee-dashboard-task-status { justify-content: flex-end; }
+.employee-dashboard-task-status .status-pill, .employee-dashboard-approval-actions > .status-pill { white-space: nowrap; }
+.employee-dashboard-approval-actions { justify-content: flex-end; }
+.employee-dashboard-actions .button { min-height: 34px; padding: 0 10px; }
+.employee-dashboard .status-pill { font-size: 10px; line-height: 1.3; }
+.employee-dashboard-more { margin: 8px 0 0; color: var(--muted); font-size: 11px; }
+.employee-dashboard-view-all { margin-top: auto; }
+.employee-dashboard-empty { margin: 0; padding: 14px 0; color: var(--muted); font-size: 13px; }
+.employee-dashboard-section .meetings-loading { min-height: 80px; margin: 0; }
+@media (max-width: 820px) {
+  .employee-dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 520px) {
+  .employee-dashboard > .hero-card { align-items: flex-start; flex-direction: column; padding: 22px; }
+  .employee-dashboard-section { padding: 16px; }
+  .employee-dashboard-item { align-items: flex-start; }
+  .employee-dashboard-task-status, .employee-dashboard-approval-actions { align-items: flex-start; flex-direction: column; }
+  .employee-dashboard-actions { width: 100%; }
+}
 .text-link { color: #1d5eb1; font-size: 13px; font-weight: 800; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; text-decoration: none; }
 .state-card { min-height: 420px; background: #fff; border: 1px solid var(--border); border-radius: 14px; padding: 42px; display: grid; justify-items: center; align-content: center; text-align: center; gap: 9px; }
 .state-card h2 { margin: 0; font-size: 25px; }

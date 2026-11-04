@@ -557,16 +557,19 @@ describe('User Story 5.3 — Meeting Rescheduling by Chat', () => {
     expect(screen.getByText(/conflicts with an existing meeting/i)).toBeInTheDocument()
   })
 
-  it('handles API failure gracefully for reschedule commands', async () => {
+  it('shows an actionable message when the meeting service cannot be reached', async () => {
     const user = userEvent.setup()
-    vi.mocked(scheduleMeetingNL).mockRejectedValueOnce(new Error('Network error'))
+    vi.mocked(scheduleMeetingNL).mockRejectedValueOnce(new TypeError('Failed to fetch'))
 
     render(<ChatPage />)
-    await user.type(screen.getByLabelText('Message Corporate Chatbox'), "Move tomorrow's standup to 4 PM")
+    await user.type(
+      screen.getByLabelText('Message Corporate Chatbox'),
+      'Schedule a project meeting tomorrow at 9 AM with Ava',
+    )
     await user.click(screen.getByRole('button', { name: 'Send message' }))
 
     await waitFor(() => {
-      expect(screen.getByText(/Network error/i)).toBeInTheDocument()
+      expect(screen.getByText(/meeting service could not be reached/i)).toBeInTheDocument()
     })
   })
 

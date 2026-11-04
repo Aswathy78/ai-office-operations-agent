@@ -364,7 +364,15 @@ def test_failure_after_five_attempts_is_never_completed(client, db_session, rahu
     assert sync.attempt_count == 5
     assert "completed" not in seen
     assert provider.writes == 5
-    shown = client.get("/api/v1/tasks/", params={"assignee_email": rahul.email}).json()[0]["calendar_sync"]
+    shown = client.get(
+        "/api/v1/tasks/",
+        params={
+            "assignee_email": rahul.email,
+            "actor_id": rahul.id,
+            "actor_role": "employee",
+            "actor_email": rahul.email,
+        },
+    ).json()[0]["calendar_sync"]
     assert shown["status"] == "failed" and shown["last_error"]
 
 
@@ -459,11 +467,19 @@ def test_new_change_after_failure_starts_fresh_attempts(db_session, rahul, provi
 
 def test_task_list_shows_exactly_one_calendar_status(client, db_session, rahul, provider):
     task = _task(db_session, rahul)
-    before = client.get("/api/v1/tasks/", params={"assignee_email": rahul.email}).json()[0]
+    before = client.get(
+        "/api/v1/tasks/",
+        params={
+            "assignee_email": rahul.email,
+            "actor_id": rahul.id,
+            "actor_role": "employee",
+            "actor_email": rahul.email,
+        },
+    ).json()[0]
     assert before["calendar_sync"] is None  # not picked up yet
 
     sync_service.run_sync_pass(db_session)
-    after = client.get("/api/v1/tasks/dashboard").json()
+    after = client.get("/api/v1/tasks/dashboard", params=MANAGER).json()
     [shown] = [t for t in after if t["id"] == task.id]
     assert shown["calendar_sync"]["status"] == "completed"
     assert shown["calendar_sync"]["provider"] == "local"
@@ -481,7 +497,15 @@ def test_calendar_times_are_sent_as_utc(client, db_session, rahul, provider):
     """SQLite drops the timezone; the API must still mark times as UTC so browsers show local time."""
     _task(db_session, rahul)
     sync_service.run_sync_pass(db_session)
-    shown = client.get("/api/v1/tasks/", params={"assignee_email": rahul.email}).json()[0]["calendar_sync"]
+    shown = client.get(
+        "/api/v1/tasks/",
+        params={
+            "assignee_email": rahul.email,
+            "actor_id": rahul.id,
+            "actor_role": "employee",
+            "actor_email": rahul.email,
+        },
+    ).json()[0]["calendar_sync"]
     synced = datetime.fromisoformat(shown["last_synced_at"].replace("Z", "+00:00"))
     assert synced.utcoffset() == timedelta(0)
     assert abs((synced - datetime.now(timezone.utc)).total_seconds()) < 60

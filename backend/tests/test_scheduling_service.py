@@ -81,6 +81,11 @@ def test_parse_time_of_day():
     assert parse_time_of_day("meeting tomorrow at 14:00") == (14, 0)
 
 
+@pytest.mark.parametrize("time_text", ["2.30 PM", "2 30 PM"])
+def test_parse_time_of_day_accepts_dot_and_spaced_minutes(time_text: str):
+    assert parse_time_of_day(f"meeting tomorrow at {time_text}") == (14, 30)
+
+
 def test_parse_explicit_month_day_date():
     reference_local = datetime(2026, 10, 17, 8, 52, tzinfo=ZoneInfo("Asia/Kolkata"))
 

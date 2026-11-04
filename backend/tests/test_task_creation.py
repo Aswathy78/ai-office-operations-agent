@@ -214,7 +214,10 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     assert sent_to == [employee.email]
     assert db_session.query(TaskNotification).filter_by(task_id=task.id).count() == 1
 
-    dashboard = client.get("/api/v1/tasks/dashboard")
+    dashboard = client.get(
+        "/api/v1/tasks/dashboard",
+        params={"actor_id": ORGANIZER_ID, "actor_role": "manager"},
+    )
     assert dashboard.status_code == 200
     dashboard_task = dashboard.json()[0]
     assert dashboard_task["meeting_id"] == meeting.id
@@ -224,7 +227,13 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     assert dashboard_task["assignee_name"] == employee.name
 
     assigned_tasks = client.get(
-        f"/api/v1/tasks/?assignee_email={employee.email}"
+        "/api/v1/tasks/",
+        params={
+            "assignee_email": employee.email,
+            "actor_id": employee.id,
+            "actor_role": "employee",
+            "actor_email": employee.email,
+        },
     )
     assert assigned_tasks.status_code == 200
     assert [row["id"] for row in assigned_tasks.json()] == [task.id]
@@ -470,7 +479,12 @@ def test_local_deadline_is_saved_and_returned_as_utc_for_calendar(
 
     tasks_response = client.get(
         "/api/v1/tasks/",
-        params={"assignee_email": employee.email},
+        params={
+            "assignee_email": employee.email,
+            "actor_id": employee.id,
+            "actor_role": "employee",
+            "actor_email": employee.email,
+        },
     )
     assert tasks_response.status_code == 200
     due_at = datetime.fromisoformat(tasks_response.json()[0]["due_at"])
