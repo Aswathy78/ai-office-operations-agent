@@ -294,7 +294,7 @@ def list_documents(
 )
 def semantic_search(
     q: str = Query(..., min_length=1, max_length=1000),
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(5, ge=1, le=5),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ) -> SemanticSearchResponse:

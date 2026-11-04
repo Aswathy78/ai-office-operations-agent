@@ -48,7 +48,10 @@ export interface SemanticSearchResult {
   content: string
   score: number
   document_version: number
+  page_label: string | null
 }
+
+const MAX_SEMANTIC_SEARCH_RESULTS = 5
 
 function isSemanticSearchResult(value: unknown): value is SemanticSearchResult {
   if (typeof value !== 'object' || value === null) return false
@@ -59,6 +62,7 @@ function isSemanticSearchResult(value: unknown): value is SemanticSearchResult {
     || !('content' in value)
     || !('score' in value)
     || !('document_version' in value)
+    || !('page_label' in value)
   ) {
     return false
   }
@@ -69,15 +73,17 @@ function isSemanticSearchResult(value: unknown): value is SemanticSearchResult {
     && typeof value.content === 'string'
     && typeof value.score === 'number'
     && typeof value.document_version === 'number'
+    && (typeof value.page_label === 'string' || value.page_label === null)
   )
 }
 
 export async function searchDocuments(
   query: string,
-  limit: number = 10,
+  limit: number = MAX_SEMANTIC_SEARCH_RESULTS,
   signal?: AbortSignal,
 ): Promise<SemanticSearchResult[]> {
-  const params = new URLSearchParams({ q: query, limit: String(limit) })
+  const boundedLimit = Math.min(Math.max(limit, 1), MAX_SEMANTIC_SEARCH_RESULTS)
+  const params = new URLSearchParams({ q: query, limit: String(boundedLimit) })
   const response = await apiFetch(`${API_BASE_URL}/api/v1/documents/search?${params}`, {
     signal,
   })

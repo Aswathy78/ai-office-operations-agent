@@ -2912,11 +2912,11 @@ The AI Office Operations Agent supports document ingestion, indexing, and semant
 ### Features
 
 * **Document extraction:** Extracts text from supported documents for indexing and retrieval.
-* **Heading-aware chunking:** Splits extracted content into meaningful chunks while preserving heading context, targeting 500–800 tokens with approximately 100-token overlap where feasible.
-* **Metadata management:** Associates chunks with source document, document version, department, and access-control metadata.
-* **Embedding generation:** Generates and persists embeddings for semantic retrieval.
-* **Asynchronous indexing:** Processes documents asynchronously and tracks indexing status.
-* **Indexing status:** Displays document processing and indexing states, including successful and failed processing.
+* **Heading-aware chunking:** Uses the embedding model tokenizer (`jinaai/jina-embeddings-v2-small-en`) to target 500–800 tokens with an exact 100-token overlap between chunks on the same page. Short pages and terminal fragments remain unpadded rather than adding or duplicating source text.
+* **Metadata management:** Stores source filename, document version, department, and access-control metadata with each chunk. Relevance scores are calculated per query and are not persisted.
+* **Vector storage:** Persists embeddings in the `sqlite-vec` vector table in the application SQLite database and retrieves them for semantic search.
+* **Asynchronous indexing:** The upload API persists the document and returns while the background document processor extracts, chunks, embeds, and indexes it.
+* **Indexing status:** The Company Files page polls processing documents every three seconds and displays Uploaded, Processing, Ready, and Failed states.
 * **Semantic search:** Retrieves relevant passages from indexed documents based on the meaning of a user's query.
 * **Access control:** Applies document permissions when retrieving content.
 

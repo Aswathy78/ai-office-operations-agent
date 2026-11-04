@@ -29,8 +29,25 @@ def embedding_model() -> TextEmbedding:
     )
 
 
+def _model_and_tokenizer():
+    model = embedding_model().model
+    tokenizer = model.tokenizer
+    if tokenizer is None:
+        raise RuntimeError("The embedding model tokenizer is unavailable.")
+    tokenizer.no_truncation()
+    return model, tokenizer
+
+
 def count_tokens(text: str) -> int:
-    return embedding_model().token_count(text)
+    model, _ = _model_and_tokenizer()
+    return model.token_count(text)
+
+
+def encode_tokens(text: str) -> tuple[list[int], list[tuple[int, int]]]:
+    model, tokenizer = _model_and_tokenizer()
+    model.token_count(text)
+    encoded = tokenizer.encode(text, add_special_tokens=False)
+    return encoded.ids, encoded.offsets
 
 
 def embed_passages(texts: Iterable[str]) -> list[list[float]]:

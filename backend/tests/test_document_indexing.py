@@ -1,9 +1,11 @@
 """Focused Story 7.2 chunking, vector persistence, and retry tests."""
 
+import re
 import uuid
+from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -11,6 +13,7 @@ from app.documents.chunking import chunk_document_text
 from app.documents.indexing import index_document, search_documents
 from app.documents.models import (
     DOC_STATUS_READY,
+    DOC_STATUS_UPLOADED,
     INDEX_STATUS_FAILED,
     INDEX_STATUS_PENDING,
     INDEX_STATUS_PROCESSING,
@@ -101,6 +104,134 @@ def test_heading_aware_chunks_respect_token_limit_and_overlap():
     assert all(chunk.content.startswith("Travel Policy\n\n") for chunk in chunks)
     for previous, following in zip(chunks, chunks[1:]):
         assert previous.content.split()[-100:] == following.content.split()[2:102]
+
+
+def test_model_tokenizer_chunks_use_exact_overlap_and_respect_page_boundaries(
+    document_test_tokenizer,
+):
+    tokenizer = document_test_tokenizer
+    page_one = (
+        "[Page 1]\n# Travel Policy\n\n"
+        + " ".join(f"pageoneword{i}" for i in range(1600))
+    )
+    page_two = (
+        "\n\n[Page 2]\n# Travel Policy\n\n"
+        + " ".join(f"pageoneword{i}" for i in range(1700, 2900))
+    )
+    chunks = chunk_document_text(
+        page_one + page_two,
+        tokenizer.count,
+        encode_tokens=tokenizer.encode,
+    )
+
+    assert len(chunks) >= 5
+    assert all(500 <= chunk.token_count <= 800 for chunk in chunks)
+    assert {chunk.location for chunk in chunks} == {"Page 1", "Page 2"}
+    for previous, following in zip(chunks, chunks[1:]):
+        if previous.location != following.location:
+            assert "pageoneword1599" not in following.content
+            continue
+        following_body = following.content.removeprefix("Travel Policy\n\n")
+        previous_ids, _ = tokenizer.encode(previous.content)
+        following_ids, _ = tokenizer.encode(following_body)
+        assert previous_ids[-100:] == following_ids[:100]
+
+
+def test_model_tokenizer_rebalances_final_chunk_when_page_has_enough_content(
+    document_test_tokenizer,
+):
+    tokenizer = document_test_tokenizer
+    text = (
+        "[Page 1]\n# Travel Policy\n\n"
+        + " ".join(f"travelword{i}" for i in range(1350))
+    )
+    chunks = chunk_document_text(
+        text,
+        tokenizer.count,
+        encode_tokens=tokenizer.encode,
+    )
+
+    assert len(chunks) == 2
+    assert all(500 <= chunk.token_count <= 800 for chunk in chunks)
+    previous_ids, _ = tokenizer.encode(chunks[0].content)
+    following_body = chunks[1].content.removeprefix("Travel Policy\n\n")
+    following_ids, _ = tokenizer.encode(following_body)
+    assert previous_ids[-100:] == following_ids[:100]
+
+
+def test_embedding_token_helpers_disable_tokenizer_truncation(monkeypatch):
+    import app.documents.embeddings as embeddings
+
+    class LimitedTokenizer:
+        limit = 3
+
+        def no_truncation(self):
+            self.limit = None
+
+        def encode(self, text, add_special_tokens=False):
+            assert not add_special_tokens
+            matches = list(re.finditer(r"\S+", text))
+            if self.limit is not None:
+                matches = matches[: self.limit]
+            return SimpleNamespace(
+                ids=list(range(len(matches))),
+                offsets=[match.span() for match in matches],
+            )
+
+    class LimitedModel:
+        def __init__(self):
+            self.tokenizer = LimitedTokenizer()
+
+        def token_count(self, text):
+            return len(self.tokenizer.encode(text).ids)
+
+    model = LimitedModel()
+    monkeypatch.setattr(
+        embeddings,
+        "embedding_model",
+        lambda: SimpleNamespace(model=model),
+    )
+
+    text = "one two three four five"
+    assert embeddings.count_tokens(text) == 5
+    token_ids, offsets = embeddings.encode_tokens(text)
+    assert len(token_ids) == len(offsets) == 5
+
+
+def test_short_pages_are_not_padded_or_merged_across_page_boundaries(
+    document_test_tokenizer,
+):
+    tokenizer = document_test_tokenizer
+    text = (
+        "[Page 1]\n# First Page\n\n"
+        + " ".join(f"firstpageword{i}" for i in range(20))
+        + "\n\n[Page 2]\n# Second Page\n\n"
+        + " ".join(f"secondpageword{i}" for i in range(20))
+    )
+    chunks = chunk_document_text(
+        text,
+        tokenizer.count,
+        encode_tokens=tokenizer.encode,
+    )
+
+    assert [chunk.location for chunk in chunks] == ["Page 1", "Page 2"]
+    assert all(chunk.token_count < 500 for chunk in chunks)
+    assert "secondpageword" not in chunks[0].content
+    assert "firstpageword" not in chunks[1].content
+
+
+def test_page_too_short_for_two_valid_overlapping_chunks_is_rejected(
+    document_test_tokenizer,
+):
+    tokenizer = document_test_tokenizer
+    text = " ".join(f"word{i}" for i in range(850))
+
+    with pytest.raises(ValueError, match="cannot be divided"):
+        chunk_document_text(
+            text,
+            tokenizer.count,
+            encode_tokens=tokenizer.encode,
+        )
 
 
 def test_short_heading_sections_are_packed_to_target_with_boundary_overlap():
@@ -374,9 +505,88 @@ def test_index_persists_acl_department_version_and_is_idempotent(
     assert chunks[0].department == "Operations"
     assert chunks[0].acl_employee_ids == ["index-owner", "index-viewer"]
     assert chunks[0].heading == "Benefits"
+    assert chunks[0].source == doc.original_filename
     assert chunks[0].embedding == [1.0, 0.0]
     assert not index_document(db_session, doc.id)
     assert db_session.query(DocumentChunk).filter_by(document_id=doc.id).count() == 1
+
+
+def test_search_vectors_are_persisted_and_retrieved_from_sqlite_vec(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [1.0, 0.0])
+    doc = _ready_document(db_session, text="## Benefits\n\nHealth coverage.")
+
+    assert index_document(db_session, doc.id)
+    chunk = db_session.query(DocumentChunk).filter_by(document_id=doc.id).one()
+    vector_json = db_session.execute(
+        text(
+            "SELECT vec_to_json(embedding) FROM document_chunk_vectors "
+            "WHERE chunk_id = :chunk_id"
+        ),
+        {"chunk_id": chunk.id},
+    ).scalar_one()
+    assert vector_json == "[1.000000,0.000000]"
+
+    chunk.embedding = [0.0, 1.0]
+    db_session.commit()
+    results = search_documents(
+        db_session,
+        actor_id=doc.owner_id,
+        query="health coverage",
+    )
+    assert results
+    assert results[0].score > 0
+    assert not hasattr(DocumentChunk, "score")
+
+
+def test_vector_write_failure_rolls_back_chunk_and_embedding_replacement(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+    doc = _ready_document(db_session, text="## Benefits\n\nOriginal coverage.")
+    assert index_document(db_session, doc.id)
+    original_chunk = db_session.query(DocumentChunk).filter_by(document_id=doc.id).one()
+    original_chunk_id = original_chunk.id
+
+    doc.extracted_text = "## Benefits\n\nReplacement coverage."
+    doc.indexing_status = INDEX_STATUS_PENDING
+    db_session.commit()
+
+    def fail_vector_write(*args, **kwargs):
+        raise RuntimeError("controlled vector storage failure")
+
+    monkeypatch.setattr(indexing, "persist_vectors", fail_vector_write)
+    assert not index_document(db_session, doc.id)
+
+    db_session.refresh(doc)
+    assert doc.indexing_status == INDEX_STATUS_FAILED
+    assert (
+        db_session.query(DocumentChunk).filter_by(document_id=doc.id).one().id
+        == original_chunk_id
+    )
+    assert db_session.execute(
+        text(
+            "SELECT vec_to_json(embedding) FROM document_chunk_vectors "
+            "WHERE chunk_id = :chunk_id"
+        ),
+        {"chunk_id": original_chunk_id},
+    ).scalar_one() == "[1.000000,0.000000]"
 
 
 def test_reindex_rebuild_is_atomic_and_preserves_version_and_acl(
@@ -587,6 +797,152 @@ def test_semantic_search_obeys_document_acl(
         actor_id="unrelated-employee",
         query=query,
     ) == []
+
+
+def test_semantic_search_caps_results_and_collapses_overlapping_passages(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    owner = Employee(
+        id="search-owner",
+        name="Search Owner",
+        email="search-owner@example.test",
+        is_active=True,
+        team="Operations",
+    )
+    db_session.add(owner)
+    documents = [
+        Document(
+            id=f"search-doc-{index}",
+            original_filename=f"handbook-{index}.pdf",
+            stored_filename=f"stored-{index}.pdf",
+            file_size=100,
+            mime_type="application/pdf",
+            owner_id=owner.id,
+            status=DOC_STATUS_READY,
+            indexing_status=INDEX_STATUS_READY,
+            version=1,
+            extracted_text="Prompt engineering reference.",
+        )
+        for index in range(3)
+    ]
+    db_session.add_all(documents)
+    passages = [
+        (0, "Prompt engineering designs precise instructions that guide language models."),
+        (
+            0,
+            "Prompt engineering designs precise instructions that guide advanced language models.",
+        ),
+        (0, "Prompt engineering methods refine context for useful model responses."),
+        (1, "Prompt engineering helps users create clear instructions for AI systems."),
+        (1, "Prompt engineering improves model responses through careful context design."),
+        (2, "Prompt engineering defines how instructions guide generated answers."),
+        (2, "Payroll processing follows monthly financial reconciliation procedures."),
+    ]
+    db_session.add_all(
+        [
+            DocumentChunk(
+                id=str(uuid.uuid4()),
+                document_id=documents[document_index].id,
+                document_version=1,
+                chunk_index=chunk_index,
+                heading="Prompt engineering",
+                content=content,
+                token_count=_word_token_count(content),
+                department="Operations",
+                acl_employee_ids=[owner.id],
+                embedding=[1.0, 0.0],
+                embedding_model=indexing.EMBEDDING_MODEL,
+            )
+            for chunk_index, (document_index, content) in enumerate(passages)
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [1.0, 0.0])
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda candidate_passages: [[1.0, 0.0] for _ in candidate_passages],
+    )
+
+    results = search_documents(
+        db_session,
+        actor_id=owner.id,
+        query="What is prompt engineering?",
+        limit=5,
+    )
+
+    assert len(results) == 5
+    assert [result.score for result in results] == sorted(
+        (result.score for result in results),
+        reverse=True,
+    )
+    assert all("prompt engineering" in result.content.casefold() for result in results)
+    assert all("payroll" not in result.content.casefold() for result in results)
+    assert not any(
+        "advanced language models" in result.content.casefold()
+        and "precise instructions" in result.content.casefold()
+        for result in results
+    )
+    assert len({(result.document_id, result.content) for result in results}) == len(results)
+    assert search_documents(
+        db_session,
+        actor_id=owner.id,
+        query="How does lunar agriculture work?",
+        limit=5,
+    ) == []
+
+
+def test_semantic_search_collapses_long_overlapping_passages(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+
+    doc = _ready_document(db_session, text="Prompt engineering reference.")
+    doc.indexing_status = INDEX_STATUS_READY
+    shared_overlap = " ".join(f"sharedtoken{index}" for index in range(50))
+    contents = [
+        f"Prompt engineering develops useful guidance. {shared_overlap} "
+        + " ".join(f"firstunique{index}" for index in range(50)),
+        f"Prompt engineering develops useful guidance. {shared_overlap} "
+        + " ".join(f"secondunique{index}" for index in range(50)),
+    ]
+    db_session.add_all(
+        [
+            DocumentChunk(
+                id=str(uuid.uuid4()),
+                document_id=doc.id,
+                document_version=doc.version,
+                chunk_index=index,
+                heading="Prompt engineering",
+                content=content,
+                token_count=_word_token_count(content),
+                department="Operations",
+                acl_employee_ids=[doc.owner_id],
+                embedding=[1.0, 0.0],
+                embedding_model=indexing.EMBEDDING_MODEL,
+            )
+            for index, content in enumerate(contents)
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(indexing, "embed_query", lambda query: [1.0, 0.0])
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+
+    results = search_documents(
+        db_session,
+        actor_id=doc.owner_id,
+        query="What is prompt engineering?",
+    )
+
+    assert len(results) == 1
 
 
 def test_policy_queries_rank_the_matching_section_and_filter_unrelated_chunks(
@@ -1157,3 +1513,66 @@ def test_worker_processes_all_pending_index_jobs_after_one_job_errors(
 
     assert len(attempted) == 2
     assert set(attempted) == {first.id, second.id}
+
+
+def test_infeasible_page_fails_indexing_and_does_not_block_next_document(
+    db_session: Session,
+    document_test_tokenizer,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import app.documents.indexing as indexing
+    import app.documents.processor as processor
+
+    tokenizer = document_test_tokenizer
+    monkeypatch.setattr(indexing, "count_tokens", tokenizer.count)
+    monkeypatch.setattr(indexing, "encode_tokens", tokenizer.encode)
+    monkeypatch.setattr(
+        indexing,
+        "embed_passages",
+        lambda passages: [[1.0, 0.0] for _ in passages],
+    )
+    def read_uploaded_file(filename: str) -> bytes:
+        assert filename.endswith(".docx")
+        return b"content"
+
+    monkeypatch.setattr(processor, "read_document_file", read_uploaded_file)
+    page_text = " ".join(f"pageword{i}" for i in range(850))
+    assert tokenizer.count(page_text) == 850
+
+    def extract_infeasible_page(data: bytes, mime_type: str, filename: str):
+        assert data == b"content"
+        assert mime_type.endswith("wordprocessingml.document")
+        assert filename == "handbook.docx"
+        return SimpleNamespace(text=page_text, page_count=1, ocr_used=False)
+
+    monkeypatch.setattr(processor, "extract_text", extract_infeasible_page)
+
+    failed_doc = _ready_document(db_session, text="Pending upload.")
+    failed_doc.status = DOC_STATUS_UPLOADED
+    db_session.commit()
+    next_doc = Document(
+        id=str(uuid.uuid4()),
+        original_filename="next.docx",
+        stored_filename=f"{uuid.uuid4()}.docx",
+        file_size=100,
+        mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        owner_id=failed_doc.owner_id,
+        status=DOC_STATUS_READY,
+        indexing_status=INDEX_STATUS_PENDING,
+        extracted_text=" ".join(f"validword{i}" for i in range(40)),
+    )
+    db_session.add(next_doc)
+    db_session.commit()
+
+    processor.process_one_document(db_session, failed_doc)
+    db_session.refresh(failed_doc)
+
+    assert failed_doc.status == DOC_STATUS_READY
+    assert failed_doc.indexing_status == INDEX_STATUS_FAILED
+    assert "cannot be divided" in failed_doc.indexing_failure_reason
+
+    processor._process_pending_index_documents(db_session)
+    db_session.refresh(next_doc)
+
+    assert next_doc.indexing_status == INDEX_STATUS_READY
+    assert db_session.query(DocumentChunk).filter_by(document_id=next_doc.id).count() == 1
