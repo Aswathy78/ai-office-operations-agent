@@ -196,16 +196,28 @@ def _task_row(db: Session, task_id: str) -> tuple[Task, Employee, Meeting | None
 
 @router.get("/", response_model=list[TaskResponse])
 def get_assigned_tasks(
-    assignee_email: str = Query(min_length=1),
+    assignee_email: str | None = Query(default=None, min_length=1),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
-    rows = _task_query(db).filter(Employee.email == assignee_email).all()
+    query = _task_query(db)
+    if principal.role in {"manager", "hr_operations", "admin"} and assignee_email:
+        query = query.filter(Employee.email == assignee_email)
+    else:
+        query = query.filter(Task.assignee_id == principal.user_id)
+    rows = query.all()
     return _task_responses(db, rows)
 
 
 @router.get("/dashboard", response_model=list[TaskResponse])
-def get_task_dashboard(db: Session = Depends(get_db)):
-    rows = _task_query(db).all()
+def get_task_dashboard(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    query = _task_query(db)
+    if principal.role not in {"manager", "hr_operations", "admin"}:
+        query = query.filter(Task.assignee_id == principal.user_id)
+    rows = query.all()
     return _task_responses(db, rows)
 
 

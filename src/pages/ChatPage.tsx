@@ -266,13 +266,18 @@ export function ChatPage() {
         }
       } catch (reason) {
         lastClarificationPromptRef.current = null
+        const errorMessage = reason instanceof TypeError
+          ? 'The meeting service could not be reached. Check your connection and try again.'
+          : reason instanceof Error
+            ? reason.message
+            : 'unknown error'
         setMessages((current) => [
           ...current,
           {
             id: nextId(),
             role: 'assistant',
             tone: 'error',
-            text: `I couldn't schedule that meeting: ${reason instanceof Error ? reason.message : 'unknown error'}`,
+            text: `I couldn't schedule that meeting: ${errorMessage}`,
           },
         ])
       } finally {
