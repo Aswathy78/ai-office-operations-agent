@@ -8,6 +8,7 @@ from typing import Callable
 
 TOKEN_TARGET = 650
 TOKEN_OVERLAP = 100
+TOKEN_MINIMUM = 500
 TOKEN_LIMIT = 800
 
 _MARKDOWN_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
@@ -224,6 +225,189 @@ def _pack_underfilled_chunks(
     return packed
 
 
+def _chunk_with_model_tokenizer(
+    text: str,
+    count_tokens: Callable[[str], int],
+    encode_tokens: Callable[[str], tuple[list[int], list[tuple[int, int]]]],
+    *,
+    target_tokens: int,
+    overlap_tokens: int,
+    max_tokens: int,
+) -> list[DocumentChunkText]:
+    sections = _split_sections(text)
+    page_groups: list[list[tuple[str | None, str, str | None]]] = []
+    for section in sections:
+        if not page_groups or page_groups[-1][-1][2] != section[2]:
+            page_groups.append([])
+        page_groups[-1].append(section)
+
+    chunks: list[DocumentChunkText] = []
+    for page_sections in page_groups:
+        page_text = ""
+        section_boundaries: list[tuple[int, int, str | None]] = []
+        for heading, body, _ in page_sections:
+            if page_text:
+                page_text += "\n\n"
+            section_start = len(page_text)
+            heading_context = f"{heading}\n\n" if heading else ""
+            body_start = section_start + len(heading_context)
+            page_text += f"{heading_context}{body}"
+            section_boundaries.append((section_start, body_start, heading))
+
+        token_ids, offsets = encode_tokens(page_text)
+        if len(token_ids) != len(offsets):
+            raise RuntimeError("The embedding tokenizer returned invalid token offsets.")
+        if not token_ids:
+            continue
+
+        safe_boundaries = {0, len(token_ids)}
+        safe_boundaries.update(
+            token_index
+            for token_index, (character_offset, _) in enumerate(offsets)
+            if character_offset == 0 or page_text[character_offset - 1].isspace()
+        )
+
+        def section_at(token_index: int) -> tuple[int, int, str | None]:
+            character_offset = offsets[token_index][0]
+            selected = section_boundaries[0]
+            for boundary in section_boundaries[1:]:
+                if boundary[0] > character_offset:
+                    break
+                selected = boundary
+            return selected
+
+        def render(start: int, end: int) -> tuple[str, str | None]:
+            _, body_start, heading = section_at(start)
+            repeated_heading = (
+                f"{heading}\n\n"
+                if heading and offsets[start][0] >= body_start
+                else ""
+            )
+            start_offset = offsets[start][0]
+            end_offset = (
+                offsets[end][0]
+                if end < len(token_ids)
+                else len(page_text)
+            )
+            content = repeated_heading + page_text[start_offset:end_offset]
+            return content, heading
+
+        page_content, _ = render(0, len(token_ids))
+        page_token_count = count_tokens(page_content)
+        if page_token_count < TOKEN_MINIMUM:
+            chunks.append(
+                DocumentChunkText(
+                    content=page_content,
+                    heading=section_at(0)[2],
+                    token_count=page_token_count,
+                    location=page_sections[0][2],
+                )
+            )
+            continue
+
+        def remaining_chunk_count(token_count: int) -> int | None:
+            if token_count <= max_tokens:
+                return 1
+            capacity_per_additional_chunk = max_tokens - overlap_tokens
+            chunk_count = (
+                token_count - overlap_tokens + capacity_per_additional_chunk - 1
+            ) // capacity_per_additional_chunk
+            minimum_page_tokens = (
+                chunk_count * (TOKEN_MINIMUM - overlap_tokens) + overlap_tokens
+            )
+            return chunk_count if token_count >= minimum_page_tokens else None
+
+        start = 0
+        while start < len(token_ids):
+            remaining_content, remaining_heading = render(start, len(token_ids))
+            remaining_count = count_tokens(remaining_content)
+            if remaining_count <= max_tokens and remaining_count >= TOKEN_MINIMUM:
+                end = len(token_ids)
+                content, heading = remaining_content, remaining_heading
+            else:
+                remaining_tokens = len(token_ids) - start
+                chunks_needed = remaining_chunk_count(remaining_tokens)
+                if chunks_needed is None or chunks_needed <= 1:
+                    raise ValueError(
+                        "This page cannot be divided into 500-800 token chunks "
+                        "with the requested exact overlap."
+                    )
+                desired_span = (
+                    remaining_tokens + (chunks_needed - 1) * overlap_tokens
+                    + chunks_needed - 1
+                ) // chunks_needed
+                preferred_span = min(max(target_tokens, TOKEN_MINIMUM), max_tokens)
+                candidate_range = range(
+                    start + overlap_tokens + 1,
+                    min(len(token_ids), start + max_tokens) + 1,
+                )
+                preferred_candidates = sorted(
+                    (
+                        boundary
+                        for boundary in candidate_range
+                        if boundary in safe_boundaries
+                        and boundary - overlap_tokens in safe_boundaries
+                    ),
+                    key=lambda boundary: (
+                        abs(boundary - start - desired_span),
+                        abs(boundary - start - preferred_span),
+                    ),
+                )
+                fallback_candidates = sorted(
+                    candidate_range,
+                    key=lambda boundary: (
+                        abs(boundary - start - desired_span),
+                        abs(boundary - start - preferred_span),
+                    ),
+                )
+                selected_end: int | None = None
+                for candidates in (preferred_candidates, fallback_candidates):
+                    for candidate_end in candidates:
+                        candidate_content, _ = render(start, candidate_end)
+                        candidate_count = count_tokens(candidate_content)
+                        if not TOKEN_MINIMUM <= candidate_count <= max_tokens:
+                            continue
+                        next_start = candidate_end - overlap_tokens
+                        next_token_count = len(token_ids) - next_start
+                        if remaining_chunk_count(next_token_count) is None:
+                            continue
+                        if next_token_count <= max_tokens:
+                            next_content, _ = render(next_start, len(token_ids))
+                            next_count = count_tokens(next_content)
+                            if not TOKEN_MINIMUM <= next_count <= max_tokens:
+                                continue
+                        selected_end = candidate_end
+                        break
+                    if selected_end is not None:
+                        break
+                if selected_end is None:
+                    raise ValueError(
+                        "The embedding tokenizer could not produce chunks with "
+                        "the requested token limits and exact overlap."
+                    )
+                end = selected_end
+                content, heading = render(start, end)
+
+            token_count = count_tokens(content)
+            if not TOKEN_MINIMUM <= token_count <= max_tokens:
+                raise ValueError("A document chunk is outside the embedding token limits.")
+            chunks.append(
+                DocumentChunkText(
+                    content=content,
+                    heading=heading,
+                    token_count=token_count,
+                    location=page_sections[0][2],
+                )
+            )
+            if end >= len(token_ids):
+                break
+            if end - start <= overlap_tokens:
+                raise ValueError("The requested overlap leaves no room for chunk content.")
+            start = end - overlap_tokens
+
+    return chunks
+
+
 def chunk_document_text(
     text: str,
     count_tokens: Callable[[str], int],
@@ -231,10 +415,26 @@ def chunk_document_text(
     target_tokens: int = TOKEN_TARGET,
     overlap_tokens: int = TOKEN_OVERLAP,
     max_tokens: int = TOKEN_LIMIT,
+    encode_tokens: Callable[
+        [str], tuple[list[int], list[tuple[int, int]]]
+    ] | None = None,
 ) -> list[DocumentChunkText]:
-    """Split extracted text into bounded chunks, repeating heading context."""
+    """Split extracted text with model tokens, preserving headings and page boundaries.
+
+    Short pages stay unpadded and are not merged across page boundaries.
+    """
     if not text.strip():
         return []
+
+    if encode_tokens is not None:
+        return _chunk_with_model_tokenizer(
+            text,
+            count_tokens,
+            encode_tokens,
+            target_tokens=target_tokens,
+            overlap_tokens=overlap_tokens,
+            max_tokens=max_tokens,
+        )
 
     chunks: list[DocumentChunkText] = []
     for heading, section_text, location in _split_sections(text):

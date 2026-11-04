@@ -45,6 +45,11 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function getSearchPreview(content: string): string {
+  const preview = content.replace(/\s+/g, ' ').trim()
+  return preview.length > 320 ? `${preview.slice(0, 320).trimEnd()}…` : preview
+}
+
 function formatDate(iso: string): string {
   try {
     return new Intl.DateTimeFormat(undefined, {
@@ -183,7 +188,7 @@ export function DocumentsPage() {
         timedOut = true
         controller.abort()
       }, 60_000)
-      void searchDocuments(query, 10, controller.signal)
+      void searchDocuments(query, 5, controller.signal)
         .then((results) => {
           if (active) setSemanticResults(results)
         })
@@ -711,11 +716,15 @@ export function DocumentsPage() {
             <p style={{ margin: 0, color: 'var(--muted)' }}>No matching indexed content was found.</p>
           ) : (
             <div style={{ display: 'grid', gap: '10px' }}>
-              {semanticResults.map((result, index) => (
+              {semanticResults.slice(0, 5).map((result, index) => (
                 <article key={`${result.document_id}-${result.document_version}-${index}`} style={{ borderTop: '1px solid var(--border)', paddingTop: '10px' }}>
                   <strong>{result.filename}</strong>
                   {result.heading && <div style={{ color: 'var(--muted)', fontSize: '12px', marginTop: '2px' }}>{result.heading}</div>}
-                  <p style={{ margin: '6px 0 0', fontSize: '13px', whiteSpace: 'pre-wrap' }}>{result.content}</p>
+                  <div style={{ color: 'var(--muted)', fontSize: '12px', marginTop: '4px' }}>
+                    Page {result.page_label?.replace(/^\[|\]$/g, '').replace(/^Page\s+/i, '') ?? 'Not available'}
+                    {' · '}Relevance {result.score.toFixed(2)}
+                  </div>
+                  <p style={{ margin: '6px 0 0', fontSize: '13px' }}>{getSearchPreview(result.content)}</p>
                 </article>
               ))}
             </div>
@@ -856,75 +865,7 @@ export function DocumentsPage() {
 
                       {/* Status */}
                       <td style={{ padding: '14px 16px' }}>
-                        {doc.status === 'ready' ? (
-                          <div>
-                            <span
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '5px',
-                                padding: '3px 8px',
-                                borderRadius: '6px',
-                                background: '#def7ec',
-                                color: '#03543f',
-                                fontSize: '11px',
-                                fontWeight: '700',
-                              }}
-                            >
-                              <CheckCircle2 size={12} />
-                              Extracted
-                            </span>
-                            <div style={{ marginTop: '5px', fontSize: '11px' }}>
-                              {doc.indexing_status === 'ready' ? (
-                                <span style={{ color: '#03543f', fontWeight: 700 }}>
-                                  <CheckCircle2 size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
-                                  Indexed
-                                </span>
-                              ) : doc.indexing_status === 'pending' || doc.indexing_status === 'processing' ? (
-                                <span style={{ color: '#1e429f' }}>
-                                  <RefreshCw size={12} className={doc.indexing_status === 'processing' ? 'animate-spin' : ''} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
-                                  {doc.indexing_status === 'processing' ? 'Indexing' : 'Index queued'}
-                                </span>
-                              ) : (
-                                <div>
-                                  <span
-                                    title={doc.indexing_failure_reason || 'Indexing failed'}
-                                    style={{ color: '#9b1c1c', display: 'block', maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                                  >
-                                    <AlertCircle size={12} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
-                                    {doc.indexing_failure_reason || 'Indexing failed'}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    className="button secondary"
-                                    style={{ minHeight: '26px', padding: '0 7px', fontSize: '11px', marginTop: '4px' }}
-                                    onClick={() => void handleRetryIndexing(doc)}
-                                    disabled={retryingIndexId === doc.id}
-                                  >
-                                    {retryingIndexId === doc.id ? 'Retrying...' : 'Retry index'}
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ) : doc.status === 'processing' || doc.status === 'uploaded' ? (
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '5px',
-                              padding: '3px 8px',
-                              borderRadius: '6px',
-                              background: '#e1effe',
-                              color: '#1e429f',
-                              fontSize: '11px',
-                              fontWeight: '700',
-                            }}
-                          >
-                            <RefreshCw size={12} className="animate-spin" />
-                            {doc.status === 'processing' ? 'Extracting' : 'Queued'}
-                          </span>
-                        ) : (
+                        {doc.status === 'failed' || doc.indexing_status === 'failed' ? (
                           <div>
                             <span
                               style={{
@@ -938,12 +879,12 @@ export function DocumentsPage() {
                                 fontSize: '11px',
                                 fontWeight: '700',
                               }}
-                              title={doc.failure_reason || 'Processing failed'}
+                              title={doc.failure_reason || doc.indexing_failure_reason || 'Processing failed'}
                             >
                               <AlertCircle size={12} />
                               Failed
                             </span>
-                            {doc.failure_reason && (
+                            {(doc.failure_reason || doc.indexing_failure_reason) && (
                               <div
                                 style={{
                                   fontSize: '11px',
@@ -954,9 +895,61 @@ export function DocumentsPage() {
                                   textOverflow: 'ellipsis',
                                   whiteSpace: 'nowrap',
                                 }}
-                                title={doc.failure_reason}
+                                title={doc.failure_reason || doc.indexing_failure_reason || undefined}
                               >
-                                {doc.failure_reason}
+                                {doc.failure_reason || doc.indexing_failure_reason}
+                              </div>
+                            )}
+                            {doc.status === 'ready' && doc.indexing_status === 'failed' && (
+                              <button
+                                type="button"
+                                className="button secondary"
+                                style={{ minHeight: '26px', padding: '0 7px', fontSize: '11px', marginTop: '4px' }}
+                                onClick={() => void handleRetryIndexing(doc)}
+                                disabled={retryingIndexId === doc.id}
+                              >
+                                {retryingIndexId === doc.id ? 'Retrying...' : 'Retry index'}
+                              </button>
+                            )}
+                          </div>
+                        ) : doc.status === 'ready' && doc.indexing_status === 'ready' ? (
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '5px',
+                              padding: '3px 8px',
+                              borderRadius: '6px',
+                              background: '#def7ec',
+                              color: '#03543f',
+                              fontSize: '11px',
+                              fontWeight: '700',
+                            }}
+                          >
+                          <CheckCircle2 size={12} />
+                          Ready
+                          </span>
+                        ) : (
+                          <div>
+                            <span
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '5px',
+                                padding: '3px 8px',
+                                borderRadius: '6px',
+                                background: '#e1effe',
+                                color: '#1e429f',
+                                fontSize: '11px',
+                                fontWeight: '700',
+                              }}
+                            >
+                              <RefreshCw size={12} className="animate-spin" />
+                              {doc.status === 'uploaded' ? 'Uploaded' : 'Processing'}
+                            </span>
+                            {doc.status === 'ready' && (
+                              <div style={{ marginTop: '5px', fontSize: '11px', color: '#1e429f' }}>
+                                {doc.indexing_status === 'processing' ? 'Indexing' : 'Index queued'}
                               </div>
                             )}
                           </div>

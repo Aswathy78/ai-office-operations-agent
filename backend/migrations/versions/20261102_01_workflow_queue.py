@@ -17,63 +17,84 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "workflow_runs",
-        sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("workflow_type", sa.String(length=60), nullable=False),
-        sa.Column("meeting_id", sa.String(length=36), nullable=True),
-        sa.Column("idempotency_key", sa.String(length=200), nullable=False),
-        sa.Column("priority", sa.Integer(), nullable=False),
-        sa.Column("status", sa.String(length=20), nullable=False),
-        sa.Column("payload", sa.JSON(), nullable=False),
-        sa.Column("attempt_count", sa.Integer(), nullable=False),
-        sa.Column("max_attempts", sa.Integer(), nullable=False),
-        sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "status IN ('pending', 'processing', 'retrying', 'completed', 'failed')",
-            name="ck_workflow_runs_status",
-        ),
-        sa.CheckConstraint("priority >= 0", name="ck_workflow_runs_priority"),
-        sa.ForeignKeyConstraint(["meeting_id"], ["meetings.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("idempotency_key", name="uq_workflow_runs_idempotency_key"),
-    )
-    op.create_index(
-        "ix_workflow_runs_queue",
-        "workflow_runs",
-        ["status", "next_attempt_at", "priority", "created_at"],
-    )
-    op.create_index("ix_workflow_runs_meeting", "workflow_runs", ["meeting_id", "created_at"])
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
 
-    op.create_table(
-        "workflow_steps",
-        sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("workflow_run_id", sa.String(length=36), nullable=False),
-        sa.Column("step_key", sa.String(length=80), nullable=False),
-        sa.Column("step_order", sa.Integer(), nullable=False),
-        sa.Column("status", sa.String(length=20), nullable=False),
-        sa.Column("checkpoint", sa.JSON(), nullable=True),
-        sa.Column("attempt_count", sa.Integer(), nullable=False),
-        sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint(
-            "status IN ('pending', 'processing', 'completed', 'failed', 'retrying')",
-            name="ck_workflow_steps_status",
+    if not inspector.has_table("workflow_runs"):
+        op.create_table(
+            "workflow_runs",
+            sa.Column("id", sa.String(length=36), nullable=False),
+            sa.Column("workflow_type", sa.String(length=60), nullable=False),
+            sa.Column("meeting_id", sa.String(length=36), nullable=True),
+            sa.Column("idempotency_key", sa.String(length=200), nullable=False),
+            sa.Column("priority", sa.Integer(), nullable=False),
+            sa.Column("status", sa.String(length=20), nullable=False),
+            sa.Column("payload", sa.JSON(), nullable=False),
+            sa.Column("attempt_count", sa.Integer(), nullable=False),
+            sa.Column("max_attempts", sa.Integer(), nullable=False),
+            sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("claimed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("last_error", sa.Text(), nullable=True),
+            sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                "status IN ('pending', 'processing', 'retrying', 'completed', 'failed')",
+                name="ck_workflow_runs_status",
+            ),
+            sa.CheckConstraint("priority >= 0", name="ck_workflow_runs_priority"),
+            sa.ForeignKeyConstraint(["meeting_id"], ["meetings.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("idempotency_key", name="uq_workflow_runs_idempotency_key"),
+        )
+
+    if not inspector.has_table("workflow_steps"):
+        op.create_table(
+            "workflow_steps",
+            sa.Column("id", sa.String(length=36), nullable=False),
+            sa.Column("workflow_run_id", sa.String(length=36), nullable=False),
+            sa.Column("step_key", sa.String(length=80), nullable=False),
+            sa.Column("step_order", sa.Integer(), nullable=False),
+            sa.Column("status", sa.String(length=20), nullable=False),
+            sa.Column("checkpoint", sa.JSON(), nullable=True),
+            sa.Column("attempt_count", sa.Integer(), nullable=False),
+            sa.Column("last_error", sa.Text(), nullable=True),
+            sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+            sa.CheckConstraint(
+                "status IN ('pending', 'processing', 'completed', 'failed', 'retrying')",
+                name="ck_workflow_steps_status",
+            ),
+            sa.ForeignKeyConstraint(
+                ["workflow_run_id"], ["workflow_runs.id"], ondelete="CASCADE"
+            ),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("workflow_run_id", "step_key", name="uq_workflow_steps_run_key"),
+        )
+
+    for table_name, index_name, columns in (
+        (
+            "workflow_runs",
+            "ix_workflow_runs_queue",
+            ["status", "next_attempt_at", "priority", "created_at"],
         ),
-        sa.ForeignKeyConstraint(["workflow_run_id"], ["workflow_runs.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("workflow_run_id", "step_key", name="uq_workflow_steps_run_key"),
-    )
-    op.create_index(
-        "ix_workflow_steps_run_order", "workflow_steps", ["workflow_run_id", "step_order"]
-    )
+        (
+            "workflow_runs",
+            "ix_workflow_runs_meeting",
+            ["meeting_id", "created_at"],
+        ),
+        (
+            "workflow_steps",
+            "ix_workflow_steps_run_order",
+            ["workflow_run_id", "step_order"],
+        ),
+    ):
+        existing_indexes = {
+            index["name"] for index in sa.inspect(bind).get_indexes(table_name)
+        }
+        if index_name not in existing_indexes:
+            op.create_index(index_name, table_name, columns)
 
 
 def downgrade() -> None:

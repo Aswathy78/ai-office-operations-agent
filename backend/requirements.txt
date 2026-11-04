@@ -36,6 +36,7 @@ filetype>=1.2
 
 # Story 7.2: local CPU embeddings; model inference runs in-process.
 fastembed==0.9.1
+sqlite-vec==0.1.6
 
 # Dependencies used by the backend test suite.
 pytest==9.1.1

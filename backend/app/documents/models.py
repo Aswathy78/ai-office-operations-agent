@@ -219,6 +219,7 @@ class DocumentChunk(Base):
     )
     document_version: Mapped[int] = mapped_column(Integer, nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(512), nullable=True)
     heading: Mapped[str | None] = mapped_column(Text, nullable=True)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
