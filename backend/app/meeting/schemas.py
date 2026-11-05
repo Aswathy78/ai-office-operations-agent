@@ -858,4 +858,45 @@ class MeetingParticipantResponse(BaseModel):
     role: str
 
 
+class TeamDashboardSummaryResponse(BaseModel):
+    team_name: str
+    total_members: int
+    total_tasks: int
+    open_tasks: int
+    due_soon_tasks: int
+    overdue_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class TeamMemberWorkloadResponse(BaseModel):
+    employee_id: str
+    employee_name: str
+    employee_email: str
+    total_tasks: int
+    open_tasks: int
+    due_soon_tasks: int
+    overdue_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class TeamOverdueTaskResponse(BaseModel):
+    task_id: str
+    title: str
+    assignee_id: str
+    assignee_name: str
+    assignee_email: str
+    due_at: datetime
+    overdue_hours: int
+    priority: str
+    status: str
+
+
+class TeamDashboardResponse(BaseModel):
+    summary: TeamDashboardSummaryResponse
+    members: list[TeamMemberWorkloadResponse]
+    overdue_tasks: list[TeamOverdueTaskResponse]
+
+
 TaskResponse.model_rebuild()

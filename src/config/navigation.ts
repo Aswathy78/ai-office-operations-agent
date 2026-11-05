@@ -37,6 +37,9 @@ export const navigationItems: NavigationItem[] = [
 export const getNavigationForRole = (role: UserRole) =>
   navigationItems.filter((item) => item.allowedRoles.includes(role))
 
-export const routePermissions: Record<string, UserRole[]> = Object.fromEntries(
-  navigationItems.map((item) => [item.route, item.allowedRoles]),
-)
+export const routePermissions: Record<string, UserRole[]> = {
+  ...Object.fromEntries(
+    navigationItems.map((item) => [item.route, item.allowedRoles]),
+  ),
+  '/team-dashboard': ['manager', 'hr_operations', 'admin'],
+}

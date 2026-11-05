@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse, Response
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
@@ -20,10 +21,15 @@ from app.meeting.models import (
     TaskReassignmentRequest,
     TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
     TASK_REASSIGNMENT_STATUS_PENDING,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_PENDING,
 )
 from app.meeting.schemas import (
     EscalationResponse,
+    TeamDashboardResponse,
+    TeamDashboardSummaryResponse,
+    TeamMemberWorkloadResponse,
+    TeamOverdueTaskResponse,
     TaskActorRole,
     TaskAuditLogResponse,
     TaskChangeResponse,
@@ -54,7 +60,7 @@ from app.task_calendar_sync_service import (
     retry_failed,
     run_sync_pass,
 )
-from app.task_reminder_service import run_task_reminders
+from app.task_reminder_service import FIRST_REMINDER_BEFORE, _as_utc, run_task_reminders
 from app.task_service import attempt_assignment_email
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
@@ -287,6 +293,236 @@ def get_task_escalations(
             )
         )
     return escalations
+
+
+@router.get("/team-dashboard", response_model=TeamDashboardResponse)
+def get_manager_team_dashboard(
+    team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    if principal.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Employees cannot access the manager team dashboard.",
+        )
+
+    current_emp = (
+        db.query(Employee)
+        .filter((Employee.id == principal.user_id) | (Employee.email == principal.email))
+        .first()
+    )
+    manager_ids = {principal.user_id}
+    if current_emp:
+        manager_ids.add(current_emp.id)
+
+    manager_team = current_emp.team if current_emp and current_emp.team else principal.team
+
+    # Team isolation rules:
+    # 1. Managers see ONLY their own team. Query parameter is ignored for managers to prevent manipulation.
+    # 2. Primary hierarchy boundary: employees where manager_id matches the manager.
+    # 3. Fallback for unassigned manager_id: employees in the same team without another manager.
+    if principal.role == "manager":
+        team_filter_clauses = [Employee.manager_id.in_(list(manager_ids))]
+        if manager_team:
+            team_filter_clauses.append(
+                and_(
+                    Employee.manager_id.is_(None),
+                    func.lower(Employee.team) == manager_team.casefold(),
+                    ~Employee.id.in_(list(manager_ids)),
+                )
+            )
+        team_members = (
+            db.query(Employee)
+            .filter(
+                Employee.is_active.is_(True),
+                or_(*team_filter_clauses),
+            )
+            .order_by(Employee.name.asc())
+            .all()
+        )
+        resolved_team_name = manager_team or "My Team"
+    else:
+        # HR Operations / Admin
+        resolved_team_name = team or manager_team or "Organization"
+        emp_query = db.query(Employee).filter(Employee.is_active.is_(True))
+        if team:
+            emp_query = emp_query.filter(func.lower(Employee.team) == team.casefold())
+        elif manager_team:
+            emp_query = emp_query.filter(func.lower(Employee.team) == manager_team.casefold())
+        team_members = emp_query.order_by(Employee.name.asc()).all()
+
+    now = datetime.now(timezone.utc)
+    due_soon_threshold = now + FIRST_REMINDER_BEFORE
+
+    if not team_members:
+        return TeamDashboardResponse(
+            summary=TeamDashboardSummaryResponse(
+                team_name=resolved_team_name,
+                total_members=0,
+                total_tasks=0,
+                open_tasks=0,
+                due_soon_tasks=0,
+                overdue_tasks=0,
+                completed_tasks=0,
+                completion_rate=0.0,
+            ),
+            members=[],
+            overdue_tasks=[],
+        )
+
+    member_ids = [m.id for m in team_members]
+
+    # Aggregate task counts per team member in a single database query
+    stats_query = (
+        db.query(
+            Task.assignee_id,
+            func.count(Task.id).label("total"),
+            func.coalesce(
+                func.sum(case((Task.status == TASK_STATUS_COMPLETED, 1), else_=0)), 0
+            ).label("completed"),
+            func.coalesce(
+                func.sum(case((Task.status == TASK_STATUS_PENDING, 1), else_=0)), 0
+            ).label("open"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                Task.status == TASK_STATUS_PENDING,
+                                Task.due_at < now,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("overdue"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                Task.status == TASK_STATUS_PENDING,
+                                Task.due_at >= now,
+                                Task.due_at <= due_soon_threshold,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("due_soon"),
+        )
+        .filter(Task.assignee_id.in_(member_ids))
+        .group_by(Task.assignee_id)
+        .all()
+    )
+
+    stats_by_assignee = {
+        row.assignee_id: {
+            "total": int(row.total),
+            "completed": int(row.completed),
+            "open": int(row.open),
+            "overdue": int(row.overdue),
+            "due_soon": int(row.due_soon),
+        }
+        for row in stats_query
+    }
+
+    # Fetch separate overdue tasks in a single query
+    overdue_rows = (
+        db.query(Task, Employee)
+        .join(Employee, Task.assignee_id == Employee.id)
+        .filter(
+            Task.assignee_id.in_(member_ids),
+            Task.status == TASK_STATUS_PENDING,
+            Task.due_at < now,
+        )
+        .order_by(Task.due_at.asc())
+        .all()
+    )
+
+    members_response = []
+    total_tasks_sum = 0
+    open_tasks_sum = 0
+    due_soon_tasks_sum = 0
+    overdue_tasks_sum = 0
+    completed_tasks_sum = 0
+
+    for emp in team_members:
+        emp_stats = stats_by_assignee.get(
+            emp.id,
+            {"total": 0, "completed": 0, "open": 0, "overdue": 0, "due_soon": 0},
+        )
+        emp_total = emp_stats["total"]
+        emp_completed = emp_stats["completed"]
+        emp_completion_rate = (
+            round((emp_completed / emp_total) * 100, 1) if emp_total > 0 else 0.0
+        )
+
+        total_tasks_sum += emp_total
+        open_tasks_sum += emp_stats["open"]
+        due_soon_tasks_sum += emp_stats["due_soon"]
+        overdue_tasks_sum += emp_stats["overdue"]
+        completed_tasks_sum += emp_completed
+
+        members_response.append(
+            TeamMemberWorkloadResponse(
+                employee_id=emp.id,
+                employee_name=emp.name,
+                employee_email=emp.email,
+                total_tasks=emp_total,
+                open_tasks=emp_stats["open"],
+                due_soon_tasks=emp_stats["due_soon"],
+                overdue_tasks=emp_stats["overdue"],
+                completed_tasks=emp_completed,
+                completion_rate=emp_completion_rate,
+            )
+        )
+
+    overall_completion_rate = (
+        round((completed_tasks_sum / total_tasks_sum) * 100, 1)
+        if total_tasks_sum > 0
+        else 0.0
+    )
+
+    overdue_response = []
+    for task, assignee in overdue_rows:
+        due_utc = _as_utc(task.due_at)
+        overdue_hours = max(0, int((now - due_utc).total_seconds() // 3600))
+        overdue_response.append(
+            TeamOverdueTaskResponse(
+                task_id=task.id,
+                title=task.title,
+                assignee_id=assignee.id,
+                assignee_name=assignee.name,
+                assignee_email=assignee.email,
+                due_at=due_utc,
+                overdue_hours=overdue_hours,
+                priority=task.priority,
+                status=task.status,
+            )
+        )
+
+    summary_response = TeamDashboardSummaryResponse(
+        team_name=resolved_team_name,
+        total_members=len(team_members),
+        total_tasks=total_tasks_sum,
+        open_tasks=open_tasks_sum,
+        due_soon_tasks=due_soon_tasks_sum,
+        overdue_tasks=overdue_tasks_sum,
+        completed_tasks=completed_tasks_sum,
+        completion_rate=overall_completion_rate,
+    )
+
+    return TeamDashboardResponse(
+        summary=summary_response,
+        members=members_response,
+        overdue_tasks=overdue_response,
+    )
 
 
 def _ical_stamp(value: datetime) -> str:

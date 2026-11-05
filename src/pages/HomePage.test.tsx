@@ -41,6 +41,11 @@ vi.mock('../api/notifications', () => ({
 
 vi.mock('../api/tasks', () => ({
   getMyTasks: vi.fn(),
+  getTeamDashboard: vi.fn().mockResolvedValue({
+    summary: { team_name: 'Engineering', total_members: 0, total_tasks: 0, open_tasks: 0, due_soon_tasks: 0, overdue_tasks: 0, completed_tasks: 0, completion_rate: 0 },
+    members: [],
+    overdue_tasks: [],
+  }),
 }))
 
 afterEach(() => {
@@ -318,11 +323,11 @@ describe('employee home dashboard', () => {
 
   it('keeps the existing non-employee home page unchanged', () => {
     authValue.user = {
-      id: 'manager-1',
-      name: 'Maya Manager',
-      email: 'maya@example.test',
-      role: 'manager',
-      department: 'Engineering',
+      id: 'admin-1',
+      name: 'System Admin',
+      email: 'admin@example.test',
+      role: 'admin',
+      department: 'Operations',
     }
 
     render(<MemoryRouter><HomePage /></MemoryRouter>)

@@ -23,6 +23,7 @@ import { NotificationsPage } from './pages/NotificationsPage'
 import { NotificationPreferencesPage } from './pages/NotificationPreferencesPage'
 import { MyApprovalsPage } from './pages/MyApprovalsPage'
 import { WorkflowQueuePage } from './pages/WorkflowQueuePage'
+import { ManagerDashboard } from './pages/ManagerDashboard'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -71,6 +72,7 @@ function AppRoutes() {
       <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><TaskWorkspacePage view="mine" /></ProtectedAppPage>} />
       <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
       <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
+      <Route path="/team-dashboard" element={<ProtectedAppPage path="/team-dashboard"><ManagerDashboard /></ProtectedAppPage>} />
       <Route path="/documents" element={<ProtectedAppPage path="/documents"><DocumentsPage /></ProtectedAppPage>} />
       <Route path="/approvals" element={<ProtectedAppPage path="/approvals"><ApprovalsPage /></ProtectedAppPage>} />
       <Route path="/my-approvals" element={<ProtectedAppPage path="/my-approvals"><MyApprovalsPage /></ProtectedAppPage>} />
