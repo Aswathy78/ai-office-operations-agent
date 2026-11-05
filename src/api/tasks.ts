@@ -337,3 +337,84 @@ export function getTeamDashboard(team?: string): Promise<TeamDashboardData> {
   return apiFetch(`${API_BASE_URL}/api/v1/tasks/team-dashboard${query}`)
     .then((response) => readJson<TeamDashboardData>(response))
 }
+
+// ---------------------------------------------------------------------------
+// Story 9.3 – Manager Operational Monitoring Portal
+// ---------------------------------------------------------------------------
+
+export interface ActionItemMonitorRow {
+  action_item_id: string
+  task_description: string
+  owner_name: string | null
+  owner_email: string | null
+  deadline_at: string | null
+  ownership_status: string
+  review_status: string
+  meeting_id: string
+  meeting_title: string
+}
+
+export interface TaskStatusRow {
+  task_id: string
+  title: string
+  assignee_name: string
+  assignee_email: string
+  priority: string
+  due_at: string | null
+  status: string
+  email_status: string | null
+  email_error: string | null
+  calendar_status: string | null
+  calendar_error: string | null
+  calendar_provider: string | null
+  calendar_attempt_count: number | null
+}
+
+export interface WorkflowFailureRow {
+  run_id: string
+  workflow_type: string
+  status: string
+  last_error: string | null
+  attempt_count: number
+  max_attempts: number
+  created_at: string
+  updated_at: string
+  run_link: string
+}
+
+export interface FailureReasonRow {
+  category: 'email' | 'calendar' | 'workflow' | 'notification' | string
+  error_message: string
+  count: number
+  last_occurred_at: string
+}
+
+export interface OperationalMonitoringSummary {
+  team_name: string
+  total_action_items: number
+  action_items_pending_review: number
+  total_tasks_monitored: number
+  email_failed_count: number
+  calendar_failed_count: number
+  workflow_failed_count: number
+  total_failures: number
+}
+
+export interface OperationalMonitoringData {
+  summary: OperationalMonitoringSummary
+  action_items: ActionItemMonitorRow[]
+  task_status_rows: TaskStatusRow[]
+  workflow_failures: WorkflowFailureRow[]
+  failure_reasons: FailureReasonRow[]
+}
+
+export function getOperationalMonitoring(team?: string): Promise<OperationalMonitoringData> {
+  const query = team ? `?${new URLSearchParams({ team })}` : ''
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/operational-monitoring${query}`)
+    .then((response) => readJson<OperationalMonitoringData>(response))
+}
+
+export function getOperationalMonitoringExportUrl(team?: string): string {
+  const query = team ? `?${new URLSearchParams({ team })}` : ''
+  return `${API_BASE_URL}/api/v1/tasks/operational-monitoring/export.csv${query}`
+}
