@@ -289,3 +289,51 @@ export function getTaskEscalations(): Promise<EscalationRecord[]> {
   return apiFetch(`${API_BASE_URL}/api/v1/tasks/escalations`)
     .then((response) => readJson<EscalationRecord[]>(response))
 }
+
+
+export interface TeamDashboardSummary {
+  team_name: string
+  total_members: number
+  total_tasks: number
+  open_tasks: number
+  due_soon_tasks: number
+  overdue_tasks: number
+  completed_tasks: number
+  completion_rate: number
+}
+
+export interface TeamMemberWorkload {
+  employee_id: string
+  employee_name: string
+  employee_email: string
+  total_tasks: number
+  open_tasks: number
+  due_soon_tasks: number
+  overdue_tasks: number
+  completed_tasks: number
+  completion_rate: number
+}
+
+export interface TeamOverdueTask {
+  task_id: string
+  title: string
+  assignee_id: string
+  assignee_name: string
+  assignee_email: string
+  due_at: string
+  overdue_hours: number
+  priority: 'low' | 'medium' | 'high' | 'urgent' | string
+  status: 'pending' | 'completed' | string
+}
+
+export interface TeamDashboardData {
+  summary: TeamDashboardSummary
+  members: TeamMemberWorkload[]
+  overdue_tasks: TeamOverdueTask[]
+}
+
+export function getTeamDashboard(team?: string): Promise<TeamDashboardData> {
+  const query = team ? `?${new URLSearchParams({ team })}` : ''
+  return apiFetch(`${API_BASE_URL}/api/v1/tasks/team-dashboard${query}`)
+    .then((response) => readJson<TeamDashboardData>(response))
+}
