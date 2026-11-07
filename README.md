@@ -2926,6 +2926,61 @@ The Story 7.2 implementation was verified with automated tests covering document
 
 Semantic search was also tested through the Company Files interface using the HR Operations Knowledge Handbook.
 
+## Running the project reliably
+
+### One command
+
+```text
+.\scripts\dev.ps1
+```
+
+It checks the set-up, stops old copies of the servers so only one API and one front end run, starts both, and waits until they answer. The API restarts by itself when a `.py` file or `backend\.env` is saved, and the front end is pointed at whatever port the API uses.
+
+| Command | What it does |
+|---|---|
+| `.\scripts\dev.ps1 -Check` | Only the set-up report (add `-Mail` to try the e-mail login once; nothing is sent) |
+| `.\scripts\dev.ps1 -Stop` | Stops this project's API and front end |
+| `.\scripts\dev.ps1 -DryRun` | Shows what it would stop and start |
+| `-ApiPort 8001 -FrontendPort 5174` | Use other ports |
+| `-KeepOthers` | Only stop what is on our ports; leave other copies running |
+
+Always use `.venv-py311` (Python 3.11). The script does. The older `.venv` (Python 3.15) is missing ten required packages, and uploads, transcription and search fail in it. Never run the API from it.
+
+### Check what is wrong: `python -m app.doctor`
+
+From `backend\`, `..\.venv-py311\Scripts\python.exe -m app.doctor` prints OK / WARN / FAIL lines, each with the fix: the Python environment and packages, whether the database is behind the code, whether the demo accounts accept the passwords in `seed_accounts.py`, the mail settings (and a variable overriding `.env`), the OCR engine, the AI key, the front-end packages, and which servers are running.
+
+### Problems that used to come back, and what prevents them now
+
+| Problem | Why it happened | What prevents it now |
+|---|---|---|
+| "table already exists" while migrating | The API creates missing tables itself at start-up, so starting it before migrating left tables the migration then tried to create | The workflow migration skips tables that exist, and the API upgrades a database that is behind (after saving a backup) **before** creating tables |
+| App fails with a missing table or column after `git pull` | The database was behind the code | Same automatic upgrade (`AUTO_MIGRATE`, on in development). It stops with the reason if the upgrade fails, and the backup is kept |
+| Cannot log in with the passwords in `seed_accounts.py` | Seeding was manual and the database kept older passwords | The API creates missing demo accounts at start-up (development only) and never overwrites a password. To reset them to the file's passwords: `cd backend; ..\.venv-py311\Scripts\python.exe -m app.db.seed_accounts` |
+| Changed the mail password in `.env`, e-mail still failed | The API read `.env` once, at start | Mail settings are re-read when `.env` changes, and the file wins over a stale Windows variable |
+| Two API servers, one with old code | Old windows were left open | `dev.ps1` keeps one; the health check warns about two |
+| OCR "Tesseract not found" after installing it | The installer does not update `PATH` for running programs | The app also looks in `C:\Program Files\Tesseract-OCR` |
+| Wrong Python / missing packages | Several virtual environments, one with half the packages | `dev.ps1` and the health check name the right one |
+
+Settings (`backend\.env`, all optional): `APP_ENV` (`development` by default; set `production` to turn the two switches below off), `AUTO_MIGRATE=true|false`, `SEED_DEFAULT_ACCOUNTS=true|false`, `TESSERACT_CMD`.
+
+### Demo logins (development)
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@northstar.example` | `AdminSecurePass123!` | Administrator |
+| `manager@example.com` | `ManagerSecurePass123!` | Manager (Maya Thompson) |
+| `ava.patel@northstar.example` | `EmployeeSecurePass123!` | Employee |
+| `rahulexample.test@gmail.com` | `EmployeeSecurePass123!` | Manager (Rahul) |
+
+### Installing on a new machine
+
+1. Python 3.11: `py -3.11 -m venv .venv-py311`, then `.venv-py311\Scripts\python.exe -m pip install -r backend\requirements.txt`.
+2. Front end: `npm install` in the project folder.
+3. OCR engine (for images and scanned PDFs): `winget install -e --id UB-Mannheim.TesseractOCR`.
+4. Copy `backend\.env.example` to `backend\.env` and fill in `GROQ_API_KEY` and the `SMTP_` settings. For Gmail, `SMTP_PASSWORD` must be an **app password** (Google Account, Security, 2-Step Verification, App passwords), made in the same account as `SMTP_USERNAME`. A rejected login is not retried (retrying only makes Google block the account longer); fix the password, save the file, and the next e-mail uses it.
+5. `.\scripts\dev.ps1`
+
 ## Epic 7 – Company Knowledge (RAG) Overview
 
 | Story | What it delivers | Where to read more |
@@ -3021,10 +3076,50 @@ npx tsc --noEmit -p .
 
 `tests/test_document_access_control.py` covers Story 7.4 and `tests/test_rag_citations.py` covers Story 7.5. Use `.venv-py311` (it has `faster-whisper` and `fastembed`).
 
+## Story 9.4 – Admin Dashboard and Audit Logs
+
+An administrator-only area that shows how the system is doing and who did what. Everything on it is read from the live system (the database, the background threads and the API's own request timings); nothing is configured or hard-coded.
+
+### Where to find it (sign in as an administrator)
+
+| Menu | What it shows |
+|---|---|
+| **Dashboard** | The system dashboard first, with the task dashboard underneath |
+| **System dashboard** | Everything below on one page |
+| **Users** | Users with role, department, status and last sign-in, role counts, and a departments table |
+| **Agent Monitor** | System health tiles, background services and integration health |
+| **Audit Logs** | One searchable trail of who did what |
+
+Managers and employees never see these menus, and the API refuses them.
+
+### What the dashboard measures
+
+- **API response time** (p95 and average) and **error rate** (server errors only), taken from every real request over the last 15 minutes. With no traffic yet it says "No data yet" instead of showing zero. The numbers live in memory, so they start empty after the API restarts. The dashboard's own polling is not counted.
+- **Job queue depth** (pending plus retrying workflow runs), runs in progress, how long the oldest has waited, failed runs, and open dead-letter entries.
+- **Active workers** (live threads out of `WORKFLOW_CONCURRENCY`) and whether each background service is running: task reminders, e-mail dispatcher, calendar sync, document processor, transcription.
+- **Database response time** and whether the schema is up to date.
+- **Integration health** for e-mail, the AI model, the calendar, transcription and document processing / OCR. Health follows what really happened to that work in the last 24 hours (for example e-mails sent versus failed). "Unknown" means it is configured but nothing has run lately, which is not the same as healthy. Passwords, user names and raw provider errors are never shown.
+- A **Needs attention** list explains anything wrong in words, and the overall status is Operational, Degraded or Unknown.
+
+### Refresh, loading and error states
+
+The page refreshes itself every 15 seconds (well inside the 30-second requirement) and has a Refresh button. It shows a loading state, an error with Try again if the first load fails, and, if a later refresh fails, keeps the last data with a warning that it may be out of date. If one section cannot be read, only that section says it is unavailable and the rest still loads.
+
+### Audit logs
+
+`GET /api/v1/admin/audit-logs?source=&q=&limit=` merges the records the system already keeps (task, meeting, AI assistant, e-mail and workflow events), newest first, with the person's name. Nothing new is written. Each entry has a plain action title ("Reminder sent", "Approval requested"), a readable detail sentence (internal tags, ids and raw timestamps are removed), and an outcome. Routine workflow "step completed" events are left out because they happen every few seconds and would bury real activity. You can filter by source and search the text; each source shows its count.
+
+### API
+
+- `GET /api/v1/admin/dashboard` – the dashboard data (`Cache-Control: no-store`, administrators only)
+- `GET /api/v1/admin/audit-logs` – the audit trail (administrators only)
+
+Tests: `backend/tests/test_admin_dashboard.py`, `backend/tests/test_admin_audit_logs.py`, and `src/pages/AdminDashboardPage.test.tsx`, `src/pages/AuditLogsPage.test.tsx`, `src/App.adminRoutes.test.tsx`.
+
 
 # 📌 Current Project Status
 
-Last updated 2 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet.
+Last updated 7 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet. Story 9.4 (admin dashboard and audit logs) is implemented and awaiting a branch and merge.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -3135,6 +3230,10 @@ two-second polling, so progress and terminal failures reach the UI within
 five seconds. Workflow completion/failure notices use the existing
 recipient-scoped notification service.
 
+### Epic 9 — Administration
+
+- Story 9.4 — Admin dashboard for users, departments, integration health and system health (latency, queue depth, workers, error rate), refreshed every 15 seconds, plus a read-only audit log — implemented, awaiting merge
+
 ### Known gaps
 
 - PowerPoint speaker notes are not extracted.
@@ -3142,6 +3241,8 @@ recipient-scoped notification service.
 - Managers can upload documents, although Story 7.1 names HR / Operations; the upload permission check also has a test-only bypass.
 - The e-mail bounce endpoint trusts the `actor_role` query parameter.
 - E-mail drafts created before Story 7.4 do not record the documents they quote, so they get no document re-check.
+- Dashboard API latency and error rate are kept in memory, so they reset when the API restarts. Integration health is inferred from recent activity, not a live probe, so an idle integration shows "Unknown".
+- Two backend tests depend on time or network: `test_live_groq_streaming_and_latency` makes a live Groq call that must answer in under 2 seconds, and `test_due_date_change_updates_the_existing_entry` uses a fixed due date of 2 November 2026 that is now in the past.
 - `test_api_startup_loads_backend_dotenv_before_database_initialization` expects `override=True` but `main.py` uses `override=False`; it was already failing.
 
 ### How to verify

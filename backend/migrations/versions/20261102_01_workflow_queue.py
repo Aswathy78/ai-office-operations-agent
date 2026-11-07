@@ -17,6 +17,18 @@ depends_on: Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # The API's start-up creates any missing table from the models (create_all). A database
+    # that was started before this migration ran therefore already has these tables, and
+    # creating them again failed with "table workflow_runs already exists". Each part is
+    # skipped when it is already there, so the migration is safe to run either way.
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("workflow_runs"):
+        _create_workflow_runs()
+    if not inspector.has_table("workflow_steps"):
+        _create_workflow_steps()
+
+
+def _create_workflow_runs() -> None:
     op.create_table(
         "workflow_runs",
         sa.Column("id", sa.String(length=36), nullable=False),
@@ -50,6 +62,8 @@ def upgrade() -> None:
     )
     op.create_index("ix_workflow_runs_meeting", "workflow_runs", ["meeting_id", "created_at"])
 
+
+def _create_workflow_steps() -> None:
     op.create_table(
         "workflow_steps",
         sa.Column("id", sa.String(length=36), nullable=False),

@@ -3,6 +3,11 @@ fastapi==0.141.1
 SQLAlchemy==2.0.52
 alembic==1.16.5
 uvicorn==0.52.3
+# Makes `uvicorn --reload` fast and reliable on Windows, and lets it watch backend/.env so
+# that saving the file restarts the API (scripts\dev.ps1 relies on this).
+watchfiles>=1.0
+# Installed with fastapi, but the app imports it directly, so it is listed.
+pydantic>=2.7
 # WebSocket support for uvicorn (meeting room signaling).
 websockets>=13.0
 python-multipart==0.0.32
@@ -36,6 +41,9 @@ filetype>=1.2
 
 # Story 7.2: local CPU embeddings; model inference runs in-process.
 fastembed==0.9.1
+
+# Optional: only used when OPENAI_API_KEY is set (the assistant normally uses Groq).
+# openai>=1.0
 
 # Dependencies used by the backend test suite.
 pytest==9.1.1

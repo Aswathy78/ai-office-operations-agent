@@ -646,8 +646,9 @@ def test_scenario_20_migration_upgrade_and_downgrade(tmp_path: Path):
     cfg = Config(Path(__file__).resolve().parents[1] / "alembic.ini")
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_file.as_posix()}")
 
-    # Upgrade to head (20261103_01)
-    command.upgrade(cfg, "head")
+    # This scenario is about Story 8.5's revision. It is named explicitly (not "head") so a
+    # later migration does not break it.
+    command.upgrade(cfg, "20261103_01")
 
     eng = create_engine(f"sqlite:///{db_file.as_posix()}")
     try:
@@ -661,8 +662,8 @@ def test_scenario_20_migration_upgrade_and_downgrade(tmp_path: Path):
             v_down = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
             assert v_down == "20261102_02"
 
-        # Re-upgrade to head
-        command.upgrade(cfg, "head")
+        # Re-upgrade
+        command.upgrade(cfg, "20261103_01")
         with eng.connect() as conn:
             v_re = conn.exec_driver_sql("SELECT version_num FROM alembic_version").scalar_one()
             assert v_re == "20261103_01"

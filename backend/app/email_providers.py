@@ -67,6 +67,9 @@ def _provider_name(host: str) -> str:
 
 
 def _settings(prefix: str, default_sender: str = "") -> SmtpSettings | None:
+    from app.env_refresh import refresh_mail_settings
+
+    refresh_mail_settings()  # an edit to backend/.env takes effect without a restart
     host = os.getenv(f"{prefix}SMTP_HOST", "").strip()
     sender = os.getenv(f"{prefix}SMTP_FROM_EMAIL", "").strip() or default_sender
     if not host and not prefix:

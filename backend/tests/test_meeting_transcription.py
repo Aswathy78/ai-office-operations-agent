@@ -430,12 +430,18 @@ def test_worker_uses_database_path_independent_of_working_directory(
     monkeypatch,
     tmp_path,
 ):
-    expected_database = (
+    # The default location is fixed next to the project, never relative to where the
+    # process was started (the test suite itself points the path at a temporary file).
+    default_database = (
         Path(database.__file__).resolve().parents[3] / "office_operations.db"
     )
+    assert database.DEFAULT_DATABASE_PATH == default_database
+    assert default_database.is_absolute()
+    expected_database = database.DATABASE_PATH
     monkeypatch.chdir(tmp_path)
 
     assert Path(database.engine.url.database) == expected_database
+    assert expected_database.is_absolute()
     assert transcription_worker.SessionLocal is database.SessionLocal
 
 

@@ -77,7 +77,7 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
         "chloe.nguyen@northstar.example",
         "ethan.walker@northstar.example",
         "rahulexample.test@gmail.com",
-        "amaldev980ads@gmail.com",
+        "admin@northstar.example",  # the System Administrator (Story 8.6)
     }
     rahul = db_session.query(Employee).filter_by(email="rahulexample.test@gmail.com").one()
     assert rahul.name == "Rahul"
