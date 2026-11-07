@@ -370,7 +370,12 @@ def process_workflow(db: Session, run_id: str) -> None:
     for step in get_workflow_steps(db, run.id):
         if step.status == "completed":
             continue
-        _begin_step(db, run, step)
+        try:
+            _begin_step(db, run, step)
+        except Exception as error:  # the step limit or cost cap: permanent, not "still processing"
+            db.rollback()
+            _fail_step(db, run, step, error)
+            return
         try:
             checkpoint = _verify_step(db, run, step)
         except WorkflowNotReady as error:
@@ -444,6 +449,15 @@ def start_workflow_workers() -> bool:
         thread.start()
     logger.info("Started %s workflow worker(s)", count)
     return True
+
+
+def worker_status() -> dict:
+    """How many workflow workers are configured and how many are alive (Story 9.4)."""
+    return {
+        "configured": worker_count(),
+        "alive": sum(1 for thread in _threads if thread.is_alive()),
+        "started": bool(_threads),
+    }
 
 
 def stop_workflow_workers() -> None:

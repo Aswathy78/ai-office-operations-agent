@@ -27,6 +27,7 @@ export const navigationItems: NavigationItem[] = [
   { id: 'my-approvals', label: 'My approvals', route: '/my-approvals', icon: ShieldCheck, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'notifications', label: 'Notifications', route: '/notifications', icon: Bell, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'notification-settings', label: 'Notification settings', route: '/settings/notifications', icon: Settings, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
+  { id: 'admin-dashboard', label: 'System dashboard', route: '/admin/dashboard', icon: Activity, allowedRoles: ['admin'] },
   { id: 'users', label: 'Users', route: '/admin/users', icon: Users, allowedRoles: ['admin'] },
   { id: 'workflows', label: 'Workflow queue', route: '/admin/workflows', icon: Workflow, allowedRoles: ['admin'] },
   { id: 'agent-monitor', label: 'Agent Monitor', route: '/admin/agent-monitor', icon: Activity, allowedRoles: ['admin'] },

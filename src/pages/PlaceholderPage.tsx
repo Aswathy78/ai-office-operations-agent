@@ -12,7 +12,6 @@ export function PlaceholderPage() {
       <p className="eyebrow">Shared integration point</p>
       <h2 id="placeholder-title">{title}</h2>
       <p>This route is intentionally a placeholder for the team member implementing this feature.</p>
-      <small>Route: {location.pathname}</small>
     </section>
   )
 }
