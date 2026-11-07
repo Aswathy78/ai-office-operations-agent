@@ -1,8 +1,23 @@
+import atexit
 import os
 import re
+import shutil
+import tempfile
 
 import pytest
 from fastapi import HTTPException, Request
+
+# The test suite must never touch the real database. Many tests start the whole app
+# (TestClient(app) runs its startup hook, which creates tables and seeds data); against
+# the real file that left tables behind that later made `alembic upgrade` fail with
+# "table already exists", and wrote test data into the developer's own database.
+# This runs before any app module is imported, because the database path is read once
+# at import time.
+_TEST_DATABASE_DIRECTORY = tempfile.mkdtemp(prefix="office-operations-tests-")
+os.environ["OFFICE_OPERATIONS_DB_PATH"] = os.path.join(_TEST_DATABASE_DIRECTORY, "tests.db")
+os.environ["SEED_DEFAULT_ACCOUNTS"] = "false"  # tests create the accounts they need
+os.environ["AUTO_MIGRATE"] = "false"
+atexit.register(shutil.rmtree, _TEST_DATABASE_DIRECTORY, ignore_errors=True)
 
 
 class _WhitespaceDocumentTokenizer:

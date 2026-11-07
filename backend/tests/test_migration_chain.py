@@ -6,6 +6,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
+from app.db.migrate import head_revision
 from app.meeting.models import Base
 
 
@@ -21,7 +22,7 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261104_01"
+            ).scalar_one() == head_revision()
             assert connection.exec_driver_sql(
                 "SELECT sql FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'document_chunk_vectors'"

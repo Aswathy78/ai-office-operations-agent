@@ -822,3 +822,97 @@ def test_history_keeps_its_order_even_when_every_timestamp_ties(client, db_sessi
     assert [e.sequence for e in _events(db_session, run.id)] == [1, 2, 3, 4, 5]
     shown = client.get(f"/api/v1/workflows/dead-letter/{run.id}").json()["events"]
     assert [e["event_type"] for e in shown] == kinds
+
+
+# ---------------------------------------------------------------------------
+# Working together with Story 8.6's step limit, cost cap and event de-duplication
+# ---------------------------------------------------------------------------
+
+
+def _fail_run_with(db, **payload):
+    """A run that used up its budget and failed, as a real one would after many attempts."""
+    run = _run(db, payload={"poll": True, **payload}, key=f"budget-{uuid.uuid4()}")
+    db.query(WorkflowRun).filter_by(id=run.id).update({"status": "failed", "attempt_count": 5})
+    db.commit()
+    dead_letter_run(db, run.id, step_key="only_step", error_message="provider timed out")
+    return run
+
+
+@pytest.mark.parametrize("action", ["retry", "resume"])
+def test_a_manual_retry_or_resume_starts_with_a_fresh_step_and_cost_budget(
+    client, db_session, admin, monkeypatch, action,
+):
+    run = _fail_run_with(db_session, steps_executed=12, cost_usd=5.0)
+    script = Script(monkeypatch, lambda step, n: {})
+
+    response = client.post(f"/api/v1/workflows/dead-letter/{run.id}/{action}")
+
+    assert response.status_code == 200
+    assert response.json()["budget"]["steps_executed"] == 0 and response.json()["budget"]["cost_usd"] == 0
+    _drain(db_session)
+    assert db_session.get(WorkflowRun, run.id).status == "completed", "the old budget must not block it"
+    assert script.calls == ["only_step"]
+
+
+def test_cancelling_leaves_the_budget_as_it_was(client, db_session, admin):
+    run = _fail_run_with(db_session, steps_executed=7, cost_usd=1.75)
+
+    detail = client.post(f"/api/v1/workflows/dead-letter/{run.id}/cancel").json()
+
+    assert detail["budget"]["steps_executed"] == 7 and detail["budget"]["cost_usd"] == 1.75
+
+
+def test_a_run_that_hits_the_step_limit_fails_cleanly_instead_of_staying_processing(
+    db_session, admin, monkeypatch,
+):
+    from app.workflow_service import MAX_WORKFLOW_STEPS
+
+    run = _run(db_session, payload={"steps_executed": MAX_WORKFLOW_STEPS}, key="step-limit")
+    Script(monkeypatch, lambda step, n: {})
+
+    _drain(db_session)
+
+    run = db_session.get(WorkflowRun, run.id)
+    assert run.status == "failed", "not left in 'processing' until a stale-lease sweep"
+    assert run.attempt_count == 1, "a limit is permanent, so there are no retries"
+    entry = db_session.query(WorkflowDeadLetter).one()
+    assert "step limit" in entry.error_message and entry.status == "open"
+    assert db_session.query(UserNotification).filter_by(recipient_employee_id=admin).count() == 1
+
+
+def test_a_run_that_hits_the_cost_cap_fails_cleanly(db_session, admin, monkeypatch):
+    run = _run(db_session, payload={"cost_usd": 99.0}, key="cost-cap")
+    Script(monkeypatch, lambda step, n: {})
+
+    _drain(db_session)
+
+    assert db_session.get(WorkflowRun, run.id).status == "failed"
+    assert "cost cap" in db_session.query(WorkflowDeadLetter).one().error_message
+
+
+def test_job_details_show_the_job_and_the_budget_separately(client, db_session, admin):
+    run = _fail_run_with(db_session, steps_executed=5, cost_usd=1.25)
+
+    detail = client.get(f"/api/v1/workflows/dead-letter/{run.id}").json()
+
+    assert detail["payload"] == {"poll": True}
+    assert detail["budget"] == {"steps_executed": 5, "max_steps": 12, "cost_usd": 1.25, "cost_cap_usd": 5.0}
+
+
+def test_events_are_still_deduplicated_within_one_cycle_but_not_across_a_manual_retry(db_session):
+    from app.workflow_service import record_event
+
+    run = _run(db_session)
+    first = record_event(db_session, run.id, "retry_scheduled", step_key="only_step", attempt_number=1)
+    repeat = record_event(db_session, run.id, "retry_scheduled", step_key="only_step", attempt_number=1)
+    db_session.commit()
+    assert repeat.id == first.id, "the same attempt is recorded once"
+
+    record_event(db_session, run.id, "manual_retry", actor_id="admin-1")
+    after = record_event(db_session, run.id, "retry_scheduled", step_key="only_step", attempt_number=1)
+    db_session.commit()
+
+    assert after.id != first.id, "attempt 1 after a manual retry is a new attempt"
+    assert [e.event_type for e in _events(db_session, run.id)] == [
+        "retry_scheduled", "manual_retry", "retry_scheduled",
+    ]

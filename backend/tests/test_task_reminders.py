@@ -160,7 +160,10 @@ def _notifications(db: Session, task: Task) -> list[TaskNotification]:
         (timedelta(hours=-24), ("reminder_24h", 0)),
         (timedelta(hours=-3), ("reminder_24h", 0)),
         (timedelta(hours=-2), ("reminder_2h", 0)),
-        (timedelta(minutes=-1), ("reminder_2h", 0)),
+        (timedelta(minutes=-11), ("reminder_2h", 0)),
+        # Story 8.5 added a last reminder in the final ten minutes before the due time.
+        (timedelta(minutes=-10), ("reminder_10min", 0)),
+        (timedelta(minutes=-1), ("reminder_10min", 0)),
         (timedelta(0), ("reminder_overdue", 1)),
         (timedelta(hours=23, minutes=59), ("reminder_overdue", 1)),
         (timedelta(hours=24), ("reminder_overdue", 2)),

@@ -388,12 +388,23 @@ def record_event(
 ) -> WorkflowEvent:
     """Append to a run's history. The caller commits with its own change."""
     db.flush()  # count events added earlier in this transaction too
-    # Deduplicate lifecycle events for same run, step, attempt, and event_type
+    # Deduplicate lifecycle events for same run, step, attempt, and event_type. Only
+    # within the current cycle: a manual retry or resume starts attempt numbering over,
+    # so "attempt 1 failed" after it is a new event, not a repeat of the one before it.
     if event_type in ("step_completed", "run_completed", "delivery_confirmed", "notification_sent", "retry_scheduled"):
+        cycle_start = (
+            db.query(func.coalesce(func.max(WorkflowEvent.sequence), 0))
+            .filter(
+                WorkflowEvent.workflow_run_id == run_id,
+                WorkflowEvent.event_type.in_(("manual_retry", "manual_resume")),
+            )
+            .scalar()
+        )
         existing_event = (
             db.query(WorkflowEvent)
             .filter(
                 WorkflowEvent.workflow_run_id == run_id,
+                WorkflowEvent.sequence > cycle_start,
                 WorkflowEvent.step_key == step_key,
                 WorkflowEvent.attempt_number == attempt_number,
                 WorkflowEvent.event_type == event_type,
@@ -613,6 +624,14 @@ def resolve_dead_letter(
             "claimed_at": None,
             "updated_at": now,
         }
+    if action != "cancel":
+        # The 12-step limit and the cost cap guard against a run looping for ever. They
+        # count every attempt, so without this a run that was retried once or twice
+        # would hit them and be abandoned although an administrator just restarted it.
+        payload = dict(run.payload or {})
+        payload["steps_executed"] = 0
+        payload["cost_usd"] = 0.0
+        values["payload"] = payload
     switched = db.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id == run_id, WorkflowRun.status == "failed")
@@ -762,9 +781,18 @@ def dead_letter_detail(db: Session, run_id: str) -> dict:
         .order_by(WorkflowDeadLetter.created_at.desc())
         .all()
     )
+    internal = ("steps_executed", "cost_usd")
+    payload = run.payload or {}
     return {
         "workflow": workflow_response(db, run),
-        "payload": run.payload or {},
+        "payload": {k: v for k, v in payload.items() if k not in internal},
+        # What the run has used of its step limit and cost cap (Story 8.6).
+        "budget": {
+            "steps_executed": int(payload.get("steps_executed", 0)),
+            "max_steps": MAX_WORKFLOW_STEPS,
+            "cost_usd": float(payload.get("cost_usd", 0.0)),
+            "cost_cap_usd": workflow_cost_cap_usd(),
+        },
         "idempotency_key": run.idempotency_key,
         "meeting_title": meeting.title if meeting else None,
         "dead_letters": [

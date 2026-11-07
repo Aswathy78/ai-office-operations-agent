@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 import os
 import tempfile
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.database import DATABASE_PATH, create_tables
+from app.admin_router import router as admin_router
 from app.assistant_approvals_router import router as assistant_approvals_router
 from app.assistant_router import router as assistant_router
 from app.assistant_tools_router import router as assistant_tools_router
@@ -20,6 +22,7 @@ from app.meeting.router import router as meeting_router
 from app.notification_router import router as notification_router
 from app.task_router import router as task_router
 from app.workflow_router import router as workflow_router
+from app.system_metrics import RequestMetricsMiddleware
 from app.email_dispatcher import start_email_dispatcher, stop_email_dispatcher
 from app.documents.processor import start_document_processor, stop_document_processor
 from app.task_calendar_scheduler import (
@@ -51,6 +54,8 @@ app = FastAPI(
 )
 
 
+# Times every request so the administrator dashboard can show real latency and error rate.
+app.add_middleware(RequestMetricsMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -75,6 +80,7 @@ if not STORY_6_3_TEST_MODE:
     app.include_router(email_draft_router)
 app.include_router(auth_router)
 app.include_router(workflow_router)
+app.include_router(admin_router)
 app.include_router(notification_router)
 app.include_router(assistant_router)
 app.include_router(assistant_tools_router)
@@ -85,6 +91,10 @@ app.include_router(documents_router)
 @app.on_event("startup")
 def startup():
     load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+    # Mail settings: the file wins over a stale variable left in the environment.
+    from app.env_refresh import load_mail_settings
+
+    load_mail_settings()
     if STORY_6_3_TEST_MODE:
         database_path = DATABASE_PATH.resolve()
         temp_root = Path(tempfile.gettempdir()).resolve()
@@ -96,6 +106,13 @@ def startup():
         create_tables()
         return
 
+    # A database that is behind the code is upgraded (after a backup) before anything
+    # reads it, instead of failing later with a missing table or column. If it cannot be
+    # upgraded the app stops here with the reason, rather than running on a broken schema.
+    from app.db.database import engine
+    from app.db.migrate import ensure_database_current
+
+    ensure_database_current(engine)
     create_tables()
     try:
         from app.db.database import SessionLocal
@@ -104,6 +121,16 @@ def startup():
         with SessionLocal() as db:
             seed_development_employees(db)
             seed_company_documents(db)
+            from app.db.seed_accounts import default_account_seeding_enabled, ensure_default_accounts
+
+            if default_account_seeding_enabled():
+                # Creates only what is missing; an existing account keeps its password.
+                ensure_default_accounts(
+                    db,
+                    reset_passwords=False,
+                    # Say what was created; never write the passwords into the log.
+                    report=lambda line: logging.getLogger(__name__).info(line.split(" (Password:")[0]),
+                )
     except Exception as seed_err:
         logging.getLogger(__name__).warning("Database seeding skipped or failed: %s", seed_err)
     start_task_reminder_scheduler()

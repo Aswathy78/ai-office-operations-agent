@@ -92,8 +92,20 @@ class FakeMailProvider:
         self.calls.append({"recipient": recipient, "subject": subject, "body": body})
         return email_providers.DeliveryReceipt(f"<{len(self.calls)}@provider.example>", "fake")
 
+    # System notices (Story 8.1 e-mails approvers when something needs approval) share the
+    # provider with the e-mail under test but are not what these tests check.
+    NOTICE_SUBJECTS = (
+        "AI assistant action approval required",
+        "AI assistant approval update",
+        "Office Operations workflow failure",
+    )
+
+    @property
+    def messages(self) -> list[dict]:
+        return [call for call in self.calls if call["subject"] not in self.NOTICE_SUBJECTS]
+
     def recipients(self) -> list[str]:
-        return [call["recipient"] for call in self.calls]
+        return [call["recipient"] for call in self.messages]
 
 
 @pytest.fixture()
@@ -186,9 +198,17 @@ def as_employee(db_session, employee):
 
 
 def _future(days: int = 3, hour: int = 10) -> str:
+    """A moment at least ``days`` ahead, moved to the next weekday.
+
+    People work Monday to Friday, and the write guard asks for approval when a meeting
+    falls outside attendees' working days. "Four days from now" landed on a Sunday
+    when the suite ran on a Wednesday, so the result must not depend on the weekday.
+    """
     moment = (datetime.now(timezone.utc) + timedelta(days=days)).replace(
         hour=hour, minute=0, second=0, microsecond=0
     )
+    while moment.weekday() >= 5:
+        moment += timedelta(days=1)
     return moment.isoformat()
 
 
@@ -792,7 +812,7 @@ class TestRealExecution:
         statuses = [e.to_status for e in db_session.query(EmailDraftEvent)
                     .filter_by(draft_id=draft.id).order_by(EmailDraftEvent.sequence)]
         assert statuses == ["draft", "queued"]
-        assert mail.calls == []  # delivery is the dispatcher's job
+        assert mail.messages == []  # delivery is the dispatcher's job (approval notices aside)
 
         summary = process_due_emails(db_session)
         assert summary.sent == 1

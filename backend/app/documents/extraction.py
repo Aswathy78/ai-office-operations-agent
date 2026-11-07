@@ -51,8 +51,36 @@ class ExtractionResult:
 # ---------------------------------------------------------------------------
 
 
+_TESSERACT_INSTALL_FOLDERS = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+)
+
+
+def tesseract_path() -> str | None:
+    """Where the OCR engine is, or None when it is not installed.
+
+    ``TESSERACT_CMD`` wins, then ``PATH``, then the folders the Windows installer uses.
+    The last matters: the installer does not add itself to ``PATH`` for programs that
+    were already running, so a fresh install used to fail until the next restart.
+    """
+    import shutil
+
+    explicit = os.environ.get("TESSERACT_CMD", "").strip()
+    if explicit:
+        return explicit
+    on_path = shutil.which("tesseract")
+    if on_path:
+        return on_path
+    local = os.environ.get("LOCALAPPDATA")
+    candidates = list(_TESSERACT_INSTALL_FOLDERS)
+    if local:
+        candidates.append(os.path.join(local, "Programs", "Tesseract-OCR", "tesseract.exe"))
+    return next((path for path in candidates if os.path.exists(path)), None)
+
+
 def _configure_tesseract() -> None:
-    cmd = os.environ.get("TESSERACT_CMD", "")
+    cmd = tesseract_path()
     if cmd:
         import pytesseract
         pytesseract.pytesseract.tesseract_cmd = cmd

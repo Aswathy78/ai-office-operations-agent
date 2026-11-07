@@ -14,7 +14,7 @@ import { MeetingEntryPage } from './pages/MeetingEntryPage'
 import { MeetingReportPage } from './pages/MeetingReportPage'
 import { MeetingRoomPage } from './pages/MeetingRoomPage'
 import { MeetingsPage } from './pages/MeetingsPage'
-import { PlaceholderPage } from './pages/PlaceholderPage'
+import { AuditLogsPage } from './pages/AuditLogsPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { ChatPage } from './pages/ChatPage'
 import { DocumentsPage } from './pages/DocumentsPage'
@@ -23,6 +23,7 @@ import { NotificationsPage } from './pages/NotificationsPage'
 import { NotificationPreferencesPage } from './pages/NotificationPreferencesPage'
 import { MyApprovalsPage } from './pages/MyApprovalsPage'
 import { WorkflowQueuePage } from './pages/WorkflowQueuePage'
+import { AdminDashboardPage } from './pages/AdminDashboardPage'
 import { ManagerDashboard } from './pages/ManagerDashboard'
 import { ManagerMonitoringPage } from './pages/ManagerMonitoringPage'
 
@@ -40,6 +41,19 @@ function ProtectedAppPage({ path, children }: { path: string; children: ReactNod
     <ProtectedRoute path={path}>
       <AppShell>{children}</AppShell>
     </ProtectedRoute>
+  )
+}
+
+/** Administrators land on the system dashboard (users, departments, integrations, health),
+ *  with the task dashboard they already had underneath it. Everyone else sees the task dashboard. */
+function DashboardPage() {
+  const { user } = useAuth()
+  if (user?.role !== 'admin') return <TaskWorkspacePage view="dashboard" />
+  return (
+    <>
+      <AdminDashboardPage />
+      <TaskWorkspacePage view="dashboard" />
+    </>
   )
 }
 
@@ -72,7 +86,7 @@ function AppRoutes() {
       <Route path="/chat" element={<ProtectedAppPage path="/chat"><ChatPage /></ProtectedAppPage>} />
       <Route path="/tasks" element={<ProtectedAppPage path="/tasks"><TaskWorkspacePage view="mine" /></ProtectedAppPage>} />
       <Route path="/calendar" element={<ProtectedAppPage path="/calendar"><TaskWorkspacePage view="calendar" /></ProtectedAppPage>} />
-      <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><TaskWorkspacePage view="dashboard" /></ProtectedAppPage>} />
+      <Route path="/dashboard" element={<ProtectedAppPage path="/dashboard"><DashboardPage /></ProtectedAppPage>} />
       <Route path="/team-dashboard" element={<ProtectedAppPage path="/team-dashboard"><ManagerDashboard /></ProtectedAppPage>} />
       <Route path="/monitoring" element={<ProtectedAppPage path="/monitoring"><ManagerMonitoringPage /></ProtectedAppPage>} />
       <Route path="/documents" element={<ProtectedAppPage path="/documents"><DocumentsPage /></ProtectedAppPage>} />
@@ -80,10 +94,11 @@ function AppRoutes() {
       <Route path="/my-approvals" element={<ProtectedAppPage path="/my-approvals"><MyApprovalsPage /></ProtectedAppPage>} />
       <Route path="/notifications" element={<ProtectedAppPage path="/notifications"><NotificationsPage /></ProtectedAppPage>} />
       <Route path="/settings/notifications" element={<ProtectedAppPage path="/settings/notifications"><NotificationPreferencesPage /></ProtectedAppPage>} />
-      <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/dashboard" element={<ProtectedAppPage path="/admin/dashboard"><AdminDashboardPage /></ProtectedAppPage>} />
+      <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><AdminDashboardPage view="users" /></ProtectedAppPage>} />
       <Route path="/admin/workflows" element={<ProtectedAppPage path="/admin/workflows"><WorkflowQueuePage /></ProtectedAppPage>} />
-      <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><PlaceholderPage /></ProtectedAppPage>} />
-      <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><PlaceholderPage /></ProtectedAppPage>} />
+      <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><AdminDashboardPage view="health" /></ProtectedAppPage>} />
+      <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><AuditLogsPage /></ProtectedAppPage>} />
 
       {/* Smart meeting entry — dynamic route for /meetings/:meetingId (only hits if not /meetings/create or /meetings) */}
       <Route path="/meetings/:meetingId" element={<MeetingEntryPage />} />
