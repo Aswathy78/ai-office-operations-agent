@@ -104,8 +104,12 @@ def parse_duration_minutes(text: str) -> int:
 
 def parse_time_of_day(text: str) -> tuple[int, int] | None:
     """Parse a time string such as '10 AM', '10:30am', '2 PM', or '14:00'."""
-    # 12-hour format: '10 AM', '10:30 pm', 'at 9am'
-    match12 = re.search(r"\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text, re.IGNORECASE)
+    # 12-hour format: '10 AM', '10:30 pm', '2.30 PM', '2 30 PM', 'at 9am'
+    match12 = re.search(
+        r"\b(?:at\s+)?(1[0-2]|0?[1-9])(?:(?::|\.|\s+)([0-5]\d))?\s*(am|pm)\b",
+        text,
+        re.IGNORECASE,
+    )
     if match12:
         hour = int(match12.group(1))
         minute = int(match12.group(2) or 0)

@@ -2,10 +2,14 @@ import { ArrowRight, MessageSquarePlus } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import { ROLE_LABELS } from '../types/user'
+import { EmployeeDashboard } from './EmployeeDashboard'
+import { ManagerDashboard } from './ManagerDashboard'
 
 export function HomePage() {
   const { user } = useAuth()
   if (!user) return null
+  if (user.role === 'employee') return <EmployeeDashboard />
+  if (user.role === 'manager') return <ManagerDashboard />
 
   return (
     <div className="page-stack">

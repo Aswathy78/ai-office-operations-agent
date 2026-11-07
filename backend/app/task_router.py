@@ -1,10 +1,14 @@
 """Task list, manager dashboard, assignment email, calendar feed, and
 reassignment / due-date change APIs."""
 
+import csv
+import io
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
@@ -13,17 +17,32 @@ from app.db.database import get_db
 from app.meeting.models import (
     Employee,
     Meeting,
+    MeetingActionItem,
+    MeetingActionItemExtraction,
+    MeetingParticipant,
     Task,
     TaskCalendarSync,
     TaskAuditLog,
     TaskNotification,
     TaskReassignmentRequest,
+    WorkflowRun,
     TASK_AUDIT_OUTCOME_PENDING_APPROVAL,
     TASK_REASSIGNMENT_STATUS_PENDING,
+    TASK_STATUS_COMPLETED,
     TASK_STATUS_PENDING,
 )
 from app.meeting.schemas import (
+    ActionItemMonitorRow,
     EscalationResponse,
+    FailureReasonRow,
+    OperationalMonitoringResponse,
+    OperationalMonitoringSummary,
+    TaskStatusRow,
+    WorkflowFailureRow,
+    TeamDashboardResponse,
+    TeamDashboardSummaryResponse,
+    TeamMemberWorkloadResponse,
+    TeamOverdueTaskResponse,
     TaskActorRole,
     TaskAuditLogResponse,
     TaskChangeResponse,
@@ -54,7 +73,7 @@ from app.task_calendar_sync_service import (
     retry_failed,
     run_sync_pass,
 )
-from app.task_reminder_service import run_task_reminders
+from app.task_reminder_service import FIRST_REMINDER_BEFORE, _as_utc, run_task_reminders
 from app.task_service import attempt_assignment_email
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["Tasks"])
@@ -196,16 +215,28 @@ def _task_row(db: Session, task_id: str) -> tuple[Task, Employee, Meeting | None
 
 @router.get("/", response_model=list[TaskResponse])
 def get_assigned_tasks(
-    assignee_email: str = Query(min_length=1),
+    assignee_email: str | None = Query(default=None, min_length=1),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
-    rows = _task_query(db).filter(Employee.email == assignee_email).all()
+    query = _task_query(db)
+    if principal.role in {"manager", "hr_operations", "admin"} and assignee_email:
+        query = query.filter(Employee.email == assignee_email)
+    else:
+        query = query.filter(Task.assignee_id == principal.user_id)
+    rows = query.all()
     return _task_responses(db, rows)
 
 
 @router.get("/dashboard", response_model=list[TaskResponse])
-def get_task_dashboard(db: Session = Depends(get_db)):
-    rows = _task_query(db).all()
+def get_task_dashboard(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    query = _task_query(db)
+    if principal.role not in {"manager", "hr_operations", "admin"}:
+        query = query.filter(Task.assignee_id == principal.user_id)
+    rows = query.all()
     return _task_responses(db, rows)
 
 
@@ -275,6 +306,236 @@ def get_task_escalations(
             )
         )
     return escalations
+
+
+@router.get("/team-dashboard", response_model=TeamDashboardResponse)
+def get_manager_team_dashboard(
+    team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    if principal.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Employees cannot access the manager team dashboard.",
+        )
+
+    current_emp = (
+        db.query(Employee)
+        .filter((Employee.id == principal.user_id) | (Employee.email == principal.email))
+        .first()
+    )
+    manager_ids = {principal.user_id}
+    if current_emp:
+        manager_ids.add(current_emp.id)
+
+    manager_team = current_emp.team if current_emp and current_emp.team else principal.team
+
+    # Team isolation rules:
+    # 1. Managers see ONLY their own team. Query parameter is ignored for managers to prevent manipulation.
+    # 2. Primary hierarchy boundary: employees where manager_id matches the manager.
+    # 3. Fallback for unassigned manager_id: employees in the same team without another manager.
+    if principal.role == "manager":
+        team_filter_clauses = [Employee.manager_id.in_(list(manager_ids))]
+        if manager_team:
+            team_filter_clauses.append(
+                and_(
+                    Employee.manager_id.is_(None),
+                    func.lower(Employee.team) == manager_team.casefold(),
+                    ~Employee.id.in_(list(manager_ids)),
+                )
+            )
+        team_members = (
+            db.query(Employee)
+            .filter(
+                Employee.is_active.is_(True),
+                or_(*team_filter_clauses),
+            )
+            .order_by(Employee.name.asc())
+            .all()
+        )
+        resolved_team_name = manager_team or "My Team"
+    else:
+        # HR Operations / Admin
+        resolved_team_name = team or manager_team or "Organization"
+        emp_query = db.query(Employee).filter(Employee.is_active.is_(True))
+        if team:
+            emp_query = emp_query.filter(func.lower(Employee.team) == team.casefold())
+        elif manager_team:
+            emp_query = emp_query.filter(func.lower(Employee.team) == manager_team.casefold())
+        team_members = emp_query.order_by(Employee.name.asc()).all()
+
+    now = datetime.now(timezone.utc)
+    due_soon_threshold = now + FIRST_REMINDER_BEFORE
+
+    if not team_members:
+        return TeamDashboardResponse(
+            summary=TeamDashboardSummaryResponse(
+                team_name=resolved_team_name,
+                total_members=0,
+                total_tasks=0,
+                open_tasks=0,
+                due_soon_tasks=0,
+                overdue_tasks=0,
+                completed_tasks=0,
+                completion_rate=0.0,
+            ),
+            members=[],
+            overdue_tasks=[],
+        )
+
+    member_ids = [m.id for m in team_members]
+
+    # Aggregate task counts per team member in a single database query
+    stats_query = (
+        db.query(
+            Task.assignee_id,
+            func.count(Task.id).label("total"),
+            func.coalesce(
+                func.sum(case((Task.status == TASK_STATUS_COMPLETED, 1), else_=0)), 0
+            ).label("completed"),
+            func.coalesce(
+                func.sum(case((Task.status == TASK_STATUS_PENDING, 1), else_=0)), 0
+            ).label("open"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                Task.status == TASK_STATUS_PENDING,
+                                Task.due_at < now,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("overdue"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            and_(
+                                Task.status == TASK_STATUS_PENDING,
+                                Task.due_at >= now,
+                                Task.due_at <= due_soon_threshold,
+                            ),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("due_soon"),
+        )
+        .filter(Task.assignee_id.in_(member_ids))
+        .group_by(Task.assignee_id)
+        .all()
+    )
+
+    stats_by_assignee = {
+        row.assignee_id: {
+            "total": int(row.total),
+            "completed": int(row.completed),
+            "open": int(row.open),
+            "overdue": int(row.overdue),
+            "due_soon": int(row.due_soon),
+        }
+        for row in stats_query
+    }
+
+    # Fetch separate overdue tasks in a single query
+    overdue_rows = (
+        db.query(Task, Employee)
+        .join(Employee, Task.assignee_id == Employee.id)
+        .filter(
+            Task.assignee_id.in_(member_ids),
+            Task.status == TASK_STATUS_PENDING,
+            Task.due_at < now,
+        )
+        .order_by(Task.due_at.asc())
+        .all()
+    )
+
+    members_response = []
+    total_tasks_sum = 0
+    open_tasks_sum = 0
+    due_soon_tasks_sum = 0
+    overdue_tasks_sum = 0
+    completed_tasks_sum = 0
+
+    for emp in team_members:
+        emp_stats = stats_by_assignee.get(
+            emp.id,
+            {"total": 0, "completed": 0, "open": 0, "overdue": 0, "due_soon": 0},
+        )
+        emp_total = emp_stats["total"]
+        emp_completed = emp_stats["completed"]
+        emp_completion_rate = (
+            round((emp_completed / emp_total) * 100, 1) if emp_total > 0 else 0.0
+        )
+
+        total_tasks_sum += emp_total
+        open_tasks_sum += emp_stats["open"]
+        due_soon_tasks_sum += emp_stats["due_soon"]
+        overdue_tasks_sum += emp_stats["overdue"]
+        completed_tasks_sum += emp_completed
+
+        members_response.append(
+            TeamMemberWorkloadResponse(
+                employee_id=emp.id,
+                employee_name=emp.name,
+                employee_email=emp.email,
+                total_tasks=emp_total,
+                open_tasks=emp_stats["open"],
+                due_soon_tasks=emp_stats["due_soon"],
+                overdue_tasks=emp_stats["overdue"],
+                completed_tasks=emp_completed,
+                completion_rate=emp_completion_rate,
+            )
+        )
+
+    overall_completion_rate = (
+        round((completed_tasks_sum / total_tasks_sum) * 100, 1)
+        if total_tasks_sum > 0
+        else 0.0
+    )
+
+    overdue_response = []
+    for task, assignee in overdue_rows:
+        due_utc = _as_utc(task.due_at)
+        overdue_hours = max(0, int((now - due_utc).total_seconds() // 3600))
+        overdue_response.append(
+            TeamOverdueTaskResponse(
+                task_id=task.id,
+                title=task.title,
+                assignee_id=assignee.id,
+                assignee_name=assignee.name,
+                assignee_email=assignee.email,
+                due_at=due_utc,
+                overdue_hours=overdue_hours,
+                priority=task.priority,
+                status=task.status,
+            )
+        )
+
+    summary_response = TeamDashboardSummaryResponse(
+        team_name=resolved_team_name,
+        total_members=len(team_members),
+        total_tasks=total_tasks_sum,
+        open_tasks=open_tasks_sum,
+        due_soon_tasks=due_soon_tasks_sum,
+        overdue_tasks=overdue_tasks_sum,
+        completed_tasks=completed_tasks_sum,
+        completion_rate=overall_completion_rate,
+    )
+
+    return TeamDashboardResponse(
+        summary=summary_response,
+        members=members_response,
+        overdue_tasks=overdue_response,
+    )
 
 
 def _ical_stamp(value: datetime) -> str:
@@ -644,3 +905,345 @@ def run_task_calendar_sync(
             detail="Only managers, HR / Operations or admins can run the calendar sync.",
         )
     return run_sync_pass(db, poll=True).as_dict()
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3 – Manager Operational Monitoring Portal
+# ---------------------------------------------------------------------------
+
+def _resolve_manager_team(
+    db: Session,
+    principal: AuthenticatedPrincipal,
+    team_filter: str | None,
+) -> tuple[list[Employee], str, set[str]]:
+    """Return (team_members, resolved_team_name, manager_ids) using same isolation rules as team-dashboard."""
+    current_emp = (
+        db.query(Employee)
+        .filter((Employee.id == principal.user_id) | (Employee.email == principal.email))
+        .first()
+    )
+    manager_ids = {principal.user_id}
+    if current_emp:
+        manager_ids.add(current_emp.id)
+
+    manager_team = current_emp.team if current_emp and current_emp.team else principal.team
+
+    if principal.role == "manager":
+        # Managers always see own team – ignore team_filter parameter
+        team_filter_clauses = [Employee.manager_id.in_(list(manager_ids))]
+        if manager_team:
+            team_filter_clauses.append(
+                and_(
+                    Employee.manager_id.is_(None),
+                    func.lower(Employee.team) == manager_team.casefold(),
+                    ~Employee.id.in_(list(manager_ids)),
+                )
+            )
+        members = (
+            db.query(Employee)
+            .filter(Employee.is_active.is_(True), or_(*team_filter_clauses))
+            .order_by(Employee.name.asc())
+            .all()
+        )
+        return members, manager_team or "My Team", manager_ids
+    else:
+        # HR / Admin can filter by team
+        resolved_name = team_filter or manager_team or "Organisation"
+        q = db.query(Employee).filter(Employee.is_active.is_(True))
+        if team_filter:
+            q = q.filter(func.lower(Employee.team) == team_filter.casefold())
+        elif manager_team:
+            q = q.filter(func.lower(Employee.team) == manager_team.casefold())
+        return q.order_by(Employee.name.asc()).all(), resolved_name, manager_ids
+
+
+def _build_operational_monitoring(
+    db: Session,
+    team_members: list[Employee],
+    team_name: str,
+    manager_ids: set[str] | None = None,
+) -> OperationalMonitoringResponse:
+    """Assemble the full monitoring response from the given team member list."""
+    if not team_members:
+        return OperationalMonitoringResponse(
+            summary=OperationalMonitoringSummary(
+                team_name=team_name,
+                total_action_items=0,
+                action_items_pending_review=0,
+                total_tasks_monitored=0,
+                email_failed_count=0,
+                calendar_failed_count=0,
+                workflow_failed_count=0,
+                total_failures=0,
+            ),
+            action_items=[],
+            task_status_rows=[],
+            workflow_failures=[],
+            failure_reasons=[],
+        )
+
+    member_ids = [m.id for m in team_members]
+    member_by_id = {m.id: m for m in team_members}
+    relevant_user_ids = set(member_ids)
+    if manager_ids:
+        relevant_user_ids.update(manager_ids)
+
+    # --- Action Items for team members ---
+    # MeetingActionItem → MeetingActionItemExtraction → Meeting
+    action_item_rows: list[ActionItemMonitorRow] = []
+    ai_items = (
+        db.query(MeetingActionItem, MeetingActionItemExtraction, Meeting)
+        .join(MeetingActionItemExtraction, MeetingActionItem.extraction_id == MeetingActionItemExtraction.id)
+        .join(Meeting, MeetingActionItemExtraction.meeting_id == Meeting.id)
+        .filter(
+            or_(
+                MeetingActionItem.proposed_employee_id.in_(member_ids),
+                MeetingActionItem.confirmed_employee_id.in_(member_ids),
+            )
+        )
+        .order_by(MeetingActionItem.deadline_at.asc())
+        .all()
+    )
+    pending_review_count = 0
+    for ai, extraction, meeting in ai_items:
+        owner_emp = member_by_id.get(ai.confirmed_employee_id or ai.proposed_employee_id or "")
+        owner_email = owner_emp.email if owner_emp else None
+        if ai.review_status == "pending_review":
+            pending_review_count += 1
+        action_item_rows.append(
+            ActionItemMonitorRow(
+                action_item_id=ai.id,
+                task_description=ai.task_description,
+                owner_name=ai.owner_name or (owner_emp.name if owner_emp else None),
+                owner_email=owner_email,
+                deadline_at=ai.deadline_at,
+                ownership_status=ai.ownership_status,
+                review_status=ai.review_status,
+                meeting_id=meeting.id,
+                meeting_title=meeting.title or "(untitled)",
+            )
+        )
+
+    # --- Task status rows (email + calendar) ---
+    tasks = (
+        db.query(Task)
+        .filter(Task.assignee_id.in_(member_ids))
+        .order_by(Task.due_at.asc())
+        .all()
+    )
+    task_ids = [t.id for t in tasks]
+
+    # Bulk fetch calendar syncs
+    cal_by_task: dict[str, TaskCalendarSync] = {}
+    if task_ids:
+        for cs in db.query(TaskCalendarSync).filter(TaskCalendarSync.task_id.in_(task_ids)).all():
+            cal_by_task[cs.task_id] = cs
+
+    task_rows: list[TaskStatusRow] = []
+    email_failed = 0
+    cal_failed = 0
+    for t in tasks:
+        emp = member_by_id.get(t.assignee_id)
+        cs = cal_by_task.get(t.id)
+        if t.assignment_email_status == "failed":
+            email_failed += 1
+        if cs and cs.status == "failed":
+            cal_failed += 1
+        task_rows.append(
+            TaskStatusRow(
+                task_id=t.id,
+                title=t.title,
+                assignee_name=emp.name if emp else t.assignee_id,
+                assignee_email=emp.email if emp else "",
+                priority=t.priority,
+                due_at=t.due_at,
+                status=t.status,
+                email_status=t.assignment_email_status,
+                email_error=t.assignment_email_error,
+                calendar_status=cs.status if cs else None,
+                calendar_error=cs.last_error if cs else None,
+                calendar_provider=cs.provider if cs else None,
+                calendar_attempt_count=cs.attempt_count if cs else None,
+            )
+        )
+
+    # --- Workflow failures related to team's meetings ---
+    # Find meetings where any team member or manager was organiser or participant
+    organizer_meeting_ids = [
+        row[0]
+        for row in db.query(Meeting.id).filter(Meeting.organizer_id.in_(list(relevant_user_ids))).all()
+    ]
+    participant_meeting_ids = [
+        row[0]
+        for row in db.query(MeetingParticipant.meeting_id).filter(MeetingParticipant.user_id.in_(list(relevant_user_ids))).all()
+    ]
+    task_meeting_ids = [t.meeting_id for t in tasks if t.meeting_id]
+
+    team_meeting_ids = list(set(organizer_meeting_ids + participant_meeting_ids + task_meeting_ids))
+
+    workflow_failure_rows: list[WorkflowFailureRow] = []
+    if team_meeting_ids:
+        failed_runs = (
+            db.query(WorkflowRun)
+            .filter(
+                WorkflowRun.meeting_id.in_(team_meeting_ids),
+                WorkflowRun.status.in_(["failed", "cancelled"]),
+            )
+            .order_by(WorkflowRun.updated_at.desc())
+            .limit(100)
+            .all()
+        )
+        for run in failed_runs:
+            workflow_failure_rows.append(
+                WorkflowFailureRow(
+                    run_id=run.id,
+                    workflow_type=run.workflow_type,
+                    status=run.status,
+                    last_error=run.last_error,
+                    attempt_count=run.attempt_count,
+                    max_attempts=run.max_attempts,
+                    created_at=run.created_at,
+                    updated_at=run.updated_at,
+                    run_link=f"/admin/workflows#run={run.id}",
+                )
+            )
+
+    wf_failed = len(workflow_failure_rows)
+
+    # --- Failure reasons table ---
+    # Group by (category, truncated_error_message) with count + last timestamp
+    from collections import defaultdict
+
+    reason_map: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+
+    # Email failures
+    for t in tasks:
+        if t.assignment_email_status == "failed" and t.assignment_email_error:
+            key = ("email", t.assignment_email_error[:200])
+            reason_map[key].append(t.created_at)
+
+    # Calendar failures
+    for cs in cal_by_task.values():
+        if cs.status == "failed" and cs.last_error:
+            key = ("calendar", cs.last_error[:200])
+            reason_map[key].append(cs.updated_at)
+
+    # Notification failures (task_notifications)
+    if task_ids:
+        failed_notifs = (
+            db.query(TaskNotification)
+            .filter(
+                TaskNotification.task_id.in_(task_ids),
+                TaskNotification.status == "failed",
+            )
+            .all()
+        )
+        for notif in failed_notifs:
+            key = ("notification", (notif.error or "unknown error")[:200])
+            reason_map[key].append(notif.created_at)
+
+    # Workflow failures
+    for wr in workflow_failure_rows:
+        key = ("workflow", (wr.last_error or "unknown error")[:200])
+        reason_map[("workflow", (wr.last_error or "unknown error")[:200])].append(wr.updated_at)
+
+    failure_reasons: list[FailureReasonRow] = []
+    for (category, error_msg), timestamps in sorted(
+        reason_map.items(), key=lambda x: (-len(x[1]), x[0])
+    ):
+        failure_reasons.append(
+            FailureReasonRow(
+                category=category,
+                error_message=error_msg,
+                count=len(timestamps),
+                last_occurred_at=max(timestamps),
+            )
+        )
+
+    total_failures = email_failed + cal_failed + wf_failed
+
+    return OperationalMonitoringResponse(
+        summary=OperationalMonitoringSummary(
+            team_name=team_name,
+            total_action_items=len(action_item_rows),
+            action_items_pending_review=pending_review_count,
+            total_tasks_monitored=len(task_rows),
+            email_failed_count=email_failed,
+            calendar_failed_count=cal_failed,
+            workflow_failed_count=wf_failed,
+            total_failures=total_failures,
+        ),
+        action_items=action_item_rows,
+        task_status_rows=task_rows,
+        workflow_failures=workflow_failure_rows,
+        failure_reasons=failure_reasons,
+    )
+
+
+@router.get(
+    "/operational-monitoring",
+    response_model=OperationalMonitoringResponse,
+    summary="Manager operational monitoring portal – action items, task email/calendar status, workflow failures",
+)
+def get_operational_monitoring(
+    team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    """Return comprehensive monitoring data for the manager's team.
+
+    - Managers see their own team only (``team`` param is ignored).
+    - HR / Admin may pass ``?team=<name>`` to filter.
+    - Employees receive 403.
+    """
+    if principal.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers, HR / Operations or administrators can access the monitoring portal.",
+        )
+    team_members, team_name, manager_ids = _resolve_manager_team(db, principal, team)
+    return _build_operational_monitoring(db, team_members, team_name, manager_ids)
+
+
+@router.get(
+    "/operational-monitoring/export.csv",
+    summary="Export task status rows as CSV (manager / HR / admin only)",
+)
+def export_operational_monitoring_csv(
+    team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    if principal.role not in ("manager", "hr_operations", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only managers, HR / Operations or administrators can export monitoring data.",
+        )
+    team_members, _team_name, manager_ids = _resolve_manager_team(db, principal, team)
+    data = _build_operational_monitoring(db, team_members, _team_name, manager_ids)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "task_id", "title", "assignee_name", "assignee_email",
+        "priority", "due_at", "status",
+        "email_status", "email_error",
+        "calendar_status", "calendar_error", "calendar_provider", "calendar_attempt_count",
+    ])
+    for row in data.task_status_rows:
+        writer.writerow([
+            row.task_id, row.title, row.assignee_name, row.assignee_email,
+            row.priority,
+            row.due_at.isoformat() if row.due_at else "",
+            row.status,
+            row.email_status or "", row.email_error or "",
+            row.calendar_status or "", row.calendar_error or "",
+            row.calendar_provider or "", row.calendar_attempt_count if row.calendar_attempt_count is not None else "",
+        ])
+
+    csv_bytes = output.getvalue().encode("utf-8")
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=\"task-monitoring-export.csv\""},
+    )

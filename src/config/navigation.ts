@@ -22,6 +22,7 @@ export const navigationItems: NavigationItem[] = [
   { id: 'tasks', label: 'My Tasks', route: '/tasks', icon: CheckSquare, allowedRoles: ['employee', 'manager', 'admin'] },
   { id: 'calendar', label: 'Calendar', route: '/calendar', icon: CalendarDays, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'dashboard', label: 'Dashboard', route: '/dashboard', icon: Gauge, allowedRoles: ['manager', 'hr_operations', 'admin'] },
+  { id: 'monitoring', label: 'Operations Monitor', route: '/monitoring', icon: Activity, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'documents', label: 'Knowledge', route: '/documents', icon: FileText, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'approvals', label: 'Approvals', route: '/approvals', icon: ShieldCheck, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'my-approvals', label: 'My approvals', route: '/my-approvals', icon: ShieldCheck, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
@@ -38,6 +39,10 @@ export const navigationItems: NavigationItem[] = [
 export const getNavigationForRole = (role: UserRole) =>
   navigationItems.filter((item) => item.allowedRoles.includes(role))
 
-export const routePermissions: Record<string, UserRole[]> = Object.fromEntries(
-  navigationItems.map((item) => [item.route, item.allowedRoles]),
-)
+export const routePermissions: Record<string, UserRole[]> = {
+  ...Object.fromEntries(
+    navigationItems.map((item) => [item.route, item.allowedRoles]),
+  ),
+  '/team-dashboard': ['manager', 'hr_operations', 'admin'],
+  '/monitoring': ['manager', 'hr_operations', 'admin'],
+}

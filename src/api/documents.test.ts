@@ -9,6 +9,7 @@ const result: SemanticSearchResult = {
   content: 'HR coordinates onboarding.',
   score: 0.9,
   document_version: 1,
+  page_label: 'Page 2',
 }
 
 function jsonResponse(value: unknown, status = 200): Response {
@@ -34,8 +35,20 @@ describe('semantic document search API', () => {
     const url = new URL(fetchMock.mock.calls[0][0] as string)
     expect(url.pathname).toBe('/api/v1/documents/search')
     expect(url.searchParams.get('q')).toBe('employee onboarding process')
-    expect(url.searchParams.get('limit')).toBe('10')
+    expect(url.searchParams.get('limit')).toBe('5')
     expect(url.origin).toBe(API_BASE_URL)
+  })
+
+  it('never requests more than five semantic results', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({ results: [result] }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await searchDocuments('employee onboarding process', 25)
+
+    const url = new URL(fetchMock.mock.calls[0][0] as string)
+    expect(url.searchParams.get('limit')).toBe('5')
   })
 
   it('returns an empty list when the API finds no matching content', async () => {

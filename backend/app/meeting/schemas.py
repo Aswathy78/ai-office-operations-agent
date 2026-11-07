@@ -858,4 +858,118 @@ class MeetingParticipantResponse(BaseModel):
     role: str
 
 
+class TeamDashboardSummaryResponse(BaseModel):
+    team_name: str
+    total_members: int
+    total_tasks: int
+    open_tasks: int
+    due_soon_tasks: int
+    overdue_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class TeamMemberWorkloadResponse(BaseModel):
+    employee_id: str
+    employee_name: str
+    employee_email: str
+    total_tasks: int
+    open_tasks: int
+    due_soon_tasks: int
+    overdue_tasks: int
+    completed_tasks: int
+    completion_rate: float
+
+
+class TeamOverdueTaskResponse(BaseModel):
+    task_id: str
+    title: str
+    assignee_id: str
+    assignee_name: str
+    assignee_email: str
+    due_at: datetime
+    overdue_hours: int
+    priority: str
+    status: str
+
+
+class TeamDashboardResponse(BaseModel):
+    summary: TeamDashboardSummaryResponse
+    members: list[TeamMemberWorkloadResponse]
+    overdue_tasks: list[TeamOverdueTaskResponse]
+
+
+# ---------------------------------------------------------------------------
+# Story 9.3 – Manager Operational Monitoring Portal schemas
+# ---------------------------------------------------------------------------
+
+
+class ActionItemMonitorRow(BaseModel):
+    action_item_id: str
+    task_description: str
+    owner_name: str | None
+    owner_email: str | None
+    deadline_at: datetime | None
+    ownership_status: str
+    review_status: str
+    meeting_id: str
+    meeting_title: str
+
+
+class TaskStatusRow(BaseModel):
+    task_id: str
+    title: str
+    assignee_name: str
+    assignee_email: str
+    priority: str
+    due_at: datetime | None
+    status: str
+    # Email (assignment email)
+    email_status: str | None
+    email_error: str | None
+    # Calendar sync
+    calendar_status: str | None
+    calendar_error: str | None
+    calendar_provider: str | None
+    calendar_attempt_count: int | None
+
+
+class WorkflowFailureRow(BaseModel):
+    run_id: str
+    workflow_type: str
+    status: str
+    last_error: str | None
+    attempt_count: int
+    max_attempts: int
+    created_at: datetime
+    updated_at: datetime
+    run_link: str  # formatted as /admin/workflows#run={id}
+
+
+class FailureReasonRow(BaseModel):
+    category: str          # "email" | "calendar" | "workflow" | "notification"
+    error_message: str
+    count: int
+    last_occurred_at: datetime
+
+
+class OperationalMonitoringSummary(BaseModel):
+    team_name: str
+    total_action_items: int
+    action_items_pending_review: int
+    total_tasks_monitored: int
+    email_failed_count: int
+    calendar_failed_count: int
+    workflow_failed_count: int
+    total_failures: int
+
+
+class OperationalMonitoringResponse(BaseModel):
+    summary: OperationalMonitoringSummary
+    action_items: list[ActionItemMonitorRow]
+    task_status_rows: list[TaskStatusRow]
+    workflow_failures: list[WorkflowFailureRow]
+    failure_reasons: list[FailureReasonRow]
+
+
 TaskResponse.model_rebuild()

@@ -43,6 +43,7 @@ REQUIRED_PACKAGES = {
     "docx": "python-docx",
     "pptx": "python-pptx",
     "openpyxl": "openpyxl",
+    "sqlite_vec": "sqlite-vec",
     "PIL": "Pillow",
     "pytesseract": "pytesseract",
     "filetype": "filetype",

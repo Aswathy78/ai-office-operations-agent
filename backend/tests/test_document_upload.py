@@ -602,6 +602,18 @@ def test_private_document_visibility_matches_acl_for_listing_and_semantic_search
     } == {private_doc.id, shared_doc.id}
 
 
+def test_semantic_search_endpoint_rejects_limits_above_five(
+    client: TestClient,
+):
+    response = client.get(
+        "/api/v1/documents/search",
+        params={"q": "handbook", "limit": 6, "actor_role": "manager"},
+        headers={"X-User-Id": "emp-owner"},
+    )
+
+    assert response.status_code == 422
+
+
 def test_replacement_increments_version_and_preserves_existing_acl(
     db_session: Session,
     sample_employees,

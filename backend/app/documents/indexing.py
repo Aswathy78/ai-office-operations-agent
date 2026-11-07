@@ -12,12 +12,13 @@ from datetime import datetime, timezone
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.documents.chunking import DocumentChunkText, chunk_document_text
+from app.documents.chunking import chunk_document_text
 from app.documents.embeddings import (
     EMBEDDING_MODEL,
     count_tokens,
     embed_passages,
     embed_query,
+    encode_tokens,
 )
 from app.documents.models import (
     DOC_STATUS_READY,
@@ -30,6 +31,11 @@ from app.documents.models import (
     DocumentChunk,
 )
 from app.documents.service import _document_access_filter
+from app.documents.vector_store import (
+    backfill_missing_vectors,
+    delete_vectors,
+    persist_vectors,
+)
 from app.meeting.models import Employee
 
 logger = logging.getLogger(__name__)
@@ -160,6 +166,22 @@ def _search_terms(text: str) -> set[str]:
 def _contains_search_term(term: str, content_terms: set[str]) -> bool:
     return term in content_terms or bool(
         _SEARCH_TERM_SYNONYMS.get(term, frozenset()).intersection(content_terms)
+    )
+
+
+def _has_substantial_token_overlap(left: str, right: str) -> bool:
+    left_tokens = re.findall(r"\w+", left.casefold())
+    right_tokens = re.findall(r"\w+", right.casefold())
+    window_size = 40
+    if min(len(left_tokens), len(right_tokens)) < window_size:
+        return False
+    left_windows = {
+        tuple(left_tokens[index : index + window_size])
+        for index in range(len(left_tokens) - window_size + 1)
+    }
+    return any(
+        tuple(right_tokens[index : index + window_size]) in left_windows
+        for index in range(len(right_tokens) - window_size + 1)
     )
 
 
@@ -381,7 +403,11 @@ def index_document(db: Session, document_id: str) -> bool:
     try:
         if not doc.extracted_text or not doc.extracted_text.strip():
             raise ValueError("The extracted document has no text to index.")
-        chunks = chunk_document_text(doc.extracted_text, count_tokens)
+        chunks = chunk_document_text(
+            doc.extracted_text,
+            count_tokens,
+            encode_tokens=encode_tokens,
+        )
         if not chunks:
             raise ValueError("The extracted document produced no searchable text.")
         vectors = embed_passages(chunk.content for chunk in chunks)
@@ -389,6 +415,8 @@ def index_document(db: Session, document_id: str) -> bool:
             raise RuntimeError("The embedding model returned an incomplete result.")
         if any(not vector or not all(math.isfinite(value) for value in vector) for vector in vectors):
             raise RuntimeError("The embedding model returned an invalid vector.")
+        if len({len(vector) for vector in vectors}) != 1:
+            raise RuntimeError("The embedding model returned inconsistent vector dimensions.")
 
         owner = db.get(Employee, doc.owner_id)
         if owner is None:
@@ -418,30 +446,44 @@ def index_document(db: Session, document_id: str) -> bool:
             db.rollback()
             return False
 
+        active_chunks = (
+            db.query(DocumentChunk)
+            .filter(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.soft_deleted_at.is_(None),
+            )
+            .all()
+        )
+        delete_vectors(db, (chunk.id for chunk in active_chunks))
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == document_id,
             DocumentChunk.soft_deleted_at.is_(None),
         ).delete(synchronize_session=False)
         now = datetime.now(timezone.utc)
-        db.add_all(
-            [
-                DocumentChunk(
-                    id=str(uuid.uuid4()),
-                    document_id=document_id,
-                    document_version=version,
-                    chunk_index=index,
-                    heading=chunk.heading,
-                    content=chunk.content,
-                    token_count=chunk.token_count,
-                    department=owner.team,
-                    page_label=chunk.location,
-                    acl_employee_ids=acl_ids,
-                    embedding=vector,
-                    embedding_model=EMBEDDING_MODEL,
-                    created_at=now,
-                )
-                for index, (chunk, vector) in enumerate(zip(chunks, vectors))
-            ]
+        indexed_chunks = [
+            DocumentChunk(
+                id=str(uuid.uuid4()),
+                document_id=document_id,
+                document_version=version,
+                chunk_index=index,
+                source=doc.original_filename,
+                heading=chunk.heading,
+                content=chunk.content,
+                token_count=chunk.token_count,
+                department=owner.team,
+                page_label=chunk.location,
+                acl_employee_ids=acl_ids,
+                embedding=vector,
+                embedding_model=EMBEDDING_MODEL,
+                created_at=now,
+            )
+            for index, (chunk, vector) in enumerate(zip(chunks, vectors))
+        ]
+        db.add_all(indexed_chunks)
+        db.flush()
+        persist_vectors(
+            db,
+            ((chunk.id, vector) for chunk, vector in zip(indexed_chunks, vectors)),
         )
         current.indexing_status = INDEX_STATUS_READY
         current.indexing_failure_reason = None
@@ -491,6 +533,8 @@ def search_documents(
         return []
 
     query_vector = embed_query(normalized_query)
+    if not query_vector or not all(math.isfinite(value) for value in query_vector):
+        raise RuntimeError("The embedding model returned an invalid query vector.")
     # Lexical checks use the document vocabulary; the embedding keeps the user's words.
     term_query = normalized_query
     for pattern, replacement in _QUERY_SYNONYMS:
@@ -515,6 +559,13 @@ def search_documents(
         for chunk, doc in rows
         if isinstance(chunk.acl_employee_ids, list) and chunk.acl_employee_ids
     ]
+    stored_vectors = backfill_missing_vectors(
+        db,
+        ((chunk.id, chunk.embedding) for chunk, _ in rows),
+        dimensions=len(query_vector),
+    )
+    if any(len(vector) != len(query_vector) for vector in stored_vectors.values()):
+        raise RuntimeError("The query and document embedding dimensions do not match.")
 
     query_terms = _search_terms(term_query)
     if query_terms - _SEARCH_META_WORDS:
@@ -545,7 +596,7 @@ def search_documents(
         return sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
 
     chunk_scores = [
-        (cosine(query_vector, chunk.embedding), chunk, doc)
+        (cosine(query_vector, stored_vectors[chunk.id]), chunk, doc)
         for chunk, doc in rows
     ]
     chunk_scores.sort(key=lambda item: item[0], reverse=True)
@@ -741,7 +792,10 @@ def search_documents(
                     if union_size
                     else 0.0
                 )
-                if similarity >= 0.80:
+                if similarity >= 0.80 or _has_substantial_token_overlap(
+                    result.content,
+                    unique_results[index].content,
+                ):
                     is_near_duplicate = True
                     previous_result = unique_results[index]
                     if (

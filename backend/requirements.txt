@@ -41,6 +41,7 @@ filetype>=1.2
 
 # Story 7.2: local CPU embeddings; model inference runs in-process.
 fastembed==0.9.1
+sqlite-vec==0.1.6
 
 # Optional: only used when OPENAI_API_KEY is set (the assistant normally uses Groq).
 # openai>=1.0

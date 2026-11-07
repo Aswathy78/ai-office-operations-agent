@@ -1,5 +1,6 @@
 import atexit
 import os
+import re
 import shutil
 import tempfile
 
@@ -17,6 +18,59 @@ os.environ["OFFICE_OPERATIONS_DB_PATH"] = os.path.join(_TEST_DATABASE_DIRECTORY,
 os.environ["SEED_DEFAULT_ACCOUNTS"] = "false"  # tests create the accounts they need
 os.environ["AUTO_MIGRATE"] = "false"
 atexit.register(shutil.rmtree, _TEST_DATABASE_DIRECTORY, ignore_errors=True)
+
+
+class _WhitespaceDocumentTokenizer:
+    def __init__(self) -> None:
+        self._token_ids: dict[str, int] = {}
+        self._tokens: list[str] = []
+
+    def encode(self, text: str) -> tuple[list[int], list[tuple[int, int]]]:
+        token_ids: list[int] = []
+        offsets: list[tuple[int, int]] = []
+        for match in re.finditer(r"\S+", text):
+            token = match.group()
+            token_id = self._token_ids.get(token)
+            if token_id is None:
+                token_id = len(self._tokens)
+                self._token_ids[token] = token_id
+                self._tokens.append(token)
+            token_ids.append(token_id)
+            offsets.append(match.span())
+        return token_ids, offsets
+
+    def decode(self, token_ids: list[int]) -> str:
+        return " ".join(self._tokens[token_id] for token_id in token_ids)
+
+    def count(self, text: str) -> int:
+        return len(self.encode(text)[0])
+
+
+@pytest.fixture()
+def document_test_tokenizer():
+    return _WhitespaceDocumentTokenizer()
+
+
+@pytest.fixture(autouse=True)
+def _stub_document_embedding_tokenizer(
+    request,
+    monkeypatch,
+    document_test_tokenizer,
+):
+    if request.module.__name__ not in {
+        "tests.test_document_indexing",
+        "tests.test_document_upload",
+        "test_document_indexing",
+        "test_document_upload",
+    }:
+        return
+
+    import app.documents.indexing as indexing
+
+    tokenizer = document_test_tokenizer
+    monkeypatch.setattr(indexing, "count_tokens", tokenizer.count)
+    monkeypatch.setattr(indexing, "encode_tokens", tokenizer.encode)
+
 
 # TestClient(app) runs the startup hook. Never let the reminder scheduler or the
 # e-mail dispatcher run against the real database (and send real e-mails) during tests.

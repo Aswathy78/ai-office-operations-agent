@@ -37,6 +37,7 @@ from app.documents.storage import (
     max_upload_bytes,
     write_document_file,
 )
+from app.documents.vector_store import delete_vectors
 from app.meeting.models import Employee
 
 logger = logging.getLogger(__name__)
@@ -496,6 +497,13 @@ def remove_document(db: Session, document: Document) -> None:
     stored_filename = (
         current_document.stored_filename if current_document is not None else None
     )
+    chunk_ids = [
+        chunk_id
+        for (chunk_id,) in db.query(DocumentChunk.id)
+        .filter(DocumentChunk.document_id == document_id)
+        .all()
+    ]
+    delete_vectors(db, chunk_ids)
     db.query(DocumentChunk).filter(
         DocumentChunk.document_id == document_id
     ).delete(synchronize_session=False)
@@ -518,6 +526,13 @@ def reset_documents(db: Session) -> int:
     count = len(docs)
     for doc in docs:
         delete_document_file(doc.stored_filename)
+        chunk_ids = [
+            chunk_id
+            for (chunk_id,) in db.query(DocumentChunk.id)
+            .filter(DocumentChunk.document_id == doc.id)
+            .all()
+        ]
+        delete_vectors(db, chunk_ids)
         db.query(DocumentChunk).filter(
             DocumentChunk.document_id == doc.id
         ).delete(synchronize_session=False)
