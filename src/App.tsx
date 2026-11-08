@@ -26,6 +26,7 @@ import { WorkflowQueuePage } from './pages/WorkflowQueuePage'
 import { AdminDashboardPage } from './pages/AdminDashboardPage'
 import { ManagerDashboard } from './pages/ManagerDashboard'
 import { ManagerMonitoringPage } from './pages/ManagerMonitoringPage'
+import { AdminAssistantRunsPage } from './pages/AdminAssistantRunsPage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
@@ -98,6 +99,7 @@ function AppRoutes() {
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><AdminDashboardPage view="users" /></ProtectedAppPage>} />
       <Route path="/admin/workflows" element={<ProtectedAppPage path="/admin/workflows"><WorkflowQueuePage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><AdminDashboardPage view="health" /></ProtectedAppPage>} />
+      <Route path="/admin/assistant-runs" element={<ProtectedAppPage path="/admin/assistant-runs"><AdminAssistantRunsPage /></ProtectedAppPage>} />
       <Route path="/admin/audit-logs" element={<ProtectedAppPage path="/admin/audit-logs"><AuditLogsPage /></ProtectedAppPage>} />
 
       {/* Smart meeting entry — dynamic route for /meetings/:meetingId (only hits if not /meetings/create or /meetings) */}

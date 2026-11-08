@@ -469,6 +469,7 @@ class PlanStep:
     # Story 6.6 — set when the write guard paused the step for approval.
     approval_id: str | None = None
     risk_level: str | None = None
+    tool_execution_id: str | None = None
 
 
 @dataclass
@@ -1176,8 +1177,10 @@ def execute_plan_step(
                 conversation_id=conversation_id,
             )
         except ToolError as exc:
+            step.tool_execution_id = exc.execution_id
             raise StepExecutionError(exc.message) from exc
         step.risk_level = outcome.risk_level
+        step.tool_execution_id = outcome.execution_id
         if outcome.status == "approval_required":
             step.approval_id = outcome.approval["id"]
             raise StepApprovalRequired(outcome.approval, outcome.risk_reasons)

@@ -1,5 +1,6 @@
 import {
   Activity,
+  Bot,
   CalendarDays,
   CheckSquare,
   Bell,
@@ -32,6 +33,7 @@ export const navigationItems: NavigationItem[] = [
   { id: 'users', label: 'Users', route: '/admin/users', icon: Users, allowedRoles: ['admin'] },
   { id: 'workflows', label: 'Workflow queue', route: '/admin/workflows', icon: Workflow, allowedRoles: ['admin'] },
   { id: 'agent-monitor', label: 'Agent Monitor', route: '/admin/agent-monitor', icon: Activity, allowedRoles: ['admin'] },
+  { id: 'assistant-runs', label: 'Assistant Runs', route: '/admin/assistant-runs', icon: Bot, allowedRoles: ['admin'] },
   { id: 'audit', label: 'Audit Logs', route: '/admin/audit-logs', icon: Settings, allowedRoles: ['admin'] },
   { id: 'chat', label: 'Corporate Chatbox', route: '/chat', icon: MessageSquare, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
 ]
