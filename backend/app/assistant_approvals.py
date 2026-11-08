@@ -80,6 +80,9 @@ def expire_stale(db: Session) -> int:
         approval.updated_at = now
     db.commit()
     for approval in stale:
+        from app.assistant_run_tracing import resolve_run_for_approval
+
+        resolve_run_for_approval(db, approval, status="failed", output_data={"status": "expired"})
         record_audit(
             db, actor_id=approval.requester_id, actor_role=approval.requester_role,
             tool_name=approval.tool_name, event="expired", risk_level=approval.risk_level,
@@ -165,6 +168,8 @@ def decide_approval(
     decider: AuthenticatedPrincipal,
     decision: str,
     note: str | None = None,
+    *,
+    continue_run: bool = False,
 ) -> ApprovalDecisionResult:
     """Approve (and run as the requester) or reject one pending request."""
     if decision not in ("approve", "reject"):
@@ -190,6 +195,9 @@ def decide_approval(
     if decision == "reject":
         approval.status = ACTION_APPROVAL_STATUS_REJECTED
         db.commit()
+        from app.assistant_run_tracing import resolve_run_for_approval
+
+        resolve_run_for_approval(db, approval, status="cancelled", output_data={"status": "rejected"})
         record_audit(
             db, actor=decider, tool_name=approval.tool_name, event="rejected",
             risk_level=approval.risk_level, approval_id=approval.id,
@@ -236,11 +244,29 @@ def decide_approval(
                 conversation_id=approval.conversation_id, detail=exc.message,
             )
         if approval.status == "failed":
+            from app.assistant_run_tracing import resolve_run_for_approval
+
+            resolve_run_for_approval(
+                db,
+                approval,
+                status="failed",
+                output_data={"status": "failed"},
+            )
             from app.notification_service import notify_assistant_approval_decision
 
             notify_assistant_approval_decision(db, approval, outcome="failed")
         return ApprovalDecisionResult(approval, None, f"Approved, but it could not run: {exc.message}")
     db.refresh(approval)
+    from app.assistant_run_tracing import resolve_run_for_approval
+
+    resolve_run_for_approval(
+        db,
+        approval,
+        status="completed",
+        execution_id=outcome.execution_id,
+        output_data={"status": "executed"},
+        finalize_run=not continue_run,
+    )
     from app.notification_service import notify_assistant_approval_decision
 
     notify_assistant_approval_decision(db, approval, outcome="executed")
@@ -260,6 +286,9 @@ def cancel_approval(
     approval.status = ACTION_APPROVAL_STATUS_CANCELLED
     approval.updated_at = _now()
     db.commit()
+    from app.assistant_run_tracing import resolve_run_for_approval
+
+    resolve_run_for_approval(db, approval, status="cancelled", output_data={"status": "cancelled"})
     record_audit(
         db, actor=actor, tool_name=approval.tool_name, event="cancelled",
         risk_level=approval.risk_level, approval_id=approval.id,

@@ -144,6 +144,7 @@ class ToolError(Exception):
     def __init__(self, message: str):
         super().__init__(message)
         self.message = message
+        self.execution_id: str | None = None
 
 
 class UnknownToolError(ToolError):
@@ -1327,9 +1328,14 @@ def _run_with_ledger(
         "Tool %s %s execution_id=%s: %s", spec.name, row.status, execution_id, type(error).__name__
     )
     if isinstance(error, ToolError):
+        error.execution_id = execution_id
         raise error
     if isinstance(error, OperationalError):
-        raise ToolTransientError("The database is busy; try again shortly.") from error
-    raise ToolExecutionError(
+        transient_error = ToolTransientError("The database is busy; try again shortly.")
+        transient_error.execution_id = execution_id
+        raise transient_error from error
+    execution_error = ToolExecutionError(
         f"{tool_name!r} failed unexpectedly ({type(error).__name__})."
-    ) from error
+    )
+    execution_error.execution_id = execution_id
+    raise execution_error from error

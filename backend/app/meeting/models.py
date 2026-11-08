@@ -2157,6 +2157,114 @@ class AssistantActionApproval(Base):
     )
 
 
+ASSISTANT_RUN_STATUSES = (
+    "running",
+    "awaiting_approval",
+    "completed",
+    "failed",
+    "cancelled",
+)
+ASSISTANT_RUN_STEP_STATUSES = (
+    "pending",
+    "running",
+    "awaiting_approval",
+    "completed",
+    "failed",
+    "skipped",
+    "escalated",
+    "cancelled",
+)
+
+
+class AssistantRun(Base):
+    """Durable lifecycle record for one interactive assistant execution."""
+
+    __tablename__ = "assistant_runs"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in ASSISTANT_RUN_STATUSES)})",
+            name="ck_assistant_runs_status",
+        ),
+        Index("ix_assistant_runs_user_started", "user_id", "started_at"),
+        Index("ix_assistant_runs_status_started", "status", "started_at"),
+        Index("ix_assistant_runs_conversation", "conversation_id", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("employees.id", ondelete="SET NULL"), nullable=True
+    )
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("assistant_conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    steps: Mapped[list["AssistantRunStep"]] = relationship(
+        "AssistantRunStep",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="AssistantRunStep.step_order",
+    )
+
+
+class AssistantRunStep(Base):
+    """Ordered, privacy-filtered trace of one interactive assistant run step."""
+
+    __tablename__ = "assistant_run_steps"
+    __table_args__ = (
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in ASSISTANT_RUN_STEP_STATUSES)})",
+            name="ck_assistant_run_steps_status",
+        ),
+        UniqueConstraint("run_id", "step_order", name="uq_assistant_run_steps_run_order"),
+        Index("ix_assistant_run_steps_run_order", "run_id", "step_order"),
+        Index("ix_assistant_run_steps_tool_execution", "tool_execution_id"),
+        Index("ix_assistant_run_steps_approval", "approval_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("assistant_runs.id", ondelete="CASCADE"), nullable=False
+    )
+    step_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    step_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    step_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    input_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    estimated_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider_total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_execution_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("assistant_tool_executions.id", ondelete="SET NULL"), nullable=True
+    )
+    approval_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("assistant_action_approvals.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+
+    run: Mapped["AssistantRun"] = relationship("AssistantRun", back_populates="steps")
+
+
 class AssistantAuditEvent(Base):
     """One permission, conflict, risk or approval decision about an assistant tool call (Story 6.6)."""
 

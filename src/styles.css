@@ -2122,6 +2122,30 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .admin-services li { display: flex; align-items: center; gap: 8px; }
 .admin-unavailable { display: grid; gap: 4px; padding: 14px 16px; background: #f7f9fc; border: 1px dashed var(--border); border-radius: 12px; color: var(--muted); font-size: 13px; }
 .admin-note { margin: 0; color: var(--muted); font-size: 12px; }
+.admin-run-table { min-width: 1160px; }
+.admin-run-table td small { display: block; margin-top: 4px; color: var(--muted); }
+.admin-run-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+.admin-run-pagination > div { display: flex; gap: 8px; }
+.admin-run-detail { display: grid; gap: 12px; }
+.admin-run-detail h3, .admin-run-detail h4, .admin-run-detail p { margin: 0; }
+.admin-run-detail h4 { margin-top: 8px; color: var(--navy); }
+.admin-run-detail-heading, .admin-run-step-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.admin-run-detail-heading h3 { overflow-wrap: anywhere; }
+.admin-run-steps { display: grid; gap: 12px; margin: 0; padding-left: 28px; }
+.admin-run-steps > li { padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #fbfcfe; }
+.admin-run-step-heading small, .admin-run-approvals small { display: block; margin-top: 5px; color: var(--muted); }
+.admin-run-token-detail { display: flex; gap: 10px 18px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 12px; }
+.admin-run-traces { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.admin-run-trace { min-width: 0; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.admin-run-trace summary { padding: 9px 11px; color: #174d8e; font-size: 12px; font-weight: 700; cursor: pointer; }
+.admin-run-trace pre { max-height: 260px; overflow: auto; margin: 0; padding: 10px; border-top: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.admin-run-trace-empty { color: var(--muted); font-size: 12px; }
+.admin-run-approvals { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.admin-run-approvals li { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 5px 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.admin-run-approvals small { grid-column: 1 / -1; }
+.admin-run-switcher { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.admin-run-switcher h2 { margin: 0; font-size: 20px; }
+.admin-run-switcher [role="tablist"] { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .admin-dashboard { margin-bottom: 18px; }
 .audit-search { display: flex; gap: 8px; }

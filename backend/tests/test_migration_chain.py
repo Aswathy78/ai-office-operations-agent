@@ -37,6 +37,8 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
             "workflow_steps",
             "workflow_dead_letters",
             "workflow_events",
+            "assistant_runs",
+            "assistant_run_steps",
         } <= table_names
     finally:
         engine.dispose()
@@ -135,7 +137,7 @@ def test_migration_chain_handles_app_created_tables_with_a_stale_revision(
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261104_01"
+            ).scalar_one() == "20261108_01"
             assert connection.exec_driver_sql(
                 "SELECT id, status FROM workflow_runs WHERE id = 'run-1'"
             ).one() == ("run-1", "pending")

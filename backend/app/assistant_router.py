@@ -49,6 +49,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Literal
 import uuid
 
@@ -61,6 +62,13 @@ from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import AssistantConversation
+from app.assistant_run_tracing import (
+    create_assistant_run,
+    ensure_assistant_run_step,
+    record_assistant_run_step,
+    resume_assistant_run,
+    set_assistant_run_status,
+)
 from app import assistant_service
 from app.assistant_service import (
     delete_conversation,
@@ -206,6 +214,7 @@ class _PlanRunner:
         understanding: AssistantUnderstanding,
         principal: AuthenticatedPrincipal,
         conversation_id: str,
+        run_id: str,
         run_db: Session,
         engine,
         confirmed: bool,
@@ -218,6 +227,7 @@ class _PlanRunner:
         self.understanding = understanding
         self.principal = principal
         self.conversation_id = conversation_id
+        self.run_id = run_id
         self.run_db = run_db
         self.engine = engine
         self.confirmed = confirmed
@@ -236,10 +246,14 @@ class _PlanRunner:
         self._reasons: dict[int, list[str]] = {}
         self.chunks: list[str] = []
         self.last_index = -1
+        self._step_started_at: dict[int, datetime] = {}
+        self._step_started_monotonic: dict[int, float] = {}
 
     # -- persistence -------------------------------------------------------
 
     def save(self, pending_confirmation: dict | None = None) -> None:
+        if pending_confirmation is not None:
+            pending_confirmation = {**pending_confirmation, "run_id": self.run_id}
         with Session(bind=self.engine) as write_db:
             write_conv = write_db.get(AssistantConversation, self.conversation_id)
             if write_conv:
@@ -255,6 +269,37 @@ class _PlanRunner:
                     pending_confirmation,
                 )
 
+    def _trace_step(self, step: PlanStep, status_: str, tokens: int | None = None) -> None:
+        now = datetime.now(timezone.utc)
+        if status_ == "running":
+            self._step_started_at.setdefault(step.index, now)
+            self._step_started_monotonic.setdefault(step.index, time.monotonic())
+        terminal = status_ in {"completed", "failed", "skipped", "escalated", "cancelled"}
+        started_at = self._step_started_at.get(step.index)
+        duration_ms = None
+        if terminal and step.index in self._step_started_monotonic:
+            duration_ms = int((time.monotonic() - self._step_started_monotonic[step.index]) * 1000)
+        input_data = {"tool_name": step.tool_name, "arguments": step.tool_arguments}
+        output_data = {"status": status_}
+        if step.result:
+            output_data["result"] = step.result
+        record_assistant_run_step(
+            self.run_db,
+            run_id=self.run_id,
+            step_order=step.index,
+            step_type=step.action_type,
+            step_name=step.tool_name or step.action_type,
+            status=status_,
+            input_data=input_data,
+            output_data=output_data,
+            started_at=started_at,
+            ended_at=now if terminal else None,
+            duration_ms=duration_ms,
+            estimated_tokens=tokens if tokens is not None else step.estimated_tokens,
+            tool_execution_id=step.tool_execution_id,
+            approval_id=step.approval_id,
+        )
+
     def _record(self, step: PlanStep, status_: str, summary: str, tokens: int) -> None:
         self.completed_steps.append(CompletedStep(
             index=step.index,
@@ -265,6 +310,13 @@ class _PlanRunner:
             tokens_used=tokens,
         ))
         self.last_index = step.index
+        trace_status = {
+            "done": "completed",
+            "failed": "failed",
+            "escalated": "escalated",
+            "skipped": "skipped",
+        }.get(status_, "completed")
+        self._trace_step(step, trace_status, tokens)
         self.save()
 
     def _fail(self, step: PlanStep, message: str):
@@ -285,6 +337,7 @@ class _PlanRunner:
         self._reasons[step.index] = approval["risk_reasons"][1:] or approval["risk_reasons"]
         self.awaiting.append(step)
         self.last_index = step.index
+        self._trace_step(step, "awaiting_approval")
         self.save()
         payload = {
             "index": step.index,
@@ -302,9 +355,16 @@ class _PlanRunner:
 
     def _run_approved(self, step: PlanStep) -> str:
         """Confirm turn: approve the requester's own medium-risk request and run it."""
-        result = decide_approval(self.run_db, step.approval_id, self.principal, "approve")
+        result = decide_approval(
+            self.run_db,
+            step.approval_id,
+            self.principal,
+            "approve",
+            continue_run=True,
+        )
         if result.outcome is None:
             raise StepExecutionError(result.message)
+        step.tool_execution_id = result.outcome.execution_id
         step.result = result.outcome.result or {}
         self.results[step.tool_name] = step.result
         return summarize_tool_result(step.tool_name, step.result)
@@ -345,6 +405,7 @@ class _PlanRunner:
             self.notices.append(assistant_planner.EMAIL_DOCUMENT_NOT_FOUND_NOTICE)
 
     def _execute(self, step: PlanStep):
+        self._trace_step(step, "running")
         if step.tool_name == "email.preview":
             yield from self._email_document_context()
         # Conditional retrieval for steps that are not themselves the search tool.
@@ -503,6 +564,14 @@ class _PlanRunner:
     # -- main loop ---------------------------------------------------------
 
     def run(self):
+        for step in self.plan_steps:
+            ensure_assistant_run_step(
+                self.run_db,
+                run_id=self.run_id,
+                step_order=step.index,
+                step_type=step.action_type,
+                step_name=step.tool_name or step.action_type,
+            )
         yield _sse({"plan": [asdict(step) for step in self.plan_steps]})
         for step in self.plan_steps:
             if step.status in ("done", "failed", "escalated", "skipped", "approval_required"):
@@ -515,6 +584,7 @@ class _PlanRunner:
                 break
             if not is_summary and self.failure is not None:
                 step.status = "skipped"
+                self._trace_step(step, "skipped")
                 continue
             if not is_summary and self.awaiting:
                 continue  # runs after the paused step is approved
@@ -525,6 +595,7 @@ class _PlanRunner:
 
             yield _sse({"step_start": {"index": step.index, "label": step.description}})
             if is_summary:
+                self._trace_step(step, "running")
                 yield from self._summarise(step)
                 if self.halted_reason:
                     break
@@ -542,6 +613,12 @@ class _PlanRunner:
                 "approval_ids": [s.approval_id for s in confirmable],
             }
         self.save(pending)
+        final_status = (
+            "awaiting_approval" if self.awaiting
+            else "failed" if self.failure
+            else "completed"
+        )
+        set_assistant_run_status(self.run_db, self.run_id, final_status)
 
         if not self.chunks and self.halted_reason:
             done = sum(1 for s in self.completed_steps if s.status == "done")
@@ -775,6 +852,19 @@ def stream_assistant_chat(
     # SSE generator
     # ------------------------------------------------------------------
     engine = db.get_bind()
+    existing_run_id = (
+        confirmed_checkpoint.pending_confirmation.get("run_id")
+        if confirmed_checkpoint is not None
+        else None
+    )
+    trace_run = resume_assistant_run(db, existing_run_id) if existing_run_id else None
+    if trace_run is None:
+        trace_run = create_assistant_run(
+            db,
+            user_id=principal.user_id,
+            conversation_id=conv_id,
+        )
+    trace_run_id = trace_run.id
 
     def sse_event_stream():  # noqa: C901  (acceptable complexity for SSE handler)
         # ---- Init payload (Story 6.1/6.2/6.3 fields preserved) ----
@@ -808,6 +898,7 @@ def stream_assistant_chat(
                     understanding=understanding,
                     principal=principal,
                     conversation_id=conv_id,
+                    run_id=trace_run_id,
                     run_db=run_db,
                     engine=engine,
                     confirmed=True,
@@ -832,6 +923,7 @@ def stream_assistant_chat(
                     understanding=understanding,
                     principal=principal,
                     conversation_id=conv_id,
+                    run_id=trace_run_id,
                     run_db=run_db,
                     engine=engine,
                     confirmed=False,
@@ -846,6 +938,20 @@ def stream_assistant_chat(
         # based on those documents) is answered only from the best four of eight
         # ACL-filtered semantic matches. Nothing relevant: say so; never guess.
         effective_forced = forced_response or clarification_resolved_notice
+        response_step_started = datetime.now(timezone.utc)
+        response_step_clock = time.monotonic()
+        with Session(bind=engine) as trace_db:
+            record_assistant_run_step(
+                trace_db,
+                run_id=trace_run_id,
+                step_order=0,
+                step_type="assistant_response",
+                step_name="assistant_response",
+                status="running",
+                input_data={"response_mode": "assistant"},
+                started_at=response_step_started,
+                estimated_tokens=assistant_planner.estimate_tokens(json.dumps(context_messages)),
+            )
         policy_question = assistant_planner.needs_retrieval(req.message)
         document_question = (
             effective_forced is None
@@ -924,6 +1030,21 @@ def stream_assistant_chat(
             logger.error(
                 "Error in stream_assistant_chat generator: %s", exc, exc_info=True
             )
+            ended_at = datetime.now(timezone.utc)
+            with Session(bind=engine) as trace_db:
+                record_assistant_run_step(
+                    trace_db,
+                    run_id=trace_run_id,
+                    step_order=0,
+                    step_type="assistant_response",
+                    step_name="assistant_response",
+                    status="failed",
+                    output_data={"status": "failed"},
+                    started_at=response_step_started,
+                    ended_at=ended_at,
+                    duration_ms=int((time.monotonic() - response_step_clock) * 1000),
+                )
+                set_assistant_run_status(trace_db, trace_run_id, "failed")
             err_payload = json.dumps({"error": "An error occurred while generating the response."})
             yield f"data: {err_payload}\n\n"
             yield "data: [DONE]\n\n"
@@ -943,6 +1064,28 @@ def stream_assistant_chat(
                 logger.error(
                     "Failed to persist assistant reply: %s", save_err, exc_info=True
                 )
+
+        ended_at = datetime.now(timezone.utc)
+        with Session(bind=engine) as trace_db:
+            record_assistant_run_step(
+                trace_db,
+                run_id=trace_run_id,
+                step_order=0,
+                step_type="assistant_response",
+                step_name="assistant_response",
+                status="completed",
+                output_data={"status": "completed"},
+                started_at=response_step_started,
+                ended_at=ended_at,
+                duration_ms=int((time.monotonic() - response_step_clock) * 1000),
+                estimated_tokens=(
+                    assistant_planner.estimate_tokens(json.dumps(context_messages))
+                    + assistant_planner.estimate_tokens(full_response)
+                    if full_response
+                    else assistant_planner.estimate_tokens(json.dumps(context_messages))
+                ),
+            )
+            set_assistant_run_status(trace_db, trace_run_id, "completed")
 
         yield "data: [DONE]\n\n"
 
