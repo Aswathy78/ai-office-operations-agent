@@ -137,7 +137,7 @@ def test_migration_chain_handles_app_created_tables_with_a_stale_revision(
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261108_01"
+            ).scalar_one() == "20261109_02"
             assert connection.exec_driver_sql(
                 "SELECT id, status FROM workflow_runs WHERE id = 'run-1'"
             ).one() == ("run-1", "pending")
@@ -152,5 +152,187 @@ def test_migration_chain_handles_app_created_tables_with_a_stale_revision(
                 "SELECT 1 FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'document_chunk_vectors'"
             ).first()
+    finally:
+        engine.dispose()
+
+
+def test_approval_center_migration_recovers_stale_batch_table_and_existing_link_table(
+    tmp_path: Path,
+):
+    database_path = tmp_path / "approval_retry.sqlite"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "INSERT INTO assistant_action_approvals "
+                "(id, tool_name, requester_id, requester_role, idempotency_key, arguments, "
+                "arguments_hash, summary, risk_level, risk_reasons, approver_kind, status, "
+                "expires_at, created_at, updated_at) "
+                "VALUES ('approval-1', 'email.send', 'employee-1', 'employee', 'key-1', "
+                "'{}', 'hash-1', 'Send an e-mail', 'high', '[]', 'approver', 'pending', "
+                "'2026-11-09 00:00:00', '2026-11-08 00:00:00', '2026-11-08 00:00:00')"
+            )
+            approval_ddl = connection.exec_driver_sql(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'assistant_action_approvals'"
+            ).scalar_one()
+            connection.exec_driver_sql(
+                approval_ddl.replace(
+                    "CREATE TABLE assistant_action_approvals",
+                    "CREATE TABLE _alembic_tmp_assistant_action_approvals",
+                    1,
+                )
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO _alembic_tmp_assistant_action_approvals "
+                "SELECT * FROM assistant_action_approvals WHERE id = 'approval-1'"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE alembic_version "
+                "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO alembic_version (version_num) VALUES ('20261108_01')"
+            )
+
+        config = Config(Path(__file__).resolve().parents[1] / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar_one() == "20261109_02"
+            assert connection.exec_driver_sql(
+                "SELECT id, status FROM assistant_action_approvals"
+            ).one() == ("approval-1", "pending")
+            assert {
+                column["name"]
+                for column in inspect(connection).get_columns("assistant_action_approvals")
+            } >= {
+                "alternate_approver_id",
+                "reminder_sent_at",
+                "expiry_notified_at",
+            }
+            assert connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' "
+                "AND name = '_alembic_tmp_assistant_action_approvals'"
+            ).first() is None
+            assert connection.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'assistant_approval_email_links'"
+            ).first()
+            assert {
+                index["name"] for index in inspect(connection).get_indexes(
+                    "assistant_approval_email_links"
+                )
+            } >= {"ix_assistant_approval_email_links_approval_recipient"}
+    finally:
+        engine.dispose()
+
+
+def test_story_97_migration_is_retry_safe_and_preserves_approval_data(tmp_path: Path):
+    database_path = tmp_path / "approval_lifecycle.sqlite"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE alembic_version "
+                "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO alembic_version (version_num) VALUES ('20261108_02')"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE assistant_action_approvals ("
+                "id VARCHAR(36) NOT NULL PRIMARY KEY, "
+                "status VARCHAR(20) NOT NULL, "
+                "created_at DATETIME NOT NULL, "
+                "expires_at DATETIME NOT NULL, "
+                "alternate_approver_id VARCHAR(36), "
+                "reminder_sent_at DATETIME)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO assistant_action_approvals "
+                "(id, status, created_at, expires_at, alternate_approver_id, reminder_sent_at) "
+                "VALUES ('approval-preserved', 'pending', '2026-11-08 10:00:00', "
+                "'2026-11-11 10:00:00', 'approver-1', NULL)"
+            )
+
+        config = Config(Path(__file__).resolve().parents[1] / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar_one() == "20261109_02"
+            assert connection.exec_driver_sql(
+                "SELECT id, status, alternate_approver_id, reminder_sent_at "
+                "FROM assistant_action_approvals"
+            ).one() == ("approval-preserved", "pending", "approver-1", None)
+            assert "expiry_notified_at" in {
+                column["name"]
+                for column in inspect(connection).get_columns("assistant_action_approvals")
+            }
+            assert connection.exec_driver_sql(
+                "SELECT affected_people FROM assistant_action_approvals "
+                "WHERE id = 'approval-preserved'"
+            ).scalar_one() is None
+            assert {
+                index["name"] for index in inspect(connection).get_indexes(
+                    "assistant_action_approvals"
+                )
+            } >= {"ix_assistant_action_approvals_alternate_status"}
+    finally:
+        engine.dispose()
+
+
+def test_approval_affected_people_migration_is_retry_safe(tmp_path: Path):
+    database_path = tmp_path / "approval_affected_people.sqlite"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE alembic_version "
+                "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO alembic_version (version_num) VALUES ('20261109_01')"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE assistant_action_approvals ("
+                "id VARCHAR(36) NOT NULL PRIMARY KEY, "
+                "status VARCHAR(20) NOT NULL, "
+                "affected_people JSON)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO assistant_action_approvals "
+                "(id, status, affected_people) "
+                "VALUES ('approval-preserved', 'pending', "
+                "'[{\"name\":\"Alice Smith\",\"email\":\"alice@example.test\"}]')"
+            )
+
+        config = Config(Path(__file__).resolve().parents[1] / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+        command.upgrade(config, "head")
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar_one() == "20261109_02"
+            assert json.loads(connection.exec_driver_sql(
+                "SELECT affected_people FROM assistant_action_approvals "
+                "WHERE id = 'approval-preserved'"
+            ).scalar_one()) == [
+                {"name": "Alice Smith", "email": "alice@example.test"}
+            ]
+            assert "affected_people" in {
+                column["name"]
+                for column in inspect(connection).get_columns("assistant_action_approvals")
+            }
     finally:
         engine.dispose()

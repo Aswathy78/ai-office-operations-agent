@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from './components/layout/AppShell'
 import { AccessDenied, NotFound } from './components/common/AccessDenied'
 import { routePermissions } from './config/navigation'
@@ -30,9 +30,12 @@ import { AdminAssistantRunsPage } from './pages/AdminAssistantRunsPage'
 
 function ProtectedRoute({ path, children }: { path: string; children: ReactNode }) {
   const { user, isAuthenticated } = useAuth()
+  const location = useLocation()
   const allowedRoles = routePermissions[path]
 
-  if (!isAuthenticated || !user) return <Navigate to="/login" replace />
+  if (!isAuthenticated || !user) {
+    return <Navigate to="/login" replace state={{ from: location }} />
+  }
   if (allowedRoles && !allowedRoles.includes(user.role)) return <AccessDenied />
   return <>{children}</>
 }

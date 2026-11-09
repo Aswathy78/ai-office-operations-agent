@@ -61,7 +61,7 @@ from sqlalchemy.orm import Session
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
-from app.meeting.models import AssistantConversation
+from app.meeting.models import AssistantActionApproval, AssistantConversation, AssistantRunStep
 from app.assistant_run_tracing import (
     create_assistant_run,
     ensure_assistant_run_step,
@@ -101,7 +101,7 @@ from app.assistant_planner import (
     save_execution_checkpoint,
     summarize_tool_result,
 )
-from app.assistant_tools import ToolError, get_registry
+from app.assistant_tools import ToolError, ToolExecutionOutcome, get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -604,13 +604,14 @@ class _PlanRunner:
 
         pending = None
         confirmable = [s for s in self.awaiting if s.status == "awaiting_confirmation"]
-        if confirmable and not self.halted_reason:
+        if self.awaiting and not self.halted_reason:
             pending = {
                 "confirmation_id": self.turn_id,
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "understanding": self.understanding.model_dump(mode="json"),
                 "results": self.results,
-                "approval_ids": [s.approval_id for s in confirmable],
+                "approval_ids": [s.approval_id for s in self.awaiting],
+                "requires_requester_confirmation": bool(confirmable),
             }
         self.save(pending)
         final_status = (
@@ -643,6 +644,104 @@ class _PlanRunner:
             except Exception as save_err:  # noqa: BLE001
                 logger.error("Failed to persist assistant reply: %s", save_err, exc_info=True)
         yield "data: [DONE]\n\n"
+
+
+def resume_approved_assistant_run(
+    db: Session,
+    approval: AssistantActionApproval,
+    outcome: ToolExecutionOutcome,
+) -> bool:
+    """Continue the saved plan after its paused action has executed."""
+    run_step = (
+        db.query(AssistantRunStep)
+        .filter(AssistantRunStep.approval_id == approval.id)
+        .one_or_none()
+    )
+    if run_step is None or approval.conversation_id is None:
+        return False
+    conversation = db.get(AssistantConversation, approval.conversation_id)
+    checkpoint = load_execution_checkpoint(conversation) if conversation else None
+    pending = checkpoint.pending_confirmation if checkpoint else None
+    if (
+        checkpoint is None
+        or pending is None
+        or pending.get("run_id") != run_step.run_id
+        or approval.id not in (pending.get("approval_ids") or [])
+    ):
+        set_assistant_run_status(db, run_step.run_id, "completed")
+        return False
+
+    plan_steps = [PlanStep(**item) for item in checkpoint.plan_steps]
+    approved_step = next(
+        (step for step in plan_steps if step.approval_id == approval.id),
+        None,
+    )
+    if approved_step is None:
+        set_assistant_run_status(db, run_step.run_id, "completed")
+        return False
+
+    approved_step.status = "done"
+    approved_step.tool_arguments = dict(approval.arguments)
+    approved_step.result = dict(outcome.result or {})
+    approved_step.tool_execution_id = outcome.execution_id
+    summary = summarize_tool_result(approval.tool_name, approved_step.result)
+    completed_steps = [CompletedStep(**item) for item in checkpoint.completed_steps]
+    if not any(item.index == approved_step.index for item in completed_steps):
+        completed_steps.append(
+            CompletedStep(
+                index=approved_step.index,
+                description=approved_step.description,
+                action_type=approved_step.action_type,
+                status="done",
+                result_summary=summary,
+                tokens_used=estimate_tokens(summary),
+            )
+        )
+    results = dict(pending.get("results") or {})
+    results[approval.tool_name] = approved_step.result
+    remaining_approval_ids = [
+        item for item in pending.get("approval_ids", []) if item != approval.id
+    ]
+    pending["approval_ids"] = remaining_approval_ids
+    save_execution_checkpoint(
+        db,
+        conversation,
+        plan_steps,
+        completed_steps,
+        max(checkpoint.current_step, approved_step.index),
+        checkpoint.total_tokens_estimated,
+        checkpoint.halted_reason,
+        checkpoint.started_at,
+        pending if remaining_approval_ids else None,
+    )
+    if remaining_approval_ids:
+        return False
+
+    from app.assistant_approvals import requester_principal
+
+    understanding = AssistantUnderstanding.model_validate(pending["understanding"])
+    requester = requester_principal(db, approval)
+    resume_assistant_run(db, run_step.run_id)
+    engine = db.get_bind()
+    with Session(bind=engine) as run_db:
+        runner = _PlanRunner(
+            plan_steps=plan_steps,
+            understanding=understanding,
+            principal=requester,
+            conversation_id=approval.conversation_id,
+            run_id=run_step.run_id,
+            run_db=run_db,
+            engine=engine,
+            confirmed=True,
+            started_at=checkpoint.started_at,
+            completed_steps=completed_steps,
+            total_tokens_estimated=checkpoint.total_tokens_estimated,
+            results=results,
+        )
+        runner.writes_done.append(f"Approved and executed: {summary}")
+        for _ in runner.run():
+            pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -710,7 +809,11 @@ def stream_assistant_chat(
     # ------------------------------------------------------------------
     checkpoint = load_execution_checkpoint(conv) if pending_state is None else None
     confirmed_checkpoint = None
-    if checkpoint is not None and checkpoint.pending_confirmation:
+    if (
+        checkpoint is not None
+        and checkpoint.pending_confirmation
+        and checkpoint.pending_confirmation.get("requires_requester_confirmation", True)
+    ):
         reply = _normalized_reply(req.message)
         if reply in CONFIRM_REPLIES and not _confirmation_expired(checkpoint.pending_confirmation):
             confirmed_checkpoint = checkpoint

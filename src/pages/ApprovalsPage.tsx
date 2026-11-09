@@ -10,6 +10,7 @@ import {
   decideRescheduleRequest,
 } from '../api/meetings'
 import { AgentApprovalsSection } from '../components/assistant/AgentApprovalsSection'
+import { AssistantApprovalHistory } from '../components/assistant/AssistantApprovalHistory'
 import { EmailApprovalsSection } from '../components/email/EmailApprovalsSection'
 import { useAuth } from '../contexts/AuthContext'
 import type { MeetingRescheduleRequest } from '../types/meeting'
@@ -242,6 +243,9 @@ export function ApprovalsPage() {
   const [feedback, setFeedback] = useState<Record<string, { tone: 'success' | 'error'; message: string }>>({})
 
   const canDecide = Boolean(user && APPROVER_ROLES.has(user.role))
+  const canViewAssistantApprovalHistory = Boolean(
+    user && APPROVER_ROLES.has(user.role),
+  )
   const emailActor = useMemo(
     () => (user ? { id: user.id, role: user.role, team: user.department || null } : null),
     [user],
@@ -416,7 +420,12 @@ export function ApprovalsPage() {
       {emailActor && <EmailApprovalsSection actor={emailActor} />}
 
       {/* Story 6.6: assistant actions paused with "Approval Required" */}
-      {user && <AgentApprovalsSection />}
+      {user && (
+        <AgentApprovalsSection
+          canAssignAlternateApprover={canViewAssistantApprovalHistory}
+        />
+      )}
+      <AssistantApprovalHistory visible={canViewAssistantApprovalHistory} />
     </div>
   )
 }

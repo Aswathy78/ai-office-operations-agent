@@ -2020,6 +2020,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .agent-risk-badge.medium { background: #fff3dc; color: var(--warning); }
 .agent-risk-badge.high { background: #fdecec; color: var(--danger); }
 .agent-risk-reasons { margin: 0; padding-left: 18px; font-size: 12px; color: #596579; }
+.agent-approval-parameters { margin: 8px 0; }
+.agent-approval-parameters summary { cursor: pointer; font-size: 13px; font-weight: 700; }
+.agent-approval-parameters pre { overflow: auto; padding: 10px; border-radius: 8px; background: #f5f7fa; font-size: 12px; }
+.agent-approval-editor { display: grid; flex-basis: 100%; gap: 6px; font-size: 12px; font-weight: 700; }
+.agent-approval-editor textarea { width: 100%; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font: 12px/1.5 ui-monospace, monospace; }
 
 @keyframes assistant-step-spin {
   from { transform: rotate(0deg); }

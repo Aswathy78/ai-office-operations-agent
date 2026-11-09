@@ -30,6 +30,8 @@ vi.mock('../api/meetings', () => ({
 }))
 
 vi.mock('../api/assistantApprovals', () => ({
+  assignAgentAlternateApprover: vi.fn(),
+  getAgentApprovalHistory: vi.fn().mockResolvedValue([]),
   getAgentApprovals: vi.fn().mockResolvedValue([]),
   decideAgentApproval: vi.fn(),
   cancelAgentApproval: vi.fn(),
@@ -101,6 +103,7 @@ describe('ApprovalsPage', () => {
 
     expect(await screen.findByText('Awaiting HR / Operations or Admin approval.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Assistant approval history' })).not.toBeInTheDocument()
   })
 })
 

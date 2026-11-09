@@ -285,6 +285,62 @@ def build_recipients(
     return recipients, resolved_groups, unresolved
 
 
+def resolve_email_send_recipients(
+    db: Session,
+    *,
+    recipient_emails: list[str],
+    groups: list[str],
+    exclude_email: str | None,
+) -> tuple[dict, list[dict]]:
+    """Resolve assistant email recipients once and return execution-safe arguments."""
+    directory = _active_employees(db)
+    by_email = {employee.email.casefold(): employee for employee in directory}
+    if groups:
+        named = [
+            by_email[email.casefold()]
+            for email in recipient_emails
+            if email.casefold() in by_email
+        ]
+        raw = [
+            email
+            for email in recipient_emails
+            if email.casefold() not in by_email
+        ]
+        recipients, _, unresolved = build_recipients(
+            db,
+            groups=groups,
+            employees=named,
+            emails=raw,
+            exclude_email=exclude_email,
+        )
+    else:
+        recipients = []
+        unresolved = []
+        for email in recipient_emails:
+            employee = by_email.get(email.casefold())
+            resolved, _, invalid = build_recipients(
+                db,
+                groups=[],
+                employees=[employee] if employee else [],
+                emails=[] if employee else [email],
+                exclude_email=exclude_email,
+                existing=recipients,
+            )
+            recipients = resolved
+            unresolved.extend(invalid)
+    if unresolved:
+        raise ValueError("Not a valid e-mail address or directory group: " + ", ".join(unresolved))
+    if not recipients:
+        raise ValueError("The e-mail has no recipients.")
+    return (
+        {
+            "recipient_emails": [recipient["email"] for recipient in recipients],
+            "groups": [],
+        },
+        recipients,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Approval rules
 # ---------------------------------------------------------------------------

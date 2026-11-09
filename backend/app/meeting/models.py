@@ -2078,6 +2078,7 @@ ACTION_APPROVAL_STATUS_PENDING = "pending"
 ACTION_APPROVAL_STATUS_REJECTED = "rejected"
 ACTION_APPROVAL_STATUS_CANCELLED = "cancelled"
 ACTION_APPROVAL_STATUS_EXPIRED = "expired"
+ACTION_APPROVAL_STATUS_EXECUTING = "executing"
 ACTION_APPROVAL_STATUS_EXECUTED = "executed"
 ACTION_APPROVAL_STATUS_FAILED = "failed"
 ACTION_APPROVAL_STATUSES = (
@@ -2085,6 +2086,7 @@ ACTION_APPROVAL_STATUSES = (
     ACTION_APPROVAL_STATUS_REJECTED,
     ACTION_APPROVAL_STATUS_CANCELLED,
     ACTION_APPROVAL_STATUS_EXPIRED,
+    ACTION_APPROVAL_STATUS_EXECUTING,
     ACTION_APPROVAL_STATUS_EXECUTED,
     ACTION_APPROVAL_STATUS_FAILED,
 )
@@ -2119,6 +2121,11 @@ class AssistantActionApproval(Base):
             name="uq_assistant_action_approvals_requester_key",
         ),
         Index("ix_assistant_action_approvals_status_created", "status", "created_at"),
+        Index(
+            "ix_assistant_action_approvals_alternate_status",
+            "alternate_approver_id",
+            "status",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -2129,6 +2136,7 @@ class AssistantActionApproval(Base):
     conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
     arguments: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    affected_people: Mapped[list | None] = mapped_column(JSON, nullable=True)
     arguments_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     risk_level: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -2141,6 +2149,9 @@ class AssistantActionApproval(Base):
     decided_by_role: Mapped[str | None] = mapped_column(String(30), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alternate_approver_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reminder_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expiry_notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -2151,6 +2162,40 @@ class AssistantActionApproval(Base):
         default=lambda: datetime.now(timezone.utc),
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+class AssistantApprovalEmailLink(Base):
+    """Recipient-bound, signed single-use link for an assistant approval."""
+
+    __tablename__ = "assistant_approval_email_links"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_assistant_approval_email_links_token_hash"),
+        Index(
+            "ix_assistant_approval_email_links_approval_recipient",
+            "approval_id",
+            "recipient_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    approval_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("assistant_action_approvals.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    recipient_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("employees.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),

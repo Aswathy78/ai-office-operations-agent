@@ -33,6 +33,10 @@ from app.task_reminder_scheduler import (
     start_task_reminder_scheduler,
     stop_task_reminder_scheduler,
 )
+from app.assistant_approval_scheduler import (
+    start_assistant_approval_scheduler,
+    stop_assistant_approval_scheduler,
+)
 
 
 def start_transcription_worker() -> bool:
@@ -134,6 +138,7 @@ def startup():
     except Exception as seed_err:
         logging.getLogger(__name__).warning("Database seeding skipped or failed: %s", seed_err)
     start_task_reminder_scheduler()
+    start_assistant_approval_scheduler()
     start_email_dispatcher()
     start_task_calendar_scheduler()
     start_transcription_worker()
@@ -146,6 +151,7 @@ def startup():
 @app.on_event("shutdown")
 def shutdown():
     stop_task_reminder_scheduler()
+    stop_assistant_approval_scheduler()
     stop_email_dispatcher()
     stop_task_calendar_scheduler()
     stop_transcription_worker()

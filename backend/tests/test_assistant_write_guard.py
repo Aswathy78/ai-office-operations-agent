@@ -20,6 +20,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import re
+from urllib.parse import parse_qs, urlparse
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,9 +32,20 @@ from sqlalchemy.pool import StaticPool
 
 from main import app
 import app.assistant_service as assistant_service
+import app.assistant_approvals as assistant_approvals
 from app import email_providers
-from app.assistant_approvals import decide_approval
+from app import notification_service
+from app.assistant_approvals import (
+    assign_alternate_approver,
+    can_decide,
+    decide_approval,
+    expire_stale,
+    issue_approval_email_link,
+    list_approvals,
+    process_approval_reminders,
+)
 from app.assistant_tools import (
+    ToolExecutionOutcome,
     ToolApprovalError,
     ToolConflictBlocked,
     ToolPermissionDenied,
@@ -40,11 +54,16 @@ from app.assistant_tools import (
     get_registry,
 )
 from app.auth_service import AuthenticatedPrincipal
+from app.auth_service import provision_account
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import (
+    AssistantApprovalEmailLink,
     AssistantActionApproval,
     AssistantAuditEvent,
+    AssistantConversation,
+    AssistantRun,
+    AssistantRunStep,
     AssistantToolExecution,
     AuthAccount,
     Base,
@@ -52,7 +71,15 @@ from app.meeting.models import (
     Employee,
     Meeting,
     Task,
+    UserNotification,
 )
+from app.assistant_planner import CompletedStep, PlanStep, save_execution_checkpoint
+from app.assistant_run_tracing import (
+    create_assistant_run,
+    record_assistant_run_step,
+    set_assistant_run_status,
+)
+from app.assistant_understanding import AssistantUnderstanding
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +375,257 @@ class TestConflicts:
 
 
 class TestApprovalWorkflow:
+    def test_one_external_recipient_creates_high_risk_pending_approval(
+        self, api, db_session, mail
+    ):
+        response = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-one-recipient-high-risk",
+        )
+
+        assert response.status_code == 202, response.text
+        approval = response.json()["approval"]
+        assert approval["status"] == "pending"
+        assert approval["risk_level"] == "high"
+        assert approval["approver_kind"] == "approver"
+        stored_approval = db_session.get(AssistantActionApproval, approval["id"])
+        assert stored_approval.arguments["recipient_emails"] == [
+            "external@partner.example"
+        ]
+        assert db_session.query(EmailDraft).count() == 0
+        assert "external@partner.example" not in {
+            call["recipient"] for call in mail.calls
+        }
+
+    def test_everyone_group_is_frozen_for_preview_and_execution(self, api, db_session, mail):
+        approval_response = _run(
+            api,
+            "email.send",
+            _email(
+                recipient_emails=["external@partner.example"],
+                groups=["Everyone"],
+            ),
+            "key-everyone-snapshot-01",
+        )
+        assert approval_response.status_code == 202, approval_response.text
+        approval_id = approval_response.json()["approval"]["id"]
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        frozen_emails = [person["email"] for person in approval.affected_people]
+        assert "external@partner.example" in frozen_emails
+        assert "alice@northstar.example" in frozen_emails
+        assert "bob@northstar.example" in frozen_emails
+        assert approval.arguments["groups"] == []
+        assert approval.arguments["recipient_emails"] == frozen_emails
+
+        api.login("emp-admin")
+        listed = api.get(
+            "/api/v1/assistant/approvals",
+            params={"scope": "queue", "status": "pending"},
+        )
+        assert listed.status_code == 200
+        preview = next(item for item in listed.json() if item["id"] == approval_id)
+        assert {person["email"] for person in preview["affected_recipients"]} == set(frozen_emails)
+        assert "Alice Smith <alice@northstar.example>" in preview["affected_people"]
+
+        db_session.query(Employee).filter_by(id="emp-alice").one().is_active = False
+        db_session.add(Employee(
+            id="emp-new", name="New Employee", email="new@northstar.example",
+            team="Operations", is_active=True,
+        ))
+        db_session.commit()
+
+        decided = _decide(api, approval_id)
+        assert decided.status_code == 200, decided.text
+        assert decided.json()["approval"]["status"] == "executed", decided.text
+        draft = db_session.query(EmailDraft).one()
+        assert {recipient["email"] for recipient in draft.recipients} == set(frozen_emails)
+        assert "new@northstar.example" not in {
+            recipient["email"] for recipient in draft.recipients
+        }
+        assert not (
+            set(frozen_emails)
+            & {call["recipient"] for call in mail.calls}
+        )
+
+    def test_legacy_group_approval_without_snapshot_is_not_silently_expanded(
+        self, api, db_session
+    ):
+        response = _run(
+            api,
+            "email.send",
+            _email(
+                recipient_emails=["external@partner.example"],
+                groups=["Everyone"],
+            ),
+            "key-everyone-legacy-01",
+        )
+        assert response.status_code == 202
+        approval_id = response.json()["approval"]["id"]
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        approval.affected_people = None
+        approval.arguments = {**approval.arguments, "groups": ["Everyone"]}
+        db_session.commit()
+
+        api.login("emp-admin")
+        listed = api.get(
+            "/api/v1/assistant/approvals",
+            params={"scope": "queue", "status": "pending"},
+        )
+        preview = next(item for item in listed.json() if item["id"] == approval_id)
+        assert preview["recipient_snapshot_missing"] is True
+        assert preview["affected_recipients"] == []
+        assert _decide(api, approval_id).status_code == 409
+        assert db_session.query(EmailDraft).count() == 0
+
+    def test_everyone_permission_is_rechecked_when_requester_is_demoted(
+        self, api, db_session
+    ):
+        response = _run(
+            api,
+            "email.send",
+            _email(
+                recipient_emails=["external@partner.example"],
+                groups=["Everyone"],
+            ),
+            "key-everyone-demotion-01",
+        )
+        approval_id = response.json()["approval"]["id"]
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        approval.requester_role = "employee"
+        db_session.commit()
+
+        api.login("emp-admin")
+        denied = _decide(api, approval_id)
+        assert denied.status_code == 403
+        assert db_session.get(AssistantActionApproval, approval_id).status == "pending"
+        assert db_session.query(EmailDraft).count() == 0
+    def test_duplicate_employee_names_use_authenticated_employee_for_manager_queue(
+        self, api, db_session, mail, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "AUTH_JWT_SECRET",
+            "isolated-approval-identity-test-secret-32-bytes",
+        )
+        monkeypatch.setenv("AUTH_JWT_ISSUER", "approval-identity-test")
+        monkeypatch.setenv("AUTH_JWT_AUDIENCE", "approval-identity-test-client")
+        monkeypatch.setenv("AUTH_ACCESS_TOKEN_TTL_SECONDS", "900")
+
+        legacy_priya = Employee(
+            id="priya-legacy",
+            name="Priya Sharma",
+            email="priya.sharma@northstar.example",
+            team=None,
+            is_active=True,
+        )
+        engineering_priya = Employee(
+            id="priya-engineering",
+            name="Priya Sharma",
+            email="priyasharma.example@gmail.com",
+            team=None,
+            manager_id="emp-mgr",
+            is_active=True,
+        )
+        db_session.add_all([legacy_priya, engineering_priya])
+        db_session.get(Employee, "emp-mgr").name = "Maya Thompson"
+        db_session.commit()
+        provision_account(
+            db_session,
+            engineering_priya.email,
+            "PriyaTestPassword123!",
+            role="employee",
+        )
+        provision_account(
+            db_session,
+            "priya@northstar.example",
+            "ManagerTestPassword123!",
+            role="manager",
+        )
+        provision_account(
+            db_session,
+            "farah@northstar.example",
+            "FinanceTestPassword123!",
+            role="manager",
+        )
+        app.dependency_overrides.pop(require_authenticated_principal, None)
+
+        def login_headers(email: str) -> tuple[dict[str, str], dict]:
+            response = api.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": email,
+                    "password": {
+                        engineering_priya.email: "PriyaTestPassword123!",
+                        "priya@northstar.example": "ManagerTestPassword123!",
+                        "farah@northstar.example": "FinanceTestPassword123!",
+                    }[email],
+                },
+            )
+            assert response.status_code == 200, response.text
+            result = response.json()
+            return {"Authorization": f"Bearer {result['access_token']}"}, result["user"]
+
+        priya_headers, priya_user = login_headers(engineering_priya.email)
+        assert priya_user["id"] == engineering_priya.id
+        assert priya_user["team"] is None
+
+        request = api.post(
+            "/api/v1/assistant/tools/email.send/execute",
+            headers=priya_headers,
+            json={
+                "arguments": _email(recipient_emails=["external@partner.example"]),
+                "idempotency_key": "duplicate-priya-approval-01",
+            },
+        )
+        assert request.status_code == 202, request.text
+        approval_id = request.json()["approval"]["id"]
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        assert approval.requester_id == engineering_priya.id
+        assert approval.requester_team is None
+        assert db_session.get(Employee, legacy_priya.id) is not None
+        assert db_session.query(EmailDraft).count() == 0
+
+        engineering_priya.team = "Engineering"
+        db_session.commit()
+
+        finance_headers, _ = login_headers("farah@northstar.example")
+        finance_queue = api.get(
+            "/api/v1/assistant/approvals",
+            params={"scope": "queue", "status": "pending"},
+            headers=finance_headers,
+        )
+        assert finance_queue.status_code == 200
+        assert approval_id not in {item["id"] for item in finance_queue.json()}
+        denied = api.post(
+            f"/api/v1/assistant/approvals/{approval_id}/decide",
+            headers=finance_headers,
+            json={"decision": "reject"},
+        )
+        assert denied.status_code == 403
+
+        manager_headers, manager_user = login_headers("priya@northstar.example")
+        assert manager_user["role"] == "manager"
+        manager_queue = api.get(
+            "/api/v1/assistant/approvals",
+            params={"scope": "queue", "status": "pending"},
+            headers=manager_headers,
+        )
+        assert manager_queue.status_code == 200
+        [visible] = [
+            item for item in manager_queue.json() if item["id"] == approval_id
+        ]
+        assert visible["requester_id"] == engineering_priya.id
+        assert visible["can_decide"] is True
+        rejected = api.post(
+            f"/api/v1/assistant/approvals/{approval_id}/decide",
+            headers=manager_headers,
+            json={"decision": "reject"},
+        )
+        assert rejected.status_code == 200, rejected.text
+        assert db_session.get(AssistantActionApproval, approval_id).status == "rejected"
+        assert db_session.query(EmailDraft).count() == 0
+
     def test_low_risk_runs_autonomously_and_is_audited(self, api, db_session, mail):
         response = _run(api, "task.create", _task(), "key-low-auto-001")
         assert response.status_code == 200
@@ -421,6 +699,78 @@ class TestApprovalWorkflow:
                      "key-reject-0001")
         assert again.status_code == 409 and "rejected" in again.json()["detail"]
 
+    def test_reject_cancels_paused_run_and_notifies_requester(
+        self, api, db_session, mail, monkeypatch
+    ):
+        monkeypatch.setattr(
+            notification_service,
+            "notify_assistant_approval_request",
+            lambda *_args, **_kwargs: None,
+        )
+        api.login("emp-bob")
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-reject-run-0001",
+        ).json()["approval"]["id"]
+
+        now = datetime.now(timezone.utc)
+        conversation = AssistantConversation(
+            id="conversation-rejected-approval",
+            user_id="emp-bob",
+            title="Rejected paused workflow",
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(conversation)
+        db_session.commit()
+        run = create_assistant_run(
+            db_session,
+            user_id="emp-bob",
+            conversation_id=conversation.id,
+        )
+        step = record_assistant_run_step(
+            db_session,
+            run_id=run.id,
+            step_order=0,
+            step_type="send_email",
+            step_name="email.send",
+            status="awaiting_approval",
+            approval_id=approval_id,
+        )
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        approval.conversation_id = conversation.id
+        db_session.commit()
+        set_assistant_run_status(db_session, run.id, "awaiting_approval")
+
+        notify_decision = Mock(
+            wraps=notification_service.notify_assistant_approval_decision
+        )
+        monkeypatch.setattr(
+            notification_service, "notify_assistant_approval_decision", notify_decision
+        )
+        api.login("emp-hr")
+        response = _decide(api, approval_id, decision="reject", note="Not approved.")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["approval"]["status"] == "rejected"
+        db_session.refresh(run)
+        db_session.refresh(step)
+        assert run.status == "cancelled"
+        assert step.status == "cancelled"
+        notify_decision.assert_called_once_with(
+            db_session, approval, outcome="rejected"
+        )
+        notification = db_session.query(UserNotification).filter_by(
+            recipient_employee_id="emp-bob",
+            event_type="approval_decision",
+            entity_id=approval_id,
+        ).one()
+        assert "rejected" in notification.summary.lower()
+        assert len(mail.calls) == 1
+        assert db_session.query(EmailDraft).count() == 0
+
     def test_requester_can_cancel(self, api, db_session):
         approval_id = _run(api, "email.send", _email(), "key-cancel-0001").json()["approval"]["id"]
         response = api.post(f"/api/v1/assistant/approvals/{approval_id}/cancel")
@@ -461,6 +811,299 @@ class TestApprovalWorkflow:
         mine = api.get("/api/v1/assistant/approvals", params={"scope": "mine"}).json()
         assert len(mine) == 1 and mine[0]["can_cancel"] is True
         assert mine[0]["summary"].startswith("Send e-mail")
+
+    def test_edit_and_approve_executes_only_the_edited_parameters(self, api, db_session):
+        api.login("emp-bob")
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-edit-approval-01",
+        ).json()["approval"]["id"]
+        edited = _email(
+            recipient_emails=["external@partner.example"],
+            subject="Updated release",
+            body="The approved revision.",
+        )
+
+        api.login("emp-mgr")
+        response = api.post(
+            f"/api/v1/assistant/approvals/{approval_id}/decide",
+            json={"decision": "approve", "arguments": edited},
+        )
+
+        assert response.status_code == 200, response.text
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        assert approval.status == "executed"
+        assert approval.arguments == edited
+        assert approval.idempotency_key.startswith(f"approval-edit:{approval_id}:")
+        draft = db_session.query(EmailDraft).one()
+        assert draft.subject == "Updated release"
+        assert draft.body == "The approved revision."
+
+    def test_edit_approval_passes_updated_task_arguments_to_mocked_executor(
+        self, api, db_session, monkeypatch
+    ):
+        monkeypatch.setattr(
+            notification_service,
+            "notify_assistant_approval_request",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            notification_service,
+            "notify_assistant_approval_decision",
+            lambda *_args, **_kwargs: None,
+        )
+        api.login("emp-hr")
+        original = _task(
+            title="Original Approval Center Test",
+            notify_assignee=False,
+        )
+        approval_id = _run(
+            api, "task.create", original, "key-edit-task-approval-01"
+        ).json()["approval"]["id"]
+        edited = {**original, "title": "Edited Approval Center Test"}
+        executed_calls = []
+
+        def fake_execute_tool(db, principal, tool_name, arguments, **kwargs):
+            executed_calls.append((principal.user_id, tool_name, dict(arguments)))
+            approval = db.get(AssistantActionApproval, kwargs["approval_id"])
+            approval.status = "executed"
+            approval.execution_id = "mock-task-execution"
+            approval.result = {"task_id": "mock-task-not-created"}
+            db.commit()
+            return ToolExecutionOutcome(
+                execution_id="mock-task-execution",
+                tool_name=tool_name,
+                status="succeeded",
+                result={"task_id": "mock-task-not-created"},
+                replayed=False,
+                attempts=1,
+                duration_ms=0,
+                idempotency_key=kwargs["idempotency_key"],
+            )
+
+        monkeypatch.setattr(assistant_approvals, "execute_tool", fake_execute_tool)
+        api.login("emp-admin")
+        response = api.post(
+            f"/api/v1/assistant/approvals/{approval_id}/decide",
+            json={"decision": "approve", "arguments": edited},
+        )
+
+        assert response.status_code == 200, response.text
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        assert approval.status == "executed"
+        assert approval.arguments == edited
+        assert executed_calls == [("emp-hr", "task.create", edited)]
+        assert db_session.query(Task).count() == 0
+        assert db_session.query(AssistantToolExecution).count() == 0
+
+    def test_invalid_edited_parameters_leave_request_pending(self, api, db_session):
+        api.login("emp-bob")
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-invalid-edit-01",
+        ).json()["approval"]["id"]
+        api.login("emp-mgr")
+
+        response = api.post(
+            f"/api/v1/assistant/approvals/{approval_id}/decide",
+            json={
+                "decision": "approve",
+                "arguments": {"recipient_emails": ["external@partner.example"]},
+            },
+        )
+
+        assert response.status_code == 422
+        assert db_session.get(AssistantActionApproval, approval_id).status == "pending"
+        assert db_session.query(EmailDraft).count() == 0
+
+    def test_email_link_is_signed_recipient_scoped_and_single_use(self, api, db_session, mail):
+        db_session.add(
+            AuthAccount(
+                id="acc-mgr-approval-email",
+                employee_id="emp-mgr",
+                email_normalized="priya@northstar.example",
+                password_hash="test-only",
+                role="manager",
+                is_enabled=True,
+            )
+        )
+        db_session.commit()
+        api.login("emp-bob")
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-email-link-01",
+        ).json()["approval"]["id"]
+        link_match = re.search(r"https?://\S+", mail.calls[0]["body"])
+        assert link_match is not None
+        token = parse_qs(urlparse(link_match.group()).fragment)["approvalToken"][0]
+        [persisted_link] = db_session.query(AssistantApprovalEmailLink).all()
+        assert persisted_link.recipient_id == "emp-mgr"
+        assert "/approvals#approvalToken=" in link_match.group()
+
+        api.login("emp-hr")
+        denied = api.post(
+            "/api/v1/assistant/approvals/email-preview",
+            json={"token": token},
+        )
+        assert denied.status_code == 403
+
+        api.login("emp-mgr")
+        tampered = api.post(
+            "/api/v1/assistant/approvals/email-decision",
+            json={"token": token[:-1] + ("A" if token[-1] != "A" else "B"), "decision": "reject"},
+        )
+        assert tampered.status_code == 409
+        preview = api.post(
+            "/api/v1/assistant/approvals/email-preview",
+            json={"token": token},
+        )
+        assert preview.status_code == 200
+        assert preview.json()["affected_people"] == ["external@partner.example"]
+
+        decision = api.post(
+            "/api/v1/assistant/approvals/email-decision",
+            json={"token": token, "decision": "reject", "note": "Not ready."},
+        )
+        assert decision.status_code == 200, decision.text
+        link = db_session.query(AssistantApprovalEmailLink).one()
+        assert link.used_at is not None
+        assert db_session.get(AssistantActionApproval, approval_id).status == "rejected"
+
+        reused = api.post(
+            "/api/v1/assistant/approvals/email-decision",
+            json={"token": token, "decision": "approve"},
+        )
+        assert reused.status_code == 409
+
+    def test_expired_email_link_is_rejected(self, api, db_session):
+        api.login("emp-bob")
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            "key-email-expire-01",
+        ).json()["approval"]["id"]
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        token = issue_approval_email_link(db_session, approval, "emp-mgr")
+        link = db_session.query(AssistantApprovalEmailLink).one()
+        link.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        db_session.commit()
+        api.login("emp-mgr")
+
+        response = api.post(
+            "/api/v1/assistant/approvals/email-preview",
+            json={"token": token},
+        )
+
+        assert response.status_code == 409
+        assert "expired" in response.json()["detail"].lower()
+
+    def test_only_approver_roles_can_open_the_queue(self, api):
+        api.login("emp-bob")
+        response = api.get("/api/v1/assistant/approvals", params={"scope": "queue"})
+        assert response.status_code == 403
+
+    def test_approval_resumes_the_paused_assistant_plan(self, api, db_session):
+        import uuid
+
+        from app.assistant_planner import estimate_tokens
+
+        api.login("emp-bob")
+        key = "key-resume-approval-01"
+        approval_id = _run(
+            api,
+            "email.send",
+            _email(recipient_emails=["external@partner.example"]),
+            key,
+        ).json()["approval"]["id"]
+        now = datetime.now(timezone.utc)
+        conversation_id = str(uuid.uuid4())
+        conversation = AssistantConversation(
+            id=conversation_id,
+            user_id="emp-bob",
+            title="Paused assistant request",
+            created_at=now,
+            updated_at=now,
+        )
+        db_session.add(conversation)
+        db_session.commit()
+        run = create_assistant_run(
+            db_session,
+            user_id="emp-bob",
+            conversation_id=conversation_id,
+        )
+        record_assistant_run_step(
+            db_session,
+            run_id=run.id,
+            step_order=0,
+            step_type="draft_email",
+            step_name="email.send",
+            status="awaiting_approval",
+            approval_id=approval_id,
+        )
+        approval = db_session.get(AssistantActionApproval, approval_id)
+        approval.conversation_id = conversation_id
+        db_session.commit()
+        understanding = AssistantUnderstanding(
+            intent="send_email",
+            status="understood",
+            entities={"people": ["Bob Lee"], "topic": "release"},
+        )
+        steps = [
+            PlanStep(
+                index=0,
+                description="Send release email",
+                action_type="draft_email",
+                status="approval_required",
+                tool_name="email.send",
+                tool_arguments=_email(recipient_emails=["external@partner.example"]),
+                idempotency_key=key,
+                approval_id=approval_id,
+            ),
+            PlanStep(
+                index=1,
+                description="Summarize the result",
+                action_type="summarise_response",
+                estimated_tokens=estimate_tokens("Summarize the result"),
+            ),
+        ]
+        save_execution_checkpoint(
+            db_session,
+            conversation,
+            steps,
+            [],
+            0,
+            0,
+            None,
+            now.isoformat(),
+            {
+                "confirmation_id": "resume-test",
+                "created_at": now.isoformat(),
+                "understanding": understanding.model_dump(mode="json"),
+                "results": {},
+                "approval_ids": [approval_id],
+                "requires_requester_confirmation": False,
+                "run_id": run.id,
+            },
+        )
+        set_assistant_run_status(db_session, run.id, "awaiting_approval")
+
+        api.login("emp-mgr")
+        response = _decide(api, approval_id)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["continuation"] == {"resumed": True}
+        db_session.refresh(run)
+        assert run.status == "completed"
+        assert db_session.query(AssistantRunStep).filter_by(
+            run_id=run.id, step_order=1, status="completed"
+        ).one()
 
 
 # ---------------------------------------------------------------------------
@@ -652,3 +1295,195 @@ class TestChat:
         api.login("emp-admin")
         assert _decide(api, paused["approval_id"]).json()["approval"]["status"] == "executed"
         assert db_session.query(Task).one().creator_id == "emp-hr"
+
+
+def _insert_approval(
+    db_session,
+    *,
+    approval_id: str,
+    created_at: datetime,
+    expires_at: datetime,
+    status: str = "pending",
+    decided_by: str | None = None,
+    decided_at: datetime | None = None,
+) -> AssistantActionApproval:
+    approval = AssistantActionApproval(
+        id=approval_id,
+        tool_name="email.send",
+        requester_id="emp-bob",
+        requester_role="employee",
+        requester_team="Engineering",
+        idempotency_key=f"story97-{approval_id}",
+        arguments={"recipient_emails": ["external@partner.example"]},
+        arguments_hash=f"hash-{approval_id}",
+        summary=f"Approval {approval_id}",
+        risk_level="high",
+        risk_reasons=["external recipient"],
+        approver_kind="approver",
+        status=status,
+        decided_by=decided_by,
+        decided_by_role="manager" if decided_by == "emp-mgr" else None,
+        decided_at=decided_at,
+        expires_at=expires_at,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    db_session.add(approval)
+    db_session.commit()
+    return approval
+
+
+class TestApprovalLifecycleStory97:
+    def test_approval_is_reminded_once_after_24_hours(self, db_session, monkeypatch):
+        now = datetime.now(timezone.utc)
+        approval = _insert_approval(
+            db_session,
+            approval_id="approval-reminder-24h",
+            created_at=now - timedelta(hours=25),
+            expires_at=now + timedelta(hours=23),
+        )
+        reminders: list[str] = []
+        monkeypatch.setattr(
+            notification_service,
+            "notify_assistant_approval_reminder",
+            lambda _db, item: reminders.append(item.id) or True,
+        )
+
+        assert process_approval_reminders(db_session, now=now) == 1
+        assert process_approval_reminders(db_session, now=now + timedelta(minutes=5)) == 0
+        db_session.refresh(approval)
+        assert reminders == [approval.id]
+        assert approval.reminder_sent_at.replace(tzinfo=timezone.utc) == now
+
+    def test_approval_expires_at_48_hours_and_notifies_requester(
+        self, api, db_session, monkeypatch
+    ):
+        now = datetime.now(timezone.utc)
+        approval = _insert_approval(
+            db_session,
+            approval_id="approval-expiry-48h",
+            created_at=now - timedelta(hours=49),
+            expires_at=now + timedelta(hours=23),
+        )
+        notices: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            notification_service,
+            "notify_assistant_approval_decision",
+            lambda _db, item, *, outcome: notices.append((item.id, outcome)),
+        )
+
+        assert expire_stale(db_session) == 1
+        db_session.refresh(approval)
+        assert approval.status == "expired"
+        assert approval.decided_at is not None
+        assert approval.expiry_notified_at is not None
+        assert notices == [(approval.id, "expired")]
+        assert db_session.query(AssistantAuditEvent).filter_by(
+            approval_id=approval.id, event="expired"
+        ).count() == 1
+        api.login("emp-hr")
+        history = api.get(
+            "/api/v1/assistant/approvals/history",
+            params={
+                "status": "expired",
+                "approver": "System",
+                "from_date": now.date().isoformat(),
+                "to_date": now.date().isoformat(),
+            },
+        )
+        assert history.status_code == 200
+        assert history.json()[0]["id"] == approval.id
+        assert history.json()[0]["history_actor_name"] == "System"
+
+    def test_hr_can_assign_cross_team_alternate_but_assignment_is_request_scoped(
+        self, api, db_session
+    ):
+        db_session.add(AuthAccount(
+            id="acc-finance-alternate",
+            employee_id="emp-fin-mgr",
+            email_normalized="farah@northstar.example",
+            password_hash="test-only",
+            role="manager",
+            is_enabled=True,
+        ))
+        approval = _insert_approval(
+            db_session,
+            approval_id="approval-alternate",
+            created_at=datetime.now(timezone.utc),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=48),
+        )
+
+        api.login("emp-fin-mgr")
+        unassigned_queue = api.get(
+            "/api/v1/assistant/approvals", params={"scope": "queue"}
+        )
+        assert unassigned_queue.status_code == 200
+        assert approval.id not in {item["id"] for item in unassigned_queue.json()}
+
+        api.login("emp-hr")
+        response = api.put(
+            f"/api/v1/assistant/approvals/{approval.id}/alternate-approver",
+            json={"email": "farah@northstar.example"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["alternate_approver_id"] == "emp-fin-mgr"
+
+        api.login("emp-fin-mgr")
+        queue = api.get("/api/v1/assistant/approvals", params={"scope": "queue"})
+        assert queue.status_code == 200
+        assert [item["id"] for item in queue.json()] == [approval.id]
+        assigned_principal = person("emp-fin-mgr")
+        db_session.refresh(approval)
+        assert can_decide(approval, assigned_principal, db_session)
+        assert list_approvals(
+            db_session, assigned_principal, scope="queue", status="pending"
+        ) == [approval]
+
+        api.login("emp-hana")
+        denied = api.put(
+            f"/api/v1/assistant/approvals/{approval.id}/alternate-approver",
+            json={"email": "farah@northstar.example"},
+        )
+        assert denied.status_code == 403
+
+    def test_hr_approval_history_filters_status_approver_and_decision_date(
+        self, api, db_session
+    ):
+        today = datetime.now(timezone.utc)
+        rejected = _insert_approval(
+            db_session,
+            approval_id="approval-history-rejected",
+            created_at=today - timedelta(hours=2),
+            expires_at=today + timedelta(hours=48),
+            status="rejected",
+            decided_by="emp-mgr",
+            decided_at=today - timedelta(hours=1),
+        )
+        _insert_approval(
+            db_session,
+            approval_id="approval-history-executed",
+            created_at=today - timedelta(days=3),
+            expires_at=today + timedelta(hours=48),
+            status="executed",
+            decided_by="emp-admin",
+            decided_at=today - timedelta(days=2),
+        )
+
+        api.login("emp-hr")
+        response = api.get(
+            "/api/v1/assistant/approvals/history",
+            params={
+                "status": "rejected",
+                "approver": "Priya Manager",
+                "from_date": today.date().isoformat(),
+                "to_date": today.date().isoformat(),
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert len(response.json()) == 1
+        assert response.json()[0]["id"] == rejected.id
+        assert response.json()[0]["decided_by_name"] == "Priya Manager"
+        assert response.json()[0]["decided_at"] is not None
+
+        api.login("emp-bob")
+        assert api.get("/api/v1/assistant/approvals/history").status_code == 403

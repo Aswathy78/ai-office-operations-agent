@@ -17,6 +17,7 @@ _TEST_DATABASE_DIRECTORY = tempfile.mkdtemp(prefix="office-operations-tests-")
 os.environ["OFFICE_OPERATIONS_DB_PATH"] = os.path.join(_TEST_DATABASE_DIRECTORY, "tests.db")
 os.environ["SEED_DEFAULT_ACCOUNTS"] = "false"  # tests create the accounts they need
 os.environ["AUTO_MIGRATE"] = "false"
+os.environ.setdefault("AUTH_JWT_SECRET", "test-only-secret-for-signed-approval-links-32-bytes")
 atexit.register(shutil.rmtree, _TEST_DATABASE_DIRECTORY, ignore_errors=True)
 
 
@@ -85,6 +86,7 @@ os.environ["DOCUMENT_PROCESSOR_ENABLED"] = "false"
 def _no_background_reminder_scheduler(monkeypatch):
     import main
 
+    monkeypatch.setattr(main, "start_assistant_approval_scheduler", lambda: False)
     monkeypatch.setattr(main, "start_task_reminder_scheduler", lambda: False)
     monkeypatch.setattr(main, "start_email_dispatcher", lambda: False)
     monkeypatch.setattr(main, "start_task_calendar_scheduler", lambda: False)

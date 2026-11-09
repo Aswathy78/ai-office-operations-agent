@@ -1101,7 +1101,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
         },
         required_scopes=frozenset({"documents.read"}),
         risk_tier="read",
-        timeout_seconds=5,
+        timeout_seconds=30,
         retry_policy=READ_RETRY,
         handler=search_documents,
     ))

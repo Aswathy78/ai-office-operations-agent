@@ -25,6 +25,7 @@ medium/high-risk writes now pause as "approval_required" instead of needing a
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 import time
@@ -544,6 +545,34 @@ class TestTimeoutAndRetry:
         row = db_session.query(AssistantToolExecution).one()
         assert row.status == "succeeded" and row.result == {"late": True}
 
+    def test_slow_document_search_times_out_without_returning_policy_content(
+        self, db_session, manager, monkeypatch
+    ):
+        actual_registry = get_registry()
+        search_spec = actual_registry.get("document.search")
+        isolated_registry = ToolRegistry()
+
+        def slow_search(context, arguments):
+            time.sleep(0.2)
+            return {"query": arguments["query"], "results": [{"snippet": "late policy"}], "count": 1}
+
+        isolated_registry.register(
+            replace(search_spec, timeout_seconds=0.05, handler=slow_search)
+        )
+        monkeypatch.setattr(assistant_tools, "_REGISTRY", isolated_registry)
+
+        with pytest.raises(ToolTimeoutError, match="document.search.*0.05 seconds"):
+            execute_tool(
+                db_session,
+                manager,
+                "document.search",
+                {"query": "approval policy"},
+            )
+
+        row = db_session.query(AssistantToolExecution).one()
+        assert row.status == "timed_out"
+        assert row.result is None
+
     def test_failed_write_resumes_from_saved_progress(self, registry, db_session, manager):
         seen = []
 
@@ -849,6 +878,26 @@ class TestRealExecution:
         assert result["approval_required"] is False
         assert db_session.query(EmailDraft).count() == 0
 
+    def test_email_preview_requires_approval_for_one_external_recipient(
+        self, as_employee, db_session
+    ):
+        response = _execute(
+            as_employee,
+            "email.preview",
+            {
+                "recipient_emails": ["partner@outside.example"],
+                "topic": "the project kickoff",
+                "mode": "template",
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        result = response.json()["result"]
+        assert result["approval_required"] is True
+        assert len(result["recipients"]) == 1
+        assert any("External recipient" in reason for reason in result["approval_reasons"])
+        assert db_session.query(EmailDraft).count() == 0
+
     def test_directory_lookup_resolves_names_emails_and_groups(self, as_employee):
         response = _execute(as_employee, "directory.lookup_employees",
                             {"names": ["Alice Smith", "Nobody Here"],
@@ -859,6 +908,9 @@ class TestRealExecution:
         assert result["unresolved"] == ["Nobody Here"]
 
     def test_document_search_returns_ranked_passages(self, as_employee, tmp_path, monkeypatch):
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("embedding model unavailable")
+
         policy = tmp_path / "policy.md"
         policy.write_text(
             "# Policy\n\nMeetings start on time.\n\n"
@@ -866,6 +918,9 @@ class TestRealExecution:
             encoding="utf-8",
         )
         monkeypatch.setattr(assistant_planner, "_KNOWLEDGE_BASE_PATH", policy)
+        monkeypatch.setattr(
+            assistant_planner, "retrieve_semantic_document_context", unavailable
+        )
         response = _execute(as_employee, "document.search",
                             {"query": "email approval threshold"})
         result = response.json()["result"]
