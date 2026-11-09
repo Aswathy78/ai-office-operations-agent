@@ -1379,6 +1379,19 @@ Each takes an optional note. Only a `failed` run can be acted on, in one conditi
 
 ---
 
+### Story 9.6 – Approval Center
+- Displays approval requests with action details, parameters, affected people, source and risk tier.
+- Supports approve, reject and edit-and-approve workflows.
+- Supports signed, expiring and single-use email approval links.
+- Records approval execution results and notifications.
+
+### Story 9.7 – Approval Lifecycle
+- Maintains approval decision history with approver identity and timestamps.
+- Sends reminders after 24 hours.
+- Supports alternate approver assignment.
+- Expires pending requests after 48 hours and notifies the requester.
+- Supports filtering approval history by status, approver and date.
+
 ## 📌 Current Project Status
 
 > The complete, current status is in the last **Current Project Status** section at the end of this file.
