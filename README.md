@@ -2877,7 +2877,7 @@ Before any assistant write runs, `execute_tool` (the only path to a tool, used b
 - **Assistant widget**: steps waiting for your confirmation (amber) or another approver (red).
 
 ### Database & configuration
-Migration `20261024_01` adds `assistant_action_approvals` and `assistant_audit_events` (`alembic upgrade head`). Settings: `ASSISTANT_CONFIRMATION_TTL_MINUTES` (medium, default 30) and `ASSISTANT_APPROVAL_TTL_HOURS` (high, default 72).
+Migration `20261024_01` adds `assistant_action_approvals` and `assistant_audit_events` (`alembic upgrade head`). Settings: `ASSISTANT_CONFIRMATION_TTL_MINUTES` (medium, default 30) and `ASSISTANT_APPROVAL_TTL_HOURS` (high, default 72); Story 9.7 enforces a 48-hour maximum for pending high-risk approvals.
 
 ### Testing
 ```powershell
@@ -3116,10 +3116,27 @@ The page refreshes itself every 15 seconds (well inside the 30-second requiremen
 
 Tests: `backend/tests/test_admin_dashboard.py`, `backend/tests/test_admin_audit_logs.py`, and `src/pages/AdminDashboardPage.test.tsx`, `src/pages/AuditLogsPage.test.tsx`, `src/App.adminRoutes.test.tsx`.
 
+## Story 9.6 – Approval Center
+
+The existing **Approvals** page includes the AI action approval queue for managers, HR / Operations and administrators. Managers only see eligible requests from their team; other roles are denied queue access. Each assistant action shows its parameters, affected people, source conversation and risk tier.
+
+Approvers can approve, reject, or edit the JSON parameters before approving. Edited parameters are schema-validated and the action's permissions, conflicts and risk are checked again at execution. Actions run with the requester's current permissions. Decisions are claimed atomically to prevent duplicate approval or execution; rejection cancels the paused assistant run and notifies the requester. Approval resumes the saved plan and executes its remaining steps.
+
+Approval notification emails include recipient-bound, signed links that require sign-in. Link tokens expire no later than the approval, are stored as hashes, and can be consumed only once. The `/my-approvals` link is used for requester confirmations; the `/approvals` link is used for manager decisions.
+
+### API and migration
+
+- `GET /api/v1/assistant/approvals?scope=queue|mine` – authenticated, role-filtered requests
+- `POST /api/v1/assistant/approvals/{id}/decide` – approve, reject, or approve edited parameters
+- `POST /api/v1/assistant/approvals/email-preview` and `POST /api/v1/assistant/approvals/email-decision` – validate and use signed email links
+- Migration `20261108_02` adds durable link-use records and an `executing` decision state.
+
+Tests: `backend/tests/test_assistant_write_guard.py`, `backend/tests/test_assistant_tool_execution.py`, `src/components/assistant/AgentApprovalsSection.test.tsx`, and `src/pages/ApprovalsPage.test.tsx`.
+
 
 # 📌 Current Project Status
 
-Last updated 7 November 2026. FR-42 (Story 7.6) and Epic 8 (Stories 8.1–8.3) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet. Story 9.4 (admin dashboard and audit logs) is implemented and awaiting a branch and merge.
+Last updated 8 November 2026. FR-42 (Story 7.6), Epic 8 (Stories 8.1–8.3) and Story 9.6 (Approval Center) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet. Story 9.4 (admin dashboard and audit logs) is implemented and awaiting a branch and merge.
 
 ### Epic 1 — Meeting Management ✅
 
@@ -3233,6 +3250,16 @@ recipient-scoped notification service.
 ### Epic 9 — Administration
 
 - Story 9.4 — Admin dashboard for users, departments, integration health and system health (latency, queue depth, workers, error rate), refreshed every 15 seconds, plus a read-only audit log — implemented, awaiting merge
+- Story 9.6 — Manager Approval Center for pending AI actions, editable approvals, paused-run continuation and signed single-use email links — implemented
+- Story 9.7 — Approval decision history, 24-hour reminders, alternate approver assignment and 48-hour expiry with requester notification — implemented
+
+The Story 9.7 approval maintenance scheduler runs every 60 seconds by default
+(`ASSISTANT_APPROVAL_SCHEDULER_INTERVAL_SECONDS`) and can be disabled with
+`ASSISTANT_APPROVAL_SCHEDULER_ENABLED=false`. It sends one reminder after 24
+hours and expires undecided requests at 48 hours. HR / Operations and admins
+can assign an eligible alternate approver and query decision history at
+`GET /api/v1/assistant/approvals/history`; history filters include status,
+approver name or e-mail, and decision date range.
 
 ### Known gaps
 

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app.email_draft_service import (
+    EMAIL_PATTERN,
     detect_ambiguous_employee_names,
     detect_groups,
     detect_named_employees,
@@ -32,6 +33,7 @@ class AssistantEntities(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     people: list[str] = Field(default_factory=list)
+    emails: list[str] = Field(default_factory=list)
     ambiguous_people: dict[str, list[str]] = Field(default_factory=dict)
     groups: list[str] = Field(default_factory=list)
     task: str | None = None
@@ -77,7 +79,11 @@ class AssistantUnderstanding(BaseModel):
                     "Meeting requests require an attendee, date, and time."
                 )
             if self.intent == "send_email" and (
-                not (self.entities.people or self.entities.groups)
+                not (
+                    self.entities.people
+                    or self.entities.groups
+                    or self.entities.emails
+                )
                 or not self.entities.topic
             ):
                 raise ValueError(
@@ -194,6 +200,21 @@ def _extract_people(db: Session, text: str) -> list[str]:
     return list(dict.fromkeys(employee.name for employee in detect_named_employees(db, text)))
 
 
+def _extract_emails(text: str) -> list[str]:
+    emails: list[str] = []
+    for match in EMAIL_PATTERN.finditer(text):
+        start, end = match.span()
+        has_left_boundary = start == 0 or not (
+            text[start - 1].isalnum() or text[start - 1] in "._%+-"
+        )
+        has_right_boundary = end == len(text) or not (
+            text[end].isalnum() or text[end] in "._%+-"
+        )
+        if has_left_boundary and has_right_boundary and len(match.group(0)) <= 254:
+            emails.append(match.group(0))
+    return list(dict.fromkeys(emails))
+
+
 def _extract_date(text: str, reference_local: datetime) -> Date | None:
     if not _DATE_MODIFIER.search(text):
         return None
@@ -224,7 +245,7 @@ def _missing_entities(intent: Intent, entities: AssistantEntities) -> list[str]:
         if entities.time is None:
             missing.append("time")
     elif intent == "send_email":
-        if not (entities.people or entities.groups):
+        if not (entities.people or entities.groups or entities.emails):
             missing.append("recipient or group")
         if not entities.topic:
             missing.append("email topic")
@@ -263,6 +284,7 @@ def understand_assistant_command(
     reference_local = _reference_local(reference_time)
     groups = detect_groups(db, text)
     people = _extract_people(db, text)
+    emails = _extract_emails(text)
     ambiguous_people = detect_ambiguous_employee_names(db, text)
     task = None
     meeting = None
@@ -330,6 +352,7 @@ def understand_assistant_command(
 
     entities = AssistantEntities(
         people=people,
+        emails=emails,
         ambiguous_people=ambiguous_people,
         groups=groups,
         task=task,
@@ -381,7 +404,7 @@ def explain_understanding(result: AssistantUnderstanding) -> str:
         if entities.duration_minutes is not None:
             details += f" for {entities.duration_minutes} minutes"
     else:
-        recipient = (entities.groups or entities.people)[0]
+        recipient = (entities.groups or entities.people or entities.emails)[0]
         details = f'an e-mail to {recipient} about "{entities.topic}"'
     return f"I understood this as a request for {details}. I haven't made any changes."
 
@@ -461,7 +484,7 @@ def merge_clarification_answer(
     entities = result.entities
     task = entities.task or ""
     assignee = entities.people[0] if entities.people else ""
-    recipient = (entities.groups or entities.people)
+    recipient = (entities.groups or entities.people or entities.emails)
     recipient_name = recipient[0] if recipient else ""
     date_text = entities.date.isoformat() if entities.date else ""
     time_text = entities.time.strftime("%I:%M %p").lstrip("0") if entities.time else ""
@@ -547,6 +570,9 @@ def merge_clarification_answer(
     else:
         if target == "recipient or group":
             recipient_name = answer
+            email_matches = _extract_emails(answer)
+            if email_matches:
+                recipient_name = email_matches[0]
         elif target == "email topic":
             entities.topic = answer
         topic = entities.topic or ""

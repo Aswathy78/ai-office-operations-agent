@@ -1049,9 +1049,7 @@ def test_email_plan_reports_when_no_relevant_document_context_exists(
         lambda db, *, actor_id, query: [],
     )
     monkeypatch.setattr(
-        assistant_planner,
-        "retrieve_company_knowledge",
-        lambda query, *, db, actor_id: None,
+        assistant_planner, "_search_static_company_knowledge", lambda query, limit: []
     )
 
     def fake_execute(step, *args, **kwargs):

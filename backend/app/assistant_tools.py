@@ -62,6 +62,7 @@ from app.meeting.models import (
     ACTION_APPROVAL_STATUS_EXPIRED,
     ACTION_APPROVAL_STATUS_FAILED,
     ACTION_APPROVAL_STATUS_PENDING,
+    ACTION_APPROVAL_STATUS_EXECUTING,
     AssistantActionApproval,
     AssistantAuditEvent,
     AssistantToolExecution,
@@ -937,6 +938,10 @@ def _as_aware(value: datetime) -> datetime:
 
 
 def approval_as_dict(approval: AssistantActionApproval) -> dict:
+    deadline = min(
+        _as_aware(approval.expires_at),
+        _as_aware(approval.created_at) + timedelta(hours=48),
+    )
     return {
         "id": approval.id,
         "tool_name": approval.tool_name,
@@ -946,7 +951,7 @@ def approval_as_dict(approval: AssistantActionApproval) -> dict:
         "risk_reasons": approval.risk_reasons,
         "approver_kind": approval.approver_kind,
         "requester_id": approval.requester_id,
-        "expires_at": _as_aware(approval.expires_at).isoformat(),
+        "expires_at": deadline.isoformat(),
     }
 
 
@@ -959,8 +964,12 @@ def _request_approval(
     idempotency_key: str,
     conversation_id: str | None,
     decision: GuardDecision,
+    affected_people: list[dict] | None = None,
 ) -> AssistantActionApproval:
     """Get or create the pending approval for this call (one per requester and key)."""
+    from app.assistant_approvals import expire_stale
+
+    expire_stale(db)
     existing = (
         db.query(AssistantActionApproval)
         .filter(
@@ -1003,6 +1012,7 @@ def _request_approval(
         conversation_id=conversation_id,
         idempotency_key=idempotency_key,
         arguments=_json_safe(arguments),
+        affected_people=_json_safe(affected_people) if affected_people is not None else None,
         arguments_hash=digest,
         summary=spec.summarize_call(arguments),
         risk_level=decision.risk_level,
@@ -1055,7 +1065,7 @@ def _check_approval(
         or approval.arguments_hash != digest
     ):
         raise ToolApprovalError("The approval does not match this request.")
-    if approval.status != ACTION_APPROVAL_STATUS_PENDING or approval.decided_by is None:
+    if approval.status != ACTION_APPROVAL_STATUS_EXECUTING or approval.decided_by is None:
         raise ToolApprovalError(f"The approval is not usable (status {approval.status}).")
     if _as_aware(approval.expires_at) <= datetime.now(timezone.utc):
         raise ToolApprovalError("The approval expired; send the request again.")
@@ -1106,6 +1116,42 @@ def execute_tool(
                          conversation_id=conversation_id, detail=exc.message,
                          data={"errors": exc.errors})
         raise
+    affected_people = None
+    if spec.name == "email.send":
+        if spec.authorize is not None:
+            denials = spec.authorize(db, principal, arguments)
+            if denials:
+                message = "Permission denied: " + " ".join(denials)
+                record_audit(
+                    db,
+                    actor=principal,
+                    tool_name=spec.name,
+                    event="permission_denied",
+                    conversation_id=conversation_id,
+                    detail=message,
+                    data={"reasons": denials},
+                )
+                raise ToolPermissionDenied(message, denials)
+        from app.email_draft_service import resolve_email_send_recipients
+
+        try:
+            resolved_arguments, affected_people = resolve_email_send_recipients(
+                db,
+                recipient_emails=arguments.get("recipient_emails", []),
+                groups=arguments.get("groups", []),
+                exclude_email=principal.email,
+            )
+        except ValueError as exc:
+            raise ToolArgumentError(str(exc)) from exc
+        arguments = {
+            **arguments,
+            "recipient_emails": resolved_arguments["recipient_emails"],
+        }
+        if "groups" in arguments:
+            arguments["groups"] = []
+        spec = validate_tool_call(
+            principal, tool_name, arguments, idempotency_key=idempotency_key
+        )
     if not spec.is_write:
         # Reads are never replayed; the key is only meaningful for writes.
         return _run_with_ledger(db, spec, principal, arguments, None, conversation_id)
@@ -1163,7 +1209,7 @@ def execute_tool(
         if approval_id is None:
             approval = _request_approval(
                 db, spec, principal, arguments, digest, idempotency_key,
-                conversation_id, decision,
+                conversation_id, decision, affected_people=affected_people,
             )
             return ToolExecutionOutcome(
                 execution_id=None,

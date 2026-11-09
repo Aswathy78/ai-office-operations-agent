@@ -512,13 +512,65 @@ def test_assistant_email_without_document_facts_says_so_and_stays_editable(
 ):
     monkeypatch.setattr(assistant_planner, "retrieve_semantic_document_context",
                         lambda db, *, actor_id, query: [])
-    monkeypatch.setattr(assistant_planner, "retrieve_company_knowledge",
-                        lambda query, *, db, actor_id: None)
+    monkeypatch.setattr(
+        assistant_planner, "_search_static_company_knowledge", lambda query, limit: []
+    )
 
     events = _ask(client, "Send an email to Maya about the project kickoff")
 
     assert assistant_planner.EMAIL_DOCUMENT_NOT_FOUND_NOTICE in _answer(events)
     # Drafting continues without invented facts; the user reviews it before sending.
+    assert any("awaiting_confirmation" in event for event in events)
+
+
+def test_email_policy_fallback_does_not_repeat_semantic_search(
+    db_session: Session,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    static_policy = tmp_path / "company_policy.md"
+    static_policy.write_text(
+        "Flexible core hours are 11:00-16:00 IST.\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    def no_indexed_match(db, *, actor_id, query):
+        calls.append((actor_id, query))
+        return []
+
+    monkeypatch.setattr(assistant_planner, "_KNOWLEDGE_BASE_PATH", static_policy)
+    monkeypatch.setattr(
+        assistant_planner, "retrieve_semantic_document_context", no_indexed_match
+    )
+
+    results = assistant_planner.retrieve_email_document_context(
+        db_session,
+        actor_id="doc-emp",
+        topic="the company's flexible core hours",
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == ("doc-emp", "flexible core hours")
+    assert results[0]["snippet"] == "Flexible core hours are 11:00-16:00 IST."
+    assert results[0]["source"] == "company_policy.md"
+
+
+def test_email_document_search_timeout_falls_back_to_reviewable_draft(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def timed_out(*args, **kwargs):
+        raise TimeoutError("document.search timed out")
+
+    monkeypatch.setattr(assistant_planner, "retrieve_semantic_document_context", timed_out)
+    monkeypatch.setattr(
+        assistant_service, "stream_chat_completion", lambda *args, **kwargs: iter(["Draft."])
+    )
+
+    events = _ask(client, "Send an email to Maya about the project kickoff")
+
+    assert assistant_planner.EMAIL_DOCUMENT_NOT_FOUND_NOTICE in _answer(events)
     assert any("awaiting_confirmation" in event for event in events)
 
 

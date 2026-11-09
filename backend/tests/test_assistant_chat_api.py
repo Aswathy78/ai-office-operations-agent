@@ -23,6 +23,10 @@ from app.meeting.models import (
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 import app.assistant_service as assistant_service
+import app.assistant_tools as assistant_tools
+import app.assistant_planner as assistant_planner
+from app.assistant_planner import PlanStep, prepare_tool_arguments
+from app.assistant_understanding import AssistantUnderstanding
 
 
 def _sse_events(response) -> list[dict]:
@@ -274,6 +278,107 @@ def test_missing_required_details_persist_and_resume_same_conversation(
     # Once resolved, the request runs its plan (Stories 6.5-6.7); whether the
     # meeting is booked now or waits for approval depends on its risk (6.6).
     assert any("plan" in event for event in second_events)
+
+
+def test_email_clarification_accepts_employee_email_address(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch,
+):
+    recipient = Employee(
+        id="emp-rahul-email",
+        name="Rahul Test",
+        email="rahulexample.test@gmail.com",
+        team="Engineering",
+        is_active=True,
+    )
+    db_session.add(recipient)
+    db_session.commit()
+    monkeypatch.setattr(
+        assistant_service,
+        "stream_chat_completion",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a resolved email clarification must not fall through to the LLM"
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_tools,
+        "execute_tool",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the regression test must not execute any external action"
+        ),
+    )
+    monkeypatch.setattr(
+        assistant_planner,
+        "needs_retrieval",
+        lambda _description: False,
+    )
+    original_build_plan = assistant_planner.build_execution_plan
+    resolved_understandings: list[AssistantUnderstanding] = []
+
+    monkeypatch.setattr(
+        assistant_planner,
+        "build_execution_plan",
+        lambda understanding: (
+            resolved_understandings.append(understanding)
+            or [PlanStep(
+                index=0,
+                description="Safe test response",
+                action_type="summarise_response",
+            )]
+        ),
+    )
+
+    first = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={"message": "Send an email about the project update"},
+    )
+    first_events = _sse_events(first)
+    conversation_id = first_events[0]["conversation_id"]
+    assert first_events[0]["understanding"]["status"] == "needs_clarification"
+    assert "Who should receive" in first_events[1]["token"]
+
+    second = client.post(
+        "/api/v1/assistant/chat/stream",
+        json={
+            "message": "rahulexample.test@gmail.com",
+            "conversation_id": conversation_id,
+        },
+    )
+    second_events = _sse_events(second)
+
+    assert second_events[0]["understanding"]["status"] == "understood"
+    assert db_session.get(
+        AssistantConversation, conversation_id
+    ).pending_clarification is None
+    assert len(resolved_understandings) == 1
+    understanding = resolved_understandings[0]
+    assert understanding.entities.emails == ["rahulexample.test@gmail.com"]
+    full_plan = original_build_plan(understanding)
+    lookup_arguments = prepare_tool_arguments(
+        full_plan[0],
+        understanding,
+        {},
+    )
+    assert lookup_arguments == {"emails": ["rahulexample.test@gmail.com"]}
+    preview_step = next(step for step in full_plan if step.tool_name == "email.preview")
+    preview_arguments = prepare_tool_arguments(
+        preview_step,
+        understanding,
+        {
+            "directory.lookup_employees": {
+                "employees": [{
+                    "email": recipient.email,
+                    "matched_by": f"email:{recipient.email}",
+                }],
+            },
+        },
+    )
+    assert preview_arguments["recipient_emails"] == [recipient.email]
+    assert db_session.query(Task).count() == 0
+    assert db_session.query(AssistantConversation).filter_by(
+        id=conversation_id
+    ).one().pending_clarification is None
 
 
 def test_ambiguous_employee_name_requires_explicit_selection(

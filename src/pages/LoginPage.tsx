@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 
 export function LoginPage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const { signIn, authNotice } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -17,7 +18,11 @@ export function LoginPage() {
     setSubmitting(true)
     try {
       await signIn(email, password)
-      navigate('/home', { replace: true })
+      const from = (location.state as { from?: { pathname?: string; search?: string; hash?: string } } | null)?.from
+      navigate(
+        from ? `${from.pathname ?? '/home'}${from.search ?? ''}${from.hash ?? ''}` : '/home',
+        { replace: true },
+      )
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Sign-in failed. Please try again.')
     } finally {

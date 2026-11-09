@@ -258,22 +258,42 @@ def search_company_knowledge(
     if not query_tokens:
         return []
 
-    # Check for 2-word phrases from query for high-relevance boosting
-    raw_words = [w.lower().strip(".,;:!?\"'") for w in query.split() if w.strip(".,;:!?\"'")]
-    phrases = [
-        f"{raw_words[i]} {raw_words[i+1]}"
-        for i in range(len(raw_words) - 1)
-        if len(raw_words[i]) > 2 and len(raw_words[i+1]) > 2
-    ]
-
     if db is not None and actor_id:
-        semantic_results = retrieve_semantic_document_context(
-            db,
-            actor_id=actor_id,
-            query=query,
-        )
+        try:
+            semantic_results = retrieve_semantic_document_context(
+                db,
+                actor_id=actor_id,
+                query=query,
+            )
+        except Exception:
+            logger.exception(
+                "Indexed policy retrieval failed; trying the static policy fallback."
+            )
+            semantic_results = []
         if semantic_results:
             return semantic_results[:limit]
+    return _search_static_company_knowledge(query, limit)
+
+
+def _search_static_company_knowledge(query: str, limit: int) -> list[dict]:
+    """Search the legacy policy file without invoking indexed semantic search."""
+    query_tokens = [
+        token.lower().strip(".,;:!?\"'()[]{}")
+        for token in query.split()
+        if len(token.strip(".,;:!?\"'()[]{}")) > 2
+    ]
+    if not query_tokens:
+        return []
+    raw_words = [
+        word.lower().strip(".,;:!?\"'")
+        for word in query.split()
+        if word.strip(".,;:!?\"'")
+    ]
+    phrases = [
+        f"{raw_words[index]} {raw_words[index + 1]}"
+        for index in range(len(raw_words) - 1)
+        if len(raw_words[index]) > 2 and len(raw_words[index + 1]) > 2
+    ]
     if re.search(r"\bworking\s+hours?\b", query, re.IGNORECASE):
         return []
 
@@ -371,10 +391,7 @@ def retrieve_email_document_context(
     results = retrieve_semantic_document_context(db, actor_id=actor_id, query=query)
     if results:
         return results
-    snippet = retrieve_company_knowledge(query, db=db, actor_id=actor_id)
-    if snippet:
-        return [{"source": _KNOWLEDGE_BASE_PATH.name, "snippet": snippet}]
-    return []
+    return _search_static_company_knowledge(query, limit=1)
 
 
 def _is_public_policy_text(snippet: str) -> bool:
@@ -628,7 +645,7 @@ def build_execution_plan(
 
     elif understanding.intent == "send_email":
         entities = understanding.entities
-        recipients = entities.groups or entities.people
+        recipients = entities.groups or entities.people or entities.emails
         recipient = recipients[0] if recipients else "the specified recipient"
         topic = entities.topic or "the requested topic"
 
@@ -866,6 +883,8 @@ def prepare_tool_arguments(
         arguments: dict = {}
         if entities.people:
             arguments["names"] = list(dict.fromkeys(entities.people))
+        if entities.emails:
+            arguments["emails"] = list(dict.fromkeys(entities.emails))
         if entities.groups:
             arguments["groups"] = list(dict.fromkeys(entities.groups))
         return arguments
@@ -911,8 +930,9 @@ def prepare_tool_arguments(
 
     if tool in ("email.preview", "email.send"):
         arguments = {}
-        if named_emails:
-            arguments["recipient_emails"] = named_emails
+        recipient_emails = list(dict.fromkeys([*named_emails, *entities.emails]))
+        if recipient_emails:
+            arguments["recipient_emails"] = recipient_emails
         if entities.groups:
             arguments["groups"] = list(dict.fromkeys(entities.groups))
         if tool == "email.preview":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, time, timedelta, timezone
 import logging
+import os
 import smtplib
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -419,12 +420,32 @@ def notify_assistant_approval_request(
     deduplicated = {recipient.id: recipient for recipient in recipients}
     for recipient in deduplicated.values():
         summary = f"Assistant action needs approval: {approval.summary}"
+        notification_key = f"assistant-approval:{approval.id}:{recipient.id}"
+        existing_notification = (
+            db.query(UserNotification)
+            .filter(UserNotification.idempotency_key == notification_key)
+            .one_or_none()
+        )
+        if existing_notification is not None:
+            continue
+        from app.assistant_approvals import issue_approval_email_link
+
+        approval_token = issue_approval_email_link(db, approval, recipient.id)
+        frontend_base = (
+            os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").strip().rstrip("/")
+        )
+        approval_path = (
+            "/my-approvals"
+            if approval.approver_kind == "requester"
+            else "/approvals"
+        )
+        approval_url = f"{frontend_base}{approval_path}#approvalToken={approval_token}"
         _create_and_deliver(
             db,
             recipient=recipient,
             event_type="approval_request",
             summary=summary,
-            idempotency_key=f"assistant-approval:{approval.id}:{recipient.id}",
+            idempotency_key=notification_key,
             entity_type="assistant_approval",
             entity_id=approval.id,
             entity_url=(
@@ -436,7 +457,8 @@ def notify_assistant_approval_request(
             email_body=(
                 f"{approval.summary}\n\n"
                 f"Requested by: {approval.requester_id}\n"
-                "Open Approvals in the Office Operations app to review."
+                f"Review and decide (sign in required): {approval_url}\n"
+                "This secure link is single-use and expires with the approval request."
             ),
         )
 
@@ -467,6 +489,104 @@ def notify_assistant_approval_decision(
         email_subject="AI assistant approval update",
         email_body=f"{summary}\n\nOpen Approvals in the Office Operations app for details.",
     )
+
+
+def _notify_assistant_approval_recipient(
+    db: Session,
+    approval: AssistantActionApproval,
+    recipient: Employee,
+    *,
+    event_type: str,
+    idempotency_key: str,
+    summary: str,
+) -> bool:
+    existing = (
+        db.query(UserNotification)
+        .filter(UserNotification.idempotency_key == idempotency_key)
+        .one_or_none()
+    )
+    if existing is not None:
+        return True
+    from app.assistant_approvals import issue_approval_email_link
+
+    token = issue_approval_email_link(db, approval, recipient.id)
+    frontend_base = os.getenv("FRONTEND_BASE_URL", "http://localhost:5173").strip().rstrip("/")
+    approval_url = f"{frontend_base}/approvals#approvalToken={token}"
+    _create_and_deliver(
+        db,
+        recipient=recipient,
+        event_type=event_type,
+        summary=summary,
+        idempotency_key=idempotency_key,
+        entity_type="assistant_approval",
+        entity_id=approval.id,
+        entity_url="/approvals",
+        email_subject=summary,
+        email_body=(
+            f"{approval.summary}\n\n"
+            f"Requested by: {approval.requester_id}\n"
+            f"Review and decide (sign in required): {approval_url}\n"
+            "This secure link is single-use and expires with the approval request."
+        ),
+    )
+    return True
+
+
+def notify_assistant_alternate_approver(
+    db: Session,
+    approval: AssistantActionApproval,
+    recipient: Employee,
+) -> None:
+    """Notify the specifically assigned alternate with their own signed link."""
+    _notify_assistant_approval_recipient(
+        db,
+        approval,
+        recipient,
+        event_type="approval_request",
+        idempotency_key=(
+            f"assistant-approval-alternate:{approval.id}:{recipient.id}:"
+            f"{approval.updated_at.isoformat()}"
+        ),
+        summary=f"Assistant action assigned for approval: {approval.summary}",
+    )
+
+
+def notify_assistant_approval_reminder(
+    db: Session,
+    approval: AssistantActionApproval,
+) -> bool:
+    """Remind current authorized approvers once after a request has waited 24 hours."""
+    recipients = _employees_with_roles(db, {"hr_operations", "admin"})
+    requester = db.get(Employee, approval.requester_id)
+    if requester is not None and requester.is_active and approval.requester_role == "employee":
+        recipients.extend(
+            db.query(Employee)
+            .join(AuthAccount, AuthAccount.employee_id == Employee.id)
+            .filter(
+                Employee.is_active.is_(True),
+                AuthAccount.is_enabled.is_(True),
+                AuthAccount.role == "manager",
+                Employee.team == requester.team,
+            )
+            .all()
+        )
+    if approval.alternate_approver_id:
+        alternate = db.get(Employee, approval.alternate_approver_id)
+        if alternate is not None and alternate.is_active:
+            recipients.append(alternate)
+
+    summary = f"Reminder: assistant action still needs approval: {approval.summary}"
+    notified = False
+    for recipient in {employee.id: employee for employee in recipients}.values():
+        notified = _notify_assistant_approval_recipient(
+            db,
+            approval,
+            recipient,
+            event_type="approval_reminder",
+            idempotency_key=f"assistant-approval-reminder:{approval.id}:{recipient.id}",
+            summary=summary,
+        ) or notified
+    return notified
 
 
 def notify_email_approval_request(db: Session, draft: EmailDraft) -> None:
