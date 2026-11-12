@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.meeting.models import (
     AssistantAuditEvent,
+    AuthAuditEvent,
     EmailDraftEvent,
     Employee,
     MeetingAuditLog,
@@ -31,13 +32,14 @@ DETAIL_LIMIT = 300
 # chatter, not an action anyone took, and it would bury everything that matters.
 ROUTINE_WORKFLOW_EVENTS = ("step_completed",)
 MAX_LIMIT = 500
-SOURCES = ("task", "meeting", "assistant", "email", "workflow")
+SOURCES = ("task", "meeting", "assistant", "email", "workflow", "auth")
 SOURCE_LABELS = {
     "task": "Tasks",
     "meeting": "Meetings",
     "assistant": "AI assistant",
     "email": "E-mail",
     "workflow": "Workflows",
+    "auth": "Sign-ins",
 }
 
 
@@ -77,7 +79,15 @@ ACTION_LABELS = {
     "manual_retry": "Retried by an administrator",
     "manual_resume": "Resumed by an administrator",
     "manual_cancel": "Cancelled by an administrator",
+    # sign-ins and sessions (Story 10.1)
+    "login_success": "Signed in",
+    "login_failed": "Sign-in failed",
+    "logout": "Signed out",
+    "session_revoked": "Session ended by an administrator",
+    "session_idle_timeout": "Signed out for inactivity",
+    "refresh_reuse_detected": "Session ended: token reuse detected",
 }
+AUTH_OUTCOMES = {"login_success": "success", "login_failed": "failed", "refresh_reuse_detected": "failed"}
 DEFAULT_DETAIL = {
     "manual_retry": "The run was restarted from its first step.",
     "manual_resume": "The run was resumed from its last checkpoint.",
@@ -183,6 +193,14 @@ def _workflow(row: WorkflowEvent) -> dict:
                   target=_humanize(row.step_key) if row.step_key else None)
 
 
+def _auth(row: AuthAuditEvent) -> dict:
+    entry = _entry("auth", row, actor_id=row.actor_id or row.user_id, action=row.event,
+                   outcome=AUTH_OUTCOMES.get(row.event), detail=row.detail)
+    # For an administrator's action, who it was done to is shown as the target.
+    entry["_subject_id"] = row.user_id if row.actor_id and row.actor_id != row.user_id else None
+    return entry
+
+
 def _like(text: str) -> str:
     escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     return f"%{escaped}%"
@@ -203,6 +221,10 @@ _SOURCES: tuple[_Source, ...] = (
     _Source("email", EmailDraftEvent, _email,
             lambda q: or_(EmailDraftEvent.to_status.ilike(_like(q), escape="\\"),
                           EmailDraftEvent.detail.ilike(_like(q), escape="\\"))),
+    _Source("auth", AuthAuditEvent, _auth,
+            lambda q: or_(AuthAuditEvent.event.ilike(_like(q), escape="\\"),
+                          AuthAuditEvent.provider.ilike(_like(q), escape="\\"),
+                          AuthAuditEvent.detail.ilike(_like(q), escape="\\"))),
     _Source("workflow", WorkflowEvent, _workflow,
             lambda q: or_(WorkflowEvent.event_type.ilike(_like(q), escape="\\"),
                           WorkflowEvent.message.ilike(_like(q), escape="\\"),
@@ -235,9 +257,13 @@ def list_audit_entries(db: Session, *, source: str | None = None, query: str | N
     entries = entries[:limit]
 
     ids = {item["actor_id"] for item in entries if item["actor_id"]}
+    ids |= {item["_subject_id"] for item in entries if item.get("_subject_id")}
     names = dict(db.query(Employee.id, Employee.name).filter(Employee.id.in_(ids)).all()) if ids else {}
     for item in entries:
         item["actor_name"] = names.get(item["actor_id"]) if item["actor_id"] else None
+        subject = item.pop("_subject_id", None)
+        if subject and names.get(subject):
+            item["target"] = names[subject]
     return {
         "entries": entries,
         "counts": counts,

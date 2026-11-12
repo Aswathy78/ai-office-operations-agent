@@ -222,6 +222,40 @@ def check_assistant_key() -> list[Check]:
                   "Add GROQ_API_KEY to backend/.env and restart the API.")]
 
 
+def check_oauth() -> list[Check]:
+    """Google / Microsoft sign-in: optional, so a missing provider is a note, not a failure."""
+    values = dotenv_values(ENV_FILE) if ENV_FILE.exists() else {}
+
+    def setting(name: str) -> str:
+        return (values.get(name) or os.environ.get(name) or "").strip()
+
+    results: list[Check] = []
+    configured: list[str] = []
+    for label, prefix, extra in (("Google", "GOOGLE_OAUTH", ()), ("Microsoft", "MICROSOFT_OAUTH", ("TENANT_ID",))):
+        names = ("CLIENT_ID", "CLIENT_SECRET") + extra
+        present = [name for name in names if setting(f"{prefix}_{name}")]
+        if not present:
+            continue
+        missing = [f"{prefix}_{name}" for name in names if name not in present]
+        if missing:
+            results.append(Check("warn", f"{label} sign-in is only partly set up (missing {', '.join(missing)})",
+                                 "The button stays hidden until every setting is present.",
+                                 "Add the missing settings to backend/.env and restart the API."))
+        elif label == "Microsoft" and setting("MICROSOFT_OAUTH_TENANT_ID").lower() in {"common", "organizations", "consumers"}:
+            results.append(Check("warn", "Microsoft sign-in needs your own tenant id, not 'common' or 'organizations'",
+                                 "Other tenants could otherwise sign in as one of your employees.",
+                                 "Set MICROSOFT_OAUTH_TENANT_ID to your Directory (tenant) ID."))
+        else:
+            configured.append(label)
+    if configured:
+        results.append(_ok(f"Sign-in with {' and '.join(configured)} is configured"))
+    elif not results:
+        results.append(Check("warn", "Google / Microsoft sign-in is not configured",
+                             "People sign in with a password only.",
+                             "Optional: add the GOOGLE_OAUTH_* / MICROSOFT_OAUTH_* settings (see backend/.env.example)."))
+    return results
+
+
 def check_frontend() -> list[Check]:
     modules = PROJECT_DIRECTORY / "node_modules"
     if not (modules / "react-markdown").exists():
@@ -266,7 +300,7 @@ def check_servers() -> list[Check]:
 def run_checks(*, try_mail_login: bool = False) -> list[Check]:
     results: list[Check] = []
     for check in (check_python, check_database, check_accounts, lambda: check_mail(try_mail_login),
-                  check_ocr, check_assistant_key, check_frontend, check_servers):
+                  check_ocr, check_assistant_key, check_oauth, check_frontend, check_servers):
         try:
             results.extend(check())
         except Exception as error:  # noqa: BLE001 - one broken check must not hide the rest

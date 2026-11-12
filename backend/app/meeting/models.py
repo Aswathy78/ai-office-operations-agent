@@ -1727,6 +1727,135 @@ class AuthSession(Base):
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+    # Story 10.1: the sign-in this access token belongs to. Revoking or idling out the
+    # login session ends every access token issued under it. Null for older tokens.
+    login_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+AUTH_PROVIDERS = ("password", "google", "microsoft")
+
+
+class AuthLoginSession(Base):
+    """One sign-in (Story 10.1): the unit of idle timeout, listing and revocation."""
+
+    __tablename__ = "auth_login_sessions"
+    __table_args__ = (
+        Index("ix_auth_login_sessions_account", "account_id", "revoked_at"),
+        Index("ix_auth_login_sessions_active", "revoked_at", "last_active_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("auth_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    # Absolute end of the session, however active the person is.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # logout, admin, idle_timeout, refresh_reuse, account_disabled
+    revoked_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class AuthRefreshToken(Base):
+    """A rotating refresh token. Only a hash is stored; each token works exactly once."""
+
+    __tablename__ = "auth_refresh_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_auth_refresh_tokens_hash"),
+        Index("ix_auth_refresh_tokens_session", "session_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("auth_login_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set when the token is exchanged for a new one. Presenting it again means it was copied.
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuthIdentity(Base):
+    """A Google / Microsoft identity linked to one existing account (Story 10.1)."""
+
+    __tablename__ = "auth_identities"
+    __table_args__ = (
+        UniqueConstraint("provider", "subject", name="uq_auth_identities_provider_subject"),
+        UniqueConstraint("account_id", "provider", name="uq_auth_identities_account_provider"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("auth_accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthLoginState(Base):
+    """One in-flight OAuth sign-in: the state, nonce and PKCE verifier, then a one-time code."""
+
+    __tablename__ = "oauth_login_states"
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_oauth_login_states_state"),
+        Index("ix_oauth_login_states_exchange", "exchange_hash"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # After a successful callback: the one-time code the front end swaps for tokens.
+    exchange_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    exchange_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exchanged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class AuthAuditEvent(Base):
+    """Append-only record of sign-ins and session events (Story 10.1)."""
+
+    __tablename__ = "auth_audit_events"
+    __table_args__ = (Index("ix_auth_audit_events_created", "created_at"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # login_success, login_failed, logout, session_revoked, session_idle_timeout,
+    # refresh_reuse_detected
+    event: Mapped[str] = mapped_column(String(40), nullable=False)
+    # The employee the event is about, and (for admin actions) the administrator who did it.
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    actor_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    detail: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    )
 
 
 class MeetingCancellationRequest(Base):

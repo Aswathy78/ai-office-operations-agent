@@ -14,6 +14,12 @@ from app.admin_assistant_runs import (
 from app.admin_audit_service import MAX_LIMIT, list_audit_entries
 from app.admin_dashboard_service import build_dashboard
 from app.admin_workflow_runs import list_workflow_runs, workflow_run_detail
+from app.auth_sessions import (
+    SessionNotFound,
+    list_active_sessions,
+    revoke_session_as_admin,
+    revoke_user_sessions_as_admin,
+)
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
@@ -146,3 +152,46 @@ def get_workflow_run_detail(
             detail="Workflow run not found.",
         )
     return detail
+
+
+# ---------------------------------------------------------------------------
+# Story 10.1 - sign-in sessions
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sessions")
+def get_active_sessions(
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(require_administrator),
+    db: Session = Depends(get_db),
+):
+    """Everyone who is signed in right now: who, how, from where, and when last active."""
+    response.headers["Cache-Control"] = "no-store"
+    return list_active_sessions(db, current_session_id=principal.session_id)
+
+
+@router.delete("/sessions/{session_id}")
+def revoke_session(
+    session_id: str,
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(require_administrator),
+    db: Session = Depends(get_db),
+):
+    """End one session. Its access and refresh tokens stop working immediately."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return revoke_session_as_admin(db, session_id, admin_id=principal.user_id)
+    except SessionNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.") from error
+
+
+@router.delete("/users/{employee_id}/sessions")
+def revoke_all_user_sessions(
+    employee_id: str,
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(require_administrator),
+    db: Session = Depends(get_db),
+):
+    """Sign one person out everywhere."""
+    response.headers["Cache-Control"] = "no-store"
+    return {"revoked": revoke_user_sessions_as_admin(db, employee_id, admin_id=principal.user_id)}
