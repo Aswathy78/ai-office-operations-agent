@@ -92,7 +92,7 @@ def test_merges_every_source_newest_first_with_names(client, db_session):
     body = client.get("/api/v1/admin/audit-logs").json()
     assert [e["id"] for e in body["entries"]] == [
         "task:t2", "assistant:a1", "meeting:m1", "email:e1", "task:t1", "workflow:w1"]
-    assert body["counts"] == {"task": 2, "meeting": 1, "assistant": 1, "email": 1, "workflow": 1}
+    assert body["counts"] == {"task": 2, "meeting": 1, "assistant": 1, "email": 1, "workflow": 1, "auth": 0}
     first = body["entries"][0]
     assert first["actor_name"] == "Ada Admin" and first["outcome"] == "denied" and first["source"] == "task"
     assert next(e for e in body["entries"] if e["source"] == "email")["actor_name"] is None  # "system"

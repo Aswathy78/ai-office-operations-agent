@@ -19,6 +19,7 @@ const titles: Record<string, string> = {
   '/notifications': 'Notifications',
   '/settings/notifications': 'Notification preferences',
   '/admin/dashboard': 'System dashboard',
+  '/admin/sessions': 'Sessions',
   '/admin/users': 'Users',
   '/admin/agent-monitor': 'Agent Monitor',
   '/admin/audit-logs': 'Audit Logs',

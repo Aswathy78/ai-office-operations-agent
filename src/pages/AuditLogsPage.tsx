@@ -8,7 +8,7 @@ import { usePolling } from '../hooks/usePolling'
 export const AUDIT_REFRESH_MS = 15_000
 const PAGE_SIZE = 200
 
-const SOURCES: AuditSource[] = ['task', 'meeting', 'assistant', 'email', 'workflow']
+const SOURCES: AuditSource[] = ['task', 'meeting', 'assistant', 'email', 'workflow', 'auth']
 
 function parseUtc(iso: string): Date {
   return new Date(/(?:Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)

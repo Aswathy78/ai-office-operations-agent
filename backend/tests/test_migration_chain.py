@@ -137,7 +137,7 @@ def test_migration_chain_handles_app_created_tables_with_a_stale_revision(
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261109_02"
+            ).scalar_one() == head_revision()
             assert connection.exec_driver_sql(
                 "SELECT id, status FROM workflow_runs WHERE id = 'run-1'"
             ).one() == ("run-1", "pending")
@@ -203,7 +203,7 @@ def test_approval_center_migration_recovers_stale_batch_table_and_existing_link_
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261109_02"
+            ).scalar_one() == head_revision()
             assert connection.exec_driver_sql(
                 "SELECT id, status FROM assistant_action_approvals"
             ).one() == ("approval-1", "pending")
@@ -268,7 +268,7 @@ def test_story_97_migration_is_retry_safe_and_preserves_approval_data(tmp_path: 
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261109_02"
+            ).scalar_one() == head_revision()
             assert connection.exec_driver_sql(
                 "SELECT id, status, alternate_approver_id, reminder_sent_at "
                 "FROM assistant_action_approvals"
@@ -323,7 +323,7 @@ def test_approval_affected_people_migration_is_retry_safe(tmp_path: Path):
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT version_num FROM alembic_version"
-            ).scalar_one() == "20261109_02"
+            ).scalar_one() == head_revision()
             assert json.loads(connection.exec_driver_sql(
                 "SELECT affected_people FROM assistant_action_approvals "
                 "WHERE id = 'approval-preserved'"

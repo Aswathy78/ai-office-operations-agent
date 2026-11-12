@@ -28,7 +28,15 @@ class AuthConfigurationError(RuntimeError):
 
 
 class InvalidAccessToken(Exception):
-    """The access token, account, employee, or session is invalid."""
+    """The access token, account, employee, or session is invalid.
+
+    ``reason`` says why when the person should be told (an idle timeout, a session an
+    administrator ended); it is None for a plainly invalid token.
+    """
+
+    def __init__(self, reason: str | None = None) -> None:
+        super().__init__(reason or "invalid")
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,8 @@ class AuthenticatedPrincipal:
     role: str
     team: str | None
     jti: str
+    # Story 10.1: the sign-in this token belongs to (None for tokens issued before it).
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -191,7 +201,12 @@ def authenticate_password(
     return account, employee
 
 
-def _principal(account: AuthAccount, employee: Employee, jti: str) -> AuthenticatedPrincipal:
+def _principal(
+    account: AuthAccount,
+    employee: Employee,
+    jti: str,
+    session_id: str | None = None,
+) -> AuthenticatedPrincipal:
     return AuthenticatedPrincipal(
         user_id=employee.id,
         account_id=account.id,
@@ -200,6 +215,7 @@ def _principal(account: AuthAccount, employee: Employee, jti: str) -> Authentica
         role=account.role,
         team=employee.team,
         jti=jti,
+        session_id=session_id,
     )
 
 
@@ -207,6 +223,8 @@ def issue_access_token(
     db: Session,
     account: AuthAccount,
     employee: Employee,
+    *,
+    login_session_id: str | None = None,
 ) -> TokenResult:
     secret, issuer, audience, expires_in = _jwt_settings()
     now = datetime.now(timezone.utc)
@@ -228,10 +246,15 @@ def issue_access_token(
         jti=jti,
         account_id=account.id,
         expires_at=expires_at,
+        login_session_id=login_session_id,
     )
     db.add(session)
     db.commit()
-    return TokenResult(token=token, expires_in=expires_in, principal=_principal(account, employee, jti))
+    return TokenResult(
+        token=token,
+        expires_in=expires_in,
+        principal=_principal(account, employee, jti, login_session_id),
+    )
 
 
 def authenticate_access_token(db: Session, token: str) -> AuthenticatedPrincipal:
@@ -256,7 +279,14 @@ def authenticate_access_token(db: Session, token: str) -> AuthenticatedPrincipal
 
     session = db.query(AuthSession).filter(AuthSession.jti == jti).first()
     if session is None or session.account_id != account_id or session.revoked_at is not None:
-        raise InvalidAccessToken()
+        reason = None
+        if session is not None and session.account_id == account_id and session.login_session_id:
+            # Ended along with its sign-in: tell the person why (an administrator, a timeout).
+            from app.meeting.models import AuthLoginSession
+
+            login_session = db.get(AuthLoginSession, session.login_session_id)
+            reason = login_session.revoked_reason if login_session is not None else None
+        raise InvalidAccessToken(reason)
     session_expiry = session.expires_at
     if session_expiry.tzinfo is None:
         session_expiry = session_expiry.replace(tzinfo=timezone.utc)
@@ -271,7 +301,17 @@ def authenticate_access_token(db: Session, token: str) -> AuthenticatedPrincipal
         raise InvalidAccessToken()
     if normalize_email(employee.email) != account.email_normalized:
         raise InvalidAccessToken()
-    return _principal(account, employee, jti)
+
+    if session.login_session_id:
+        # Story 10.1: the sign-in itself may have been revoked, idled out or expired.
+        from app.auth_sessions import SessionEnded, check_session
+        from app.meeting.models import AuthLoginSession
+
+        try:
+            check_session(db, db.get(AuthLoginSession, session.login_session_id))
+        except SessionEnded as ended:
+            raise InvalidAccessToken(ended.reason) from ended
+    return _principal(account, employee, jti, session.login_session_id)
 
 
 def revoke_access_token(db: Session, principal: AuthenticatedPrincipal) -> None:

@@ -530,6 +530,7 @@ def test_alembic_upgrade_head_creates_action_item_schema(tmp_path: Path):
             "expires_at",
             "revoked_at",
             "created_at",
+            "login_session_id",  # Story 10.1
         } == {
             column["name"] for column in inspector.get_columns("auth_sessions")
         }

@@ -3147,6 +3147,149 @@ Approval notification emails include recipient-bound, signed links that require 
 Tests: `backend/tests/test_assistant_write_guard.py`, `backend/tests/test_assistant_tool_execution.py`, `src/components/assistant/AgentApprovalsSection.test.tsx`, and `src/pages/ApprovalsPage.test.tsx`.
 
 
+## Story 10.1 – Sign in with Google or Microsoft (OAuth 2.0 / OIDC)
+
+Employees can sign in with a Google or Microsoft Entra ID work account instead of a password. Password sign-in keeps working. Signing in with a provider **never creates an account**: the provider's verified e-mail address (or a previously linked identity) must match an employee who already has an account, otherwise sign-in is refused.
+
+### How it works
+
+1. The sign-in page shows **Continue with Google / Microsoft** only for providers that are configured.
+2. The browser goes to the provider with a one-time `state`, a `nonce` and a PKCE challenge (S256).
+3. The provider sends the browser back to the API callback. The API checks the state (single use, 10 minutes), swaps the code for an ID token, and verifies the token's **signature, issuer, audience, expiry and nonce**.
+4. The API links the identity to the existing account: first by e-mail, then by the provider's stable subject. A second, different identity can never take over an already-linked account. Disabled accounts and employees are refused.
+5. The browser is sent to the app with a **one-time code** (valid 2 minutes, usable once). Tokens are never put in a URL. The app swaps the code for its own tokens.
+
+If anything fails, the person sees a plain message (cancelled, link expired, provider unreachable, "this account is not set up"). The message deliberately does not say whether an account exists. Every failure is audited with the reason.
+
+### Tokens and sessions
+
+| What | Behaviour |
+|---|---|
+| Access token | Signed JWT, expires after **15 minutes** (`AUTH_ACCESS_TOKEN_TTL_SECONDS=900`) |
+| Refresh token | Random, **single use**; every refresh returns a new one. Only a hash is stored. Lasts 24 hours (`AUTH_REFRESH_TOKEN_TTL_SECONDS`), never beyond the session |
+| Reuse protection | Presenting a refresh token that was already used means it was copied: the **whole session ends** (the new token too) and `refresh_reuse_detected` is audited |
+| Idle timeout | **30 minutes** without activity ends the session (`AUTH_IDLE_TIMEOUT_SECONDS=1800`); a refresh counts as activity |
+| Absolute lifetime | A sign-in ends after 7 days at most (`AUTH_SESSION_MAX_AGE_SECONDS`) |
+| Revocation | Sign-out, or an administrator, ends the session. Its access and refresh tokens stop working at once |
+
+In the browser, tokens are kept **in memory only** (nothing in `localStorage` or `sessionStorage`). When an access token expires the app refreshes it silently and retries the request; reloading the page means signing in again. When a session ends, the sign-in page says why (inactivity, ended by an administrator, security).
+
+Existing password logins now also create a tracked session and a refresh token. Access tokens issued before this story have no session and keep working until they expire.
+
+### Administrators
+
+- **Sessions** menu (`/admin/sessions`): everyone signed in right now with how (Google / Microsoft / password), device, IP address, when they signed in and when they were last active. **End session** or **Sign out everywhere** signs a person out immediately.
+- **Audit Logs → Sign-ins**: every successful login (person, provider, time, IP and device), failed sign-ins, sign-outs, idle time-outs, administrator revocations and token-reuse events. Refresh events are not logged because they happen every 15 minutes.
+
+### Setting up the providers
+
+All provider settings live in `backend/.env` and nowhere else (never in code, never in `VITE_*` variables; the file is git-ignored, check with `git check-ignore backend/.env`). Save the file and restart with `.\scripts\dev.ps1`. `.\scripts\dev.ps1 -Check` (or `python -m app.doctor`) reports what is configured and warns about a half-finished provider. A provider's button appears on the sign-in page only when **all** of its settings are present.
+
+**Redirect addresses to register with each provider.** For local development use `localhost`, not `127.0.0.1`: Google accepts either, but Microsoft Entra only allows plain `http` for `localhost`. The code's default is `http://127.0.0.1:8000`, so set `OAUTH_REDIRECT_BASE_URL` explicitly. The registered address must match character for character (scheme, host, port, path, no trailing slash):
+
+```text
+http://localhost:8000/api/v1/auth/oauth/google/callback
+http://localhost:8000/api/v1/auth/oauth/microsoft/callback
+```
+
+The app requests only the scopes `openid email profile` (plus PKCE S256, `state` and `nonce`); it never asks for mail, Drive or Graph data.
+
+```text
+OAUTH_REDIRECT_BASE_URL=http://localhost:8000    # the API, as the browser sees it
+FRONTEND_BASE_URL=http://localhost:5173          # where people land after signing in
+```
+
+**Google**
+
+1. Google Cloud Console → *APIs & Services* → *OAuth consent screen*. Choose **Internal** for a Workspace company, or **External** to allow personal Gmail accounts. While an External app is in *Testing* mode, add every address that will sign in under **Test users** (otherwise Google shows "Access blocked").
+2. Add the scopes `openid`, `.../auth/userinfo.email` and `.../auth/userinfo.profile` (non-sensitive, no Google verification needed).
+3. *Credentials* → *Create credentials* → *OAuth client ID* → type **Web application**. Add the Google redirect address above under *Authorized redirect URIs*. Leave *Authorized JavaScript origins* empty (the flow is entirely server-side).
+4. Put the client id and secret in `backend/.env`:
+
+```text
+GOOGLE_OAUTH_CLIENT_ID=...
+GOOGLE_OAUTH_CLIENT_SECRET=...
+# GOOGLE_OAUTH_ALLOWED_DOMAIN=yourcompany.com   # optional, see below
+```
+
+`GOOGLE_OAUTH_ALLOWED_DOMAIN` checks Google's `hd` claim, which only Workspace accounts have, so leave it unset when testing with a personal Gmail account. Google must also report the e-mail address as verified.
+
+**Microsoft Entra ID**
+
+1. Azure portal → *Microsoft Entra ID* → *App registrations* → *New registration*. For *Supported account types* choose **Accounts in this organizational directory only** (single tenant). This is the only supported type: personal Microsoft accounts and other tenants cannot sign in.
+2. Under *Redirect URI* choose platform **Web** and add the Microsoft redirect address above.
+3. *Certificates & secrets* → *New client secret*; copy the secret **Value** (shown once; the *Secret ID* will not work and gives `invalid_client`). Secrets expire, so note the date.
+4. *API permissions*: the default delegated `User.Read` covers the `openid`, `email` and `profile` scopes. If your tenant requires it, an administrator must click *Grant admin consent*.
+5. Recommended: *Token configuration* → *Add optional claim* → **ID** → `email`. Without it the app falls back to the user principal name, which must then equal the employee's e-mail.
+6. Put the application (client) id, the secret value and your **Directory (tenant) ID** in `backend/.env`:
+
+```text
+MICROSOFT_OAUTH_CLIENT_ID=...
+MICROSOFT_OAUTH_CLIENT_SECRET=...
+MICROSOFT_OAUTH_TENANT_ID=...
+```
+
+A specific tenant id is required: `common`, `organizations` and `consumers` are refused, because Entra does not verify the e-mail address another tenant puts in its tokens.
+
+Provider secrets are only read from the environment and are never returned by the API or written to logs.
+
+### The person must already be an employee
+
+Signing in with Google or Microsoft **never creates an account**. The verified e-mail must match an existing employee who has a login account, otherwise the sign-in page says *"This account is not set up to use AI Office. Ask an administrator for access."* The page deliberately does not say why; the reason (no matching e-mail, disabled account, already linked to a different identity) is recorded under **Audit Logs → Sign-ins** with the e-mail masked, for example `No account matches a***@gmail.com`.
+
+The seeded demo employees use example addresses, so to test with a real address, add yourself first (this writes to the development database; run from the `backend` folder):
+
+```powershell
+..\.venv-py311\Scripts\python.exe -c "import uuid; from app.db.database import SessionLocal; from app.meeting.models import Employee; db=SessionLocal(); db.add(Employee(id=str(uuid.uuid4()), name='Your Name', email='you@yourdomain.com', team='Engineering', is_active=True)); db.commit()"
+..\.venv-py311\Scripts\python.exe -m app.auth_provision --employee-email you@yourdomain.com --role admin
+```
+
+The second command asks for a password of at least 12 characters (needed only to create the account; it is not used for Google / Microsoft sign-in) and, for an elevated role, asks you to type the role again. Use `--role employee` for an ordinary person. The e-mail must equal the Google / Microsoft account's address, ignoring case.
+
+### Trying it locally
+
+1. Fill in `backend/.env` as above and add yourself as an employee.
+2. `.\scripts\dev.ps1 -Check` should report *Sign-in with Google and Microsoft is configured*, then `.\scripts\dev.ps1` starts the API (port 8000) and the front end (port 5173).
+3. Open **http://localhost:5173/login** (use `localhost`, not `127.0.0.1`) and click **Continue with Google** or **Continue with Microsoft**. You should land on `/home` signed in.
+4. As an administrator, open **Sessions** (shows the provider, device and IP) and **Audit Logs → Sign-ins** (`Signed in with Google from …`).
+
+| To test | Do this | Expected |
+|---|---|---|
+| A person who is not an employee | Sign in with an address that is not in the employee list | "This account is not set up…", and a failed sign-in in the audit log |
+| Cancelling | Cancel at the provider's screen | A plain "cancelled" message on the sign-in page |
+| Silent refresh | Set `AUTH_ACCESS_TOKEN_TTL_SECONDS=60`, sign in, keep using the app for over a minute | The app keeps working without asking you to sign in |
+| Idle time-out | Set `AUTH_IDLE_TIMEOUT_SECONDS=60`, sign in, do nothing for over a minute, then click something | Back on the sign-in page: "You were signed out because you were inactive" |
+| Administrator revocation | Sign in as an employee in a second browser profile; as an administrator end that session under **Sessions** | The employee's next click returns to sign-in: "ended by an administrator" |
+| Reload | Press F5 while signed in | You sign in again (tokens are kept in memory only) |
+
+Restart the API after changing a time-out setting, and remove the test values afterwards.
+
+### Sign-in problems
+
+| What you see | Cause |
+|---|---|
+| Google `redirect_uri_mismatch`, Microsoft `AADSTS50011` | The registered address is not exactly `OAUTH_REDIRECT_BASE_URL` + `/api/v1/auth/oauth/<provider>/callback` |
+| Google "Access blocked" | An External app in *Testing* mode, and the address is not a test user |
+| Microsoft `invalid_client` / `AADSTS7000215` | The secret *ID* was copied instead of the *Value*, or the secret expired |
+| No "Continue with…" button | A setting is missing or Microsoft's tenant is `common` / `organizations`; run `.\scripts\dev.ps1 -Check` |
+| "This account is not set up to use AI Office" | No employee with that e-mail, a disabled account or employee, or the e-mail differs; see the reason under **Audit Logs → Sign-ins** |
+| "That sign-in link has expired or was already used" | The link works once and lasts 10 minutes; start again |
+
+For production use HTTPS addresses for `OAUTH_REDIRECT_BASE_URL` and `FRONTEND_BASE_URL` and register the matching redirect addresses with each provider.
+
+### API
+
+- `GET /api/v1/auth/providers` – which sign-in buttons to show (never any id or secret)
+- `POST /api/v1/auth/oauth/{google|microsoft}/start` – returns the provider's sign-in address
+- `GET /api/v1/auth/oauth/{provider}/callback` – where the provider returns; always redirects to the app
+- `POST /api/v1/auth/oauth/exchange` – swaps the one-time code for tokens
+- `POST /api/v1/auth/refresh` – rotates the refresh token and returns a new access token
+- `GET /api/v1/admin/sessions`, `DELETE /api/v1/admin/sessions/{id}`, `DELETE /api/v1/admin/users/{employee_id}/sessions` – administrators only
+- Migration `20261112_01` adds `auth_login_sessions`, `auth_refresh_tokens`, `auth_identities`, `oauth_login_states` and `auth_audit_events`.
+
+Tests: `backend/tests/test_oauth_authentication.py` (both providers with real RS256-signed ID tokens, token expiry and rotation, reuse detection, idle timeout, admin revocation, login auditing) and, in the front end, `src/api/sessionRefresh.test.ts`, `src/pages/LoginPage.oauth.test.tsx`, `src/pages/AuthCallbackPage*.test.tsx` and `src/pages/SessionsPage.test.tsx`.
+
+
 # 📌 Current Project Status
 
 Last updated 8 November 2026. FR-42 (Story 7.6), Epic 8 (Stories 8.1–8.3) and Story 9.6 (Approval Center) are implemented in this working tree. Story 8.4 is on branch `feature/story-8.4-retry-dead-letter-queue` and is not merged yet. Story 9.4 (admin dashboard and audit logs) is implemented and awaiting a branch and merge.
@@ -3274,9 +3417,14 @@ can assign an eligible alternate approver and query decision history at
 `GET /api/v1/assistant/approvals/history`; history filters include status,
 approver name or e-mail, and decision date range.
 
+### Epic 10 — Security & Identity
+
+- Story 10.1 — Sign in with Google or Microsoft (OAuth 2.0 / OIDC) linked to existing accounts; 15-minute access tokens with rotating single-use refresh tokens and reuse detection; idle time-out; administrator session list and revocation; every login audited (FR-56) — implemented, awaiting merge
+
 ### Known gaps
 
 - PowerPoint speaker notes are not extracted.
+- Story 10.1: tokens live in memory only, so reloading the page signs the person in again (a deliberate choice: nothing about the session is stored in the browser). The automated tests use a fake provider that signs real ID tokens; a real Google / Microsoft sign-in needs your own credentials and an employee record for the signing-in e-mail (see "Setting up the providers").
 - OCR of images and scanned PDFs needs Tesseract, which has to be installed separately.
 - Managers can upload documents, although Story 7.1 names HR / Operations; the upload permission check also has a test-only bypass.
 - The e-mail bounce endpoint trusts the `actor_role` query parameter.

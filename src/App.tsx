@@ -10,6 +10,8 @@ import { GuestMeetingRoomPlaceholder } from './pages/GuestMeetingRoomPlaceholder
 import { GuestJoinPage } from './pages/GuestJoinPage'
 import { HomePage } from './pages/HomePage'
 import { LoginPage } from './pages/LoginPage'
+import { AuthCallbackPage } from './pages/AuthCallbackPage'
+import { SessionsPage } from './pages/SessionsPage'
 import { MeetingEntryPage } from './pages/MeetingEntryPage'
 import { MeetingReportPage } from './pages/MeetingReportPage'
 import { MeetingRoomPage } from './pages/MeetingRoomPage'
@@ -66,6 +68,7 @@ function AppRoutes() {
     <Routes>
       {/* Public routes - no auth required */}
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/auth/callback" element={<AuthCallbackPage />} />
 
       {/* Guest-only sub-routes (unauthenticated flow) */}
       <Route path="/meetings/:meetingId/guest" element={<GuestJoinPage />} />
@@ -99,6 +102,7 @@ function AppRoutes() {
       <Route path="/notifications" element={<ProtectedAppPage path="/notifications"><NotificationsPage /></ProtectedAppPage>} />
       <Route path="/settings/notifications" element={<ProtectedAppPage path="/settings/notifications"><NotificationPreferencesPage /></ProtectedAppPage>} />
       <Route path="/admin/dashboard" element={<ProtectedAppPage path="/admin/dashboard"><AdminDashboardPage /></ProtectedAppPage>} />
+      <Route path="/admin/sessions" element={<ProtectedAppPage path="/admin/sessions"><SessionsPage /></ProtectedAppPage>} />
       <Route path="/admin/users" element={<ProtectedAppPage path="/admin/users"><AdminDashboardPage view="users" /></ProtectedAppPage>} />
       <Route path="/admin/workflows" element={<ProtectedAppPage path="/admin/workflows"><WorkflowQueuePage /></ProtectedAppPage>} />
       <Route path="/admin/agent-monitor" element={<ProtectedAppPage path="/admin/agent-monitor"><AdminDashboardPage view="health" /></ProtectedAppPage>} />

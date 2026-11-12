@@ -20,6 +20,13 @@ function AuthStatus() {
 }
 
 function renderAuth() {
+  // The sign-in page asks the server which providers (Google / Microsoft) are configured.
+  // Answer that call here so it does not use up the responses a test scripted for the login.
+  const scripted = globalThis.fetch
+  vi.stubGlobal('fetch', ((input: RequestInfo | URL, init?: RequestInit) =>
+    String(input).endsWith('/api/v1/auth/providers')
+      ? Promise.resolve(jsonResponse({ providers: [], password_enabled: true }))
+      : scripted(input, init)) as typeof fetch)
   return render(
     <MemoryRouter>
       <AuthProvider>

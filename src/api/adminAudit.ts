@@ -1,6 +1,6 @@
 import { API_BASE_URL, apiFetch } from './client'
 
-export type AuditSource = 'task' | 'meeting' | 'assistant' | 'email' | 'workflow'
+export type AuditSource = 'task' | 'meeting' | 'assistant' | 'email' | 'workflow' | 'auth'
 
 export interface AuditEntry {
   id: string

@@ -34,9 +34,14 @@ def get_authenticated_principal(
             detail="Authentication is not configured.",
         ) from exc
     except InvalidAccessToken as exc:
+        detail = "Invalid or expired access token."
+        if exc.reason:
+            from app.auth_sessions import REASON_MESSAGES
+
+            detail = REASON_MESSAGES.get(exc.reason, detail)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired access token.",
+            detail=detail,
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
     request.state.authenticated_principal = principal
