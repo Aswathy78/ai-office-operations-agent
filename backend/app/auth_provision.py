@@ -17,6 +17,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Provision local login for an existing employee.")
     parser.add_argument("--employee-email", required=True, help="Email of an existing active Employee")
     parser.add_argument(
+        "--department",
+        help="Operator-supplied department; never inferred from the employee's team",
+    )
+    parser.add_argument(
         "--role",
         choices=AUTH_ACCOUNT_ROLES,
         default="employee",
@@ -42,7 +46,13 @@ def main() -> None:
 
     try:
         with SessionLocal() as db:
-            account = provision_account(db, args.employee_email, password, args.role)
+            account = provision_account(
+                db,
+                args.employee_email,
+                password,
+                args.role,
+                department=args.department,
+            )
             employee_id = account.employee_id
     except ValueError as exc:
         parser.error(str(exc))

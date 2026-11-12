@@ -97,8 +97,8 @@ def collect_users(db: Session) -> dict:
         .subquery()
     )
     rows = (
-        db.query(AuthAccount, Employee, last_sign_in.c.last_at)
-        .join(Employee, Employee.id == AuthAccount.employee_id)
+        db.query(Employee, AuthAccount, last_sign_in.c.last_at)
+        .outerjoin(AuthAccount, AuthAccount.employee_id == Employee.id)
         .outerjoin(last_sign_in, last_sign_in.c.account_id == AuthAccount.id)
         .order_by(Employee.name.asc(), Employee.id.asc())
         .all()
@@ -106,19 +106,26 @@ def collect_users(db: Session) -> dict:
     by_role: dict[str, int] = {}
     active = 0
     items = []
-    for account, employee, last_at in rows:
-        is_active = bool(account.is_enabled and employee.is_active)
+    for employee, account, last_at in rows:
+        is_active = bool(account and account.is_enabled and employee.is_active)
         active += int(is_active)
-        by_role[account.role] = by_role.get(account.role, 0) + 1
+        role = account.role if account else None
+        if role:
+            by_role[role] = by_role.get(role, 0) + 1
         if len(items) < USER_LIST_LIMIT:
             items.append(
                 {
                     "id": employee.id,
                     "name": employee.name,
                     "email": employee.email,
-                    "role": account.role,
-                    "department": employee.team or UNASSIGNED_DEPARTMENT,
+                    "role": role,
+                    "department": employee.department or UNASSIGNED_DEPARTMENT,
                     "is_active": is_active,
+                    "login_status": (
+                        "No account"
+                        if account is None
+                        else "Enabled" if is_active else "Disabled"
+                    ),
                     "last_sign_in_at": _iso(last_at),
                 }
             )
@@ -133,7 +140,10 @@ def collect_users(db: Session) -> dict:
 
 
 def collect_departments(db: Session) -> dict:
-    team = func.coalesce(func.nullif(func.trim(Employee.team), ""), UNASSIGNED_DEPARTMENT)
+    department = func.coalesce(
+        func.nullif(func.trim(Employee.department), ""),
+        UNASSIGNED_DEPARTMENT,
+    )
     with_login = (
         db.query(AuthAccount.employee_id)
         .filter(AuthAccount.is_enabled.is_(True))
@@ -141,14 +151,14 @@ def collect_departments(db: Session) -> dict:
     )
     rows = (
         db.query(
-            team.label("name"),
+            department.label("name"),
             func.count(Employee.id),
             func.sum(case((Employee.is_active.is_(True), 1), else_=0)),
             func.count(with_login.c.employee_id),
         )
         .outerjoin(with_login, with_login.c.employee_id == Employee.id)
-        .group_by(team)
-        .order_by(team.asc())
+        .group_by(department)
+        .order_by(department.asc())
         .all()
     )
     items = [

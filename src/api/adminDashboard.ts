@@ -17,9 +17,10 @@ export interface DashboardUser {
   id: string
   name: string
   email: string
-  role: string
+  role: string | null
   department: string
   is_active: boolean
+  login_status: 'Enabled' | 'Disabled' | 'No account'
   last_sign_in_at: string | null
 }
 
@@ -107,4 +108,50 @@ export async function getAdminDashboard(signal?: AbortSignal): Promise<AdminDash
     throw new Error(detail)
   }
   return body as AdminDashboard
+}
+
+export async function updateEmployeeDepartment(
+  employeeId: string,
+  department: string,
+): Promise<{ employee_id: string; department: string }> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/admin/users/${encodeURIComponent(employeeId)}/department`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ department }),
+    },
+  )
+  const body: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const detail =
+      typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `The department could not be updated (${response.status}).`
+    throw new Error(detail)
+  }
+  return body as { employee_id: string; department: string }
+}
+
+export async function updateEmployeeRole(
+  employeeId: string,
+  role: 'employee' | 'manager' | 'hr_operations' | 'admin',
+): Promise<{ employee_id: string; role: string }> {
+  const response = await apiFetch(
+    `${API_BASE_URL}/api/v1/admin/users/${encodeURIComponent(employeeId)}/role`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role }),
+    },
+  )
+  const body: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const detail =
+      typeof body === 'object' && body !== null && 'detail' in body && typeof body.detail === 'string'
+        ? body.detail
+        : `The account role could not be updated (${response.status}).`
+    throw new Error(detail)
+  }
+  return body as { employee_id: string; role: string }
 }

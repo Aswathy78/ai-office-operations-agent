@@ -28,6 +28,7 @@ from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import (
     AuthAccount,
+    AuthAuditEvent,
     AuthSession,
     Base,
     EmailDraft,
@@ -106,9 +107,10 @@ def _isolated(monkeypatch):
 
 
 def _person(db: Session, employee_id: str, role: str, *, team: str | None = None,
+            department: str | None = None,
             enabled: bool = True, active: bool = True) -> None:
     db.add(Employee(id=employee_id, name=f"Person {employee_id}", email=f"{employee_id}@example.test",
-                    team=team, is_active=active))
+                    team=team, department=department, is_active=active))
     db.add(AuthAccount(id=f"acc-{employee_id}", employee_id=employee_id,
                        email_normalized=f"{employee_id}@example.test", password_hash=SECRET_HASH,
                        role=role, is_enabled=enabled))
@@ -146,10 +148,17 @@ class _AliveThread:
 # ---------------------------------------------------------------------------
 
 
-def test_unauthenticated_request_is_refused(anonymous_client):
+def test_unauthenticated_request_is_refused(anonymous_client, db_session):
     response = anonymous_client.get("/api/v1/admin/dashboard")
     assert response.status_code == 401
     assert "users" not in response.json()
+    event = db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "access_denied"
+    ).one()
+    assert event.actor_id is None
+    assert event.user_id is None
+    assert event.detail == "HTTP 401 GET denied."
+    assert "admin.users.read" not in event.detail
 
 
 def _sign_in(client: TestClient, db: Session, role: str) -> dict[str, str]:
@@ -171,6 +180,31 @@ def test_real_tokens_only_an_administrator_session_is_accepted(anonymous_client,
         assert "users" not in response.json()
     admin = _sign_in(anonymous_client, db_session, "admin")
     assert anonymous_client.get("/api/v1/admin/dashboard", headers=admin).status_code == 200
+
+
+def test_authenticated_hr_denial_for_admin_users_is_audited_safely(
+    anonymous_client, db_session
+):
+    headers = _sign_in(anonymous_client, db_session, "hr_operations")
+
+    response = anonymous_client.get(
+        "/api/v1/admin/dashboard",
+        headers=headers,
+        params={"search": "sensitive-query-value"},
+    )
+
+    assert response.status_code == 403
+    event = (
+        db_session.query(AuthAuditEvent)
+        .filter(AuthAuditEvent.event == "access_denied")
+        .one()
+    )
+    assert event.actor_id == "real-hr_operations"
+    assert event.user_id == "real-hr_operations"
+    assert event.detail == "HTTP 403 GET denied for admin.users.read."
+    assert "sensitive-query-value" not in event.detail
+    assert "password" not in event.detail.casefold()
+    assert "token" not in event.detail.casefold()
 
 
 def test_a_signed_out_administrator_token_stops_working(anonymous_client, db_session):
@@ -227,10 +261,19 @@ def test_no_secret_is_ever_in_the_response(client, db_session, monkeypatch):
 
 
 def test_users_and_departments_reflect_the_database(client, db_session):
-    _person(db_session, "admin-1", "admin", team="IT")
-    _person(db_session, "mgr-1", "manager", team="Sales")
-    _person(db_session, "emp-1", "employee", team="Sales")
-    _person(db_session, "emp-2", "employee", team=None, enabled=False)
+    _person(db_session, "admin-1", "admin", team="IT", department="Corporate")
+    _person(db_session, "mgr-1", "manager", team="Engineering", department="Sales")
+    _person(db_session, "emp-1", "employee", team="Finance", department="Sales")
+    _person(db_session, "emp-2", "employee", team=None, department=None, enabled=False)
+    db_session.add(
+        Employee(
+            id="emp-3",
+            name="No Login",
+            email="emp-3@example.test",
+            team="Engineering",
+            is_active=True,
+        )
+    )
     db_session.add(AuthSession(jti="j1", account_id="acc-emp-1", expires_at=NOW + timedelta(hours=1),
                                created_at=NOW - timedelta(minutes=5)))
     db_session.commit()
@@ -239,35 +282,250 @@ def test_users_and_departments_reflect_the_database(client, db_session):
 
     users = data["users"]
     assert users["available"] is True
-    assert (users["total"], users["active"], users["disabled"]) == (4, 3, 1)
+    assert (users["total"], users["active"], users["disabled"]) == (5, 3, 2)
     assert users["by_role"] == {"admin": 1, "manager": 1, "employee": 2}
     by_id = {item["id"]: item for item in users["items"]}
     assert by_id["emp-2"]["is_active"] is False
     assert by_id["emp-2"]["department"] == "Unassigned"
+    assert by_id["emp-2"]["login_status"] == "Disabled"
+    assert by_id["emp-3"]["role"] is None
+    assert by_id["emp-3"]["department"] == "Unassigned"
+    assert by_id["emp-3"]["login_status"] == "No account"
+    assert by_id["emp-3"]["last_sign_in_at"] is None
     assert by_id["emp-1"]["last_sign_in_at"] is not None
     assert by_id["mgr-1"]["last_sign_in_at"] is None
-    assert set(by_id["emp-1"]) == {"id", "name", "email", "role", "department", "is_active", "last_sign_in_at"}
+    assert set(by_id["emp-1"]) == {
+        "id", "name", "email", "role", "department", "is_active",
+        "login_status", "last_sign_in_at",
+    }
 
     departments = {item["name"]: item for item in data["departments"]["items"]}
     assert departments["Sales"] == {"name": "Sales", "employees": 2, "active_employees": 2, "with_login": 2}
-    assert departments["IT"]["employees"] == 1
+    assert departments["Corporate"]["employees"] == 1
     assert departments["Unassigned"]["with_login"] == 0  # its only account is disabled
 
 
 def test_a_disabled_employee_is_not_counted_active(client, db_session):
-    _person(db_session, "admin-1", "admin", team="IT")
+    _person(db_session, "admin-1", "admin", team="IT", department="IT")
     _person(db_session, "gone", "employee", team="IT", active=False)
     users = _get(client)["users"]
     assert users["active"] == 1 and users["disabled"] == 1
 
 
 def test_numbers_change_when_the_data_changes(client, db_session):
-    _person(db_session, "admin-1", "admin", team="IT")
+    _person(db_session, "admin-1", "admin", team="Operations", department="IT")
     assert _get(client)["users"]["total"] == 1
-    _person(db_session, "new-1", "employee", team="HR")
+    _person(db_session, "new-1", "employee", team="HR", department="HR")
     data = _get(client)
     assert data["users"]["total"] == 2
     assert {d["name"] for d in data["departments"]["items"]} == {"IT", "HR"}
+
+
+def test_administrator_can_assign_department_and_change_is_audited(client, db_session):
+    _person(db_session, "emp-1", "employee", team="Engineering")
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-1/department",
+        json={"department": "  People Operations  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "employee_id": "emp-1",
+        "department": "People Operations",
+    }
+    employee = db_session.query(Employee).filter(Employee.id == "emp-1").one()
+    assert employee.department == "People Operations"
+    assert employee.team == "Engineering"
+    event = (
+        db_session.query(AuthAuditEvent)
+        .filter(AuthAuditEvent.event == "department_updated")
+        .one()
+    )
+    assert event.actor_id == "admin-1"
+    assert event.user_id == "emp-1"
+    assert event.detail == "Department changed from Unassigned to People Operations."
+    assert event.session_id is None
+
+
+def test_administrator_can_assign_department_without_creating_login(client, db_session):
+    employee = Employee(
+        id="directory-only",
+        name="Directory Only",
+        email="directory-only@example.test",
+        team="Engineering",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.patch(
+        "/api/v1/admin/users/directory-only/department",
+        json={"department": "People Operations"},
+    )
+
+    assert response.status_code == 200
+    db_session.refresh(employee)
+    assert employee.department == "People Operations"
+    assert db_session.query(AuthAccount).filter(
+        AuthAccount.employee_id == employee.id
+    ).count() == 0
+    assert db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "department_updated",
+        AuthAuditEvent.user_id == employee.id,
+        AuthAuditEvent.actor_id == "admin-1",
+    ).count() == 1
+
+
+def test_administrator_can_change_existing_account_role_and_audit_employee(client, db_session):
+    _person(db_session, "emp-role", "employee", team="Engineering")
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-role/role",
+        json={"role": "hr_operations"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"employee_id": "emp-role", "role": "hr_operations"}
+    account = db_session.query(AuthAccount).filter(
+        AuthAccount.employee_id == "emp-role"
+    ).one()
+    assert account.role == "hr_operations"
+    event = db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "role_updated"
+    ).one()
+    assert event.actor_id == "admin-1"
+    assert event.user_id == "emp-role"
+    assert event.detail == "Account role changed from employee to hr_operations."
+
+
+@pytest.mark.parametrize("role", ["employee", "manager", "hr_operations"])
+def test_non_administrator_cannot_change_account_role(client, db_session, role):
+    _person(db_session, "emp-role", "employee", team="Engineering")
+    actor_id = f"{role}-role-editor"
+    client.login(actor_id, role)
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-role/role",
+        params={"actor_id": "admin-1", "actor_role": "admin"},
+        json={"role": "hr_operations"},
+    )
+
+    assert response.status_code == 403
+    account = db_session.query(AuthAccount).filter(
+        AuthAccount.employee_id == "emp-role"
+    ).one()
+    assert account.role == "employee"
+    event = db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "access_denied"
+    ).one()
+    assert event.actor_id == actor_id
+    assert event.user_id == actor_id
+    assert event.detail == "HTTP 403 PATCH denied."
+    assert "hr_operations" not in event.detail
+
+
+def test_role_update_rejects_unknown_role(client, db_session):
+    _person(db_session, "emp-role", "employee", team="Engineering")
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-role/role",
+        json={"role": "approver"},
+    )
+
+    assert response.status_code == 422
+    account = db_session.query(AuthAccount).filter(
+        AuthAccount.employee_id == "emp-role"
+    ).one()
+    assert account.role == "employee"
+    assert db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "role_updated"
+    ).count() == 0
+
+
+def test_role_update_does_not_create_account_for_directory_only_employee(client, db_session):
+    employee = Employee(
+        id="directory-only-role",
+        name="Directory Only",
+        email="directory-only-role@example.test",
+        is_active=True,
+    )
+    db_session.add(employee)
+    db_session.commit()
+
+    response = client.patch(
+        "/api/v1/admin/users/directory-only-role/role",
+        json={"role": "manager"},
+    )
+
+    assert response.status_code == 404
+    assert db_session.query(AuthAccount).filter(
+        AuthAccount.employee_id == employee.id
+    ).count() == 0
+
+
+@pytest.mark.parametrize("role", ["employee", "manager", "hr_operations"])
+def test_non_administrator_cannot_assign_department_and_denial_is_audited(
+    client, db_session, role
+):
+    _person(db_session, "emp-1", "employee", team="Engineering")
+    actor_id = f"{role}-1"
+    client.login(actor_id, role)
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-1/department",
+        params={"actor_id": "admin-1", "actor_role": "admin"},
+        json={"department": "People Operations"},
+    )
+
+    assert response.status_code == 403
+    assert db_session.query(Employee).filter(Employee.id == "emp-1").one().department is None
+    event = (
+        db_session.query(AuthAuditEvent)
+        .filter(AuthAuditEvent.event == "access_denied")
+        .one()
+    )
+    assert event.actor_id == actor_id
+    assert event.user_id == actor_id
+    assert event.detail == "HTTP 403 PATCH denied."
+    assert "People Operations" not in event.detail
+
+
+@pytest.mark.parametrize("body", [{}, {"department": "   "}])
+def test_department_assignment_requires_an_explicit_nonblank_value(client, db_session, body):
+    _person(db_session, "emp-1", "employee", team="Engineering")
+
+    response = client.patch("/api/v1/admin/users/emp-1/department", json=body)
+
+    assert response.status_code == 422
+    employee = db_session.query(Employee).filter(Employee.id == "emp-1").one()
+    assert employee.department is None
+    assert db_session.query(AuthAuditEvent).filter(
+        AuthAuditEvent.event == "department_updated"
+    ).count() == 0
+
+
+def test_department_assignment_does_not_infer_from_team(client, db_session):
+    _person(db_session, "emp-1", "employee", team="Engineering")
+
+    response = client.patch(
+        "/api/v1/admin/users/emp-1/department",
+        json={"department": "Engineering"},
+    )
+
+    assert response.status_code == 200
+    employee = db_session.query(Employee).filter(Employee.id == "emp-1").one()
+    assert employee.department == "Engineering"
+    assert employee.team == "Engineering"
+
+
+def test_department_assignment_returns_not_found_for_unknown_employee(client):
+    response = client.patch(
+        "/api/v1/admin/users/missing/department",
+        json={"department": "People Operations"},
+    )
+
+    assert response.status_code == 404
 
 
 # ---------------------------------------------------------------------------

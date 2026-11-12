@@ -48,6 +48,15 @@ def db_session():
     Base.metadata.create_all(bind=engine)
     testing_session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = testing_session()
+    session.add(Employee(
+        id=MANAGER["actor_id"],
+        name="Manager",
+        email="manager@northstar.example",
+        team="Engineering",
+        department="Operations",
+        is_active=True,
+    ))
+    session.commit()
     try:
         yield session
     finally:
@@ -106,6 +115,8 @@ def _employee(db: Session, name: str, team: str | None, active: bool = True) -> 
         name=name,
         email=f"{name.lower().replace(' ', '.')}@northstar.example",
         team=team,
+        department="Operations",
+        manager_id=MANAGER["actor_id"],
         is_active=active,
     )
     db.add(employee)
@@ -267,7 +278,12 @@ def test_manager_reassignment_outside_team_requires_approval(
     )
     assert duplicate.status_code == 409
 
-    pending = client.get("/api/v1/tasks/reassignment-requests").json()
+    pending_response = client.get(
+        "/api/v1/tasks/reassignment-requests",
+        params=MANAGER,
+    )
+    assert pending_response.status_code == 200, pending_response.text
+    pending = pending_response.json()
     assert [request["task_id"] for request in pending] == [task.id]
 
 
@@ -295,7 +311,11 @@ def test_hr_approval_applies_cross_team_reassignment_and_notifies(
     assert body["task"]["pending_reassignment"] is None
     assert body["reassignment_request"]["status"] == "approved"
     assert body["reassignment_request"]["decided_by"] == HR["actor_id"]
-    assert {email[0] for email in sent_emails} == {rahul.email, priya.email}
+    assert {email[0] for email in sent_emails} == {
+        rahul.email,
+        priya.email,
+        "manager@northstar.example",
+    }
     assert [e.outcome for e in _audit(db_session, task)] == ["pending_approval", "applied"]
 
     again = client.post(
@@ -327,7 +347,7 @@ def test_rejected_cross_team_request_leaves_task_unchanged(
     assert response.status_code == 200
     assert response.json()["task"]["assignee_id"] == rahul.id
     assert response.json()["reassignment_request"]["status"] == "rejected"
-    assert sent_emails == []
+    assert [email[0] for email in sent_emails] == ["manager@northstar.example"]
     assert [e.outcome for e in _audit(db_session, task)] == ["pending_approval", "rejected"]
 
 
@@ -383,6 +403,8 @@ def test_manager_cannot_reassign_another_teams_task(
     client: TestClient, db_session: Session, sent_emails
 ):
     priya = _employee(db_session, "Priya Sharma", "Finance")
+    priya.manager_id = "other-manager"
+    db_session.commit()
     noah = _employee(db_session, "Noah Martin", "Finance")
     task = _task(db_session, priya)
 
@@ -393,7 +415,7 @@ def test_manager_cannot_reassign_another_teams_task(
     )
 
     assert response.status_code == 403
-    assert "own team (Engineering)" in response.json()["detail"]
+    assert "department and reporting-line scope" in response.json()["detail"]
     assert [e.outcome for e in _audit(db_session, task)] == ["denied"]
     assert db_session.get(Task, task.id).assignee_id == priya.id
 
@@ -448,7 +470,10 @@ def test_due_date_change_updates_calendar_and_notifies_assignee(
         hour=17, minute=0, second=0, microsecond=0
     )
 
-    before = client.get("/api/v1/tasks/calendar.ics", params={"assignee_email": rahul.email}).text
+    before = client.get(
+        "/api/v1/tasks/calendar.ics",
+        params={**MANAGER, "assignee_email": rahul.email},
+    ).text
     assert "SEQUENCE:0" in before
 
     response = client.patch(
@@ -469,7 +494,10 @@ def test_due_date_change_updates_calendar_and_notifies_assignee(
     assert subject.startswith("Due date changed")
     assert new_due.strftime("%d %b %Y %H:%M UTC") in email_body
 
-    calendar = client.get("/api/v1/tasks/calendar.ics", params={"assignee_email": rahul.email}).text
+    calendar = client.get(
+        "/api/v1/tasks/calendar.ics",
+        params={**MANAGER, "assignee_email": rahul.email},
+    ).text
     assert f"UID:{task.id}@ai-office-operations" in calendar
     assert "SEQUENCE:1" in calendar
     assert f"DTSTART:{new_due.strftime('%Y%m%dT%H%M%SZ')}" in calendar
@@ -505,7 +533,7 @@ def test_employee_due_date_change_is_denied_and_audited(
 
     response = client.patch(
         f"/api/v1/tasks/{task.id}/due-date",
-        params=EMPLOYEE,
+        params={**EMPLOYEE, "actor_id": rahul.id, "actor_email": rahul.email},
         json={"due_at": (datetime.now(timezone.utc) + timedelta(days=9)).isoformat()},
     )
 
@@ -516,7 +544,10 @@ def test_employee_due_date_change_is_denied_and_audited(
     ]
     assert db_session.get(Task, task.id).due_at == original_due
 
-    audit = client.get(f"/api/v1/tasks/{task.id}/audit").json()
+    audit = client.get(
+        f"/api/v1/tasks/{task.id}/audit",
+        params={"actor_id": rahul.id, "actor_email": rahul.email, "actor_role": "employee"},
+    ).json()
     assert audit[0]["outcome"] == "denied"
 
 

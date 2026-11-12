@@ -5,14 +5,15 @@ with the delivery lifecycle Draft / Approval / Queued / Sending / Sent / Failed 
 import re
 from typing import Callable, Literal
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.plain_errors import PlainError
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
-from app.authentication import require_authenticated_principal
+from app.authentication import get_authenticated_principal, require_authenticated_principal
+from app.access_audit import deny_access
 from app.db.database import get_db
 from app.email_draft_service import (
     EmailActor,
@@ -47,7 +48,6 @@ from app.email_escalation_service import (
     record_bounce,
 )
 from app.meeting.models import EmailDraft, EmailDraftEvent, EmailFailureNotification
-from app.meeting.schemas import TaskActorRole
 from app.time_utils import UtcDateTime
 
 router = APIRouter(prefix="/api/v1/email-drafts", tags=["E-mail drafts"])
@@ -241,7 +241,10 @@ def _run(action: Callable[[], EmailDraft]) -> EmailDraftResponse:
 
 
 @router.get("/directory/groups", response_model=list[EmailRecipientGroup])
-def get_directory_groups(db: Session = Depends(get_db)):
+def get_directory_groups(
+    _principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
     return list_directory_groups(db)
 
 
@@ -338,10 +341,10 @@ def get_email_delivery_issues(actor: EmailActor = Depends(_actor), db: Session =
 
 @router.post("/bounces", response_model=BounceReportResponse)
 def report_email_bounce(
+    request: Request,
     payload: dict = Body(...),
     x_bounce_webhook_token: str | None = Header(default=None),
-    actor_id: str | None = Query(default=None),
-    actor_role: TaskActorRole | None = Query(default=None),
+    principal: AuthenticatedPrincipal | None = Depends(get_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     """Record bounce reports (generic JSON, or Amazon SES notifications via SNS).
@@ -353,8 +356,11 @@ def report_email_bounce(
     token_ok = bool(expected) and bool(x_bounce_webhook_token) and hmac.compare_digest(
         expected, x_bounce_webhook_token
     )
-    if not token_ok and actor_role != "admin":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "A valid bounce webhook token or an admin is required.")
+    if not token_ok and (principal is None or principal.role != "admin"):
+        deny_access(
+            db, request, principal=principal,
+            detail="A valid bounce webhook token or authenticated administrator is required.",
+        )
     try:
         reports = parse_bounce_payload(payload)
     except SubscriptionConfirmation as confirmation:

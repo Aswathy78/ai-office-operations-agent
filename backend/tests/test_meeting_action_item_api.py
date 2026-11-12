@@ -346,16 +346,25 @@ def test_get_active_employees_returns_only_active_employee_fields(
     client: TestClient,
     db_session: Session,
 ):
+    db_session.add(Employee(
+        id="test-employee",
+        name="Test Employee",
+        email="test-employee@test.invalid",
+        department="Operations",
+        is_active=True,
+    ))
     active_employee = Employee(
         id=str(uuid.uuid4()),
         name="Ava Patel",
         email="ava.patel@northstar.example",
+        department="Operations",
         is_active=True,
     )
     inactive_employee = Employee(
         id=str(uuid.uuid4()),
         name="Marcus Chen",
         email="marcus.chen@northstar.example",
+        department="Operations",
         is_active=False,
     )
     db_session.add_all([active_employee, inactive_employee])
@@ -370,6 +379,14 @@ def test_get_active_employees_returns_only_active_employee_fields(
             "name": active_employee.name,
             "email": active_employee.email,
             "team": active_employee.team,
+            "department": "Operations",
+        },
+        {
+            "id": "test-employee",
+            "name": "Test Employee",
+            "email": "test-employee@test.invalid",
+            "team": None,
+            "department": "Operations",
         }
     ]
 
@@ -378,7 +395,17 @@ def test_development_seed_makes_rahul_available_from_employee_api(
     client: TestClient,
     db_session: Session,
 ):
+    db_session.add(Employee(
+        id="test-employee",
+        name="Test Employee",
+        email="test-employee@test.invalid",
+        department="Operations",
+        is_active=True,
+    ))
     seed_development_employees(db_session)
+    rahul = db_session.query(Employee).filter_by(name="Rahul").one()
+    rahul.department = "Operations"
+    db_session.commit()
 
     response = client.get("/api/v1/meetings/employees")
 

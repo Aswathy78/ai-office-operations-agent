@@ -470,7 +470,7 @@ def index_document(db: Session, document_id: str) -> bool:
                 heading=chunk.heading,
                 content=chunk.content,
                 token_count=chunk.token_count,
-                department=owner.team,
+                department=owner.department,
                 page_label=chunk.location,
                 acl_employee_ids=acl_ids,
                 embedding=vector,

@@ -135,6 +135,7 @@ export interface GuestRequest {
   requested_at: string
   decided_at: string | null
   attendance_log_id: string | null
+  lobby_token: string | null
 }
 
 export interface GuestDecision {

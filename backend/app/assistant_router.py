@@ -535,7 +535,7 @@ class _PlanRunner:
             else:
                 parts.append(
                     f"Approval required{why}: {step.description}. I sent it for approval "
-                    "to HR / Operations, an admin, or your team's manager (request "
+                    "to an admin or a specifically assigned Manager / HR user (request "
                     f"{step.approval_id}); it will run with your permissions once approved. "
                     "You can follow it on the Approvals page."
                 )

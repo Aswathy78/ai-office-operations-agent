@@ -8,12 +8,16 @@ import App from './App'
 
 const { authState, api } = vi.hoisted(() => ({
   authState: { user: { id: 'a', name: 'Ada', email: 'a@x.test', role: 'admin', department: 'IT' }, isAuthenticated: true },
-  api: { getAdminDashboard: vi.fn() },
+  api: {
+    getAdminDashboard: vi.fn(),
+    updateEmployeeDepartment: vi.fn(),
+    updateEmployeeRole: vi.fn(),
+  },
 }))
 
 vi.mock('./contexts/AuthContext', () => ({ useAuth: () => authState }))
 vi.mock('./api/adminDashboard', () => api)
-vi.mock('./api/adminAudit', () => ({ getAuditLog: vi.fn().mockResolvedValue({ entries: [{ id: 'task:1', at: '2026-11-07T10:00:00Z', source: 'task', actor_id: 'e', actor_name: 'Ada Admin', actor_role: null, action: 'create', action_label: 'Task created', target: null, outcome: 'applied', detail: 'Made a task' }], counts: { task: 1, meeting: 0, assistant: 0, email: 0, workflow: 0 }, source_labels: { task: 'Tasks', meeting: 'Meetings', assistant: 'AI assistant', email: 'E-mail', workflow: 'Workflows' }, limit: 200 }) }))
+vi.mock('./api/adminAudit', () => ({ getAuditLog: vi.fn().mockResolvedValue({ entries: [{ id: 'task:1', at: '2026-11-07T10:00:00Z', source: 'task', actor_id: 'e', actor_name: 'Ada Admin', actor_role: null, action: 'create', action_label: 'Task created', target: null, outcome: 'applied', detail: 'Made a task' }], counts: { task: 1, meeting: 0, assistant: 0, email: 0, workflow: 0, auth: 0 }, source_labels: { task: 'Tasks', meeting: 'Meetings', assistant: 'AI assistant', email: 'E-mail', workflow: 'Workflows', auth: 'Authentication' }, limit: 200 }) }))
 vi.mock('./contexts/AssistantContext', () => ({ AssistantProvider: ({ children }: { children: unknown }) => children }))
 vi.mock('./components/layout/AppShell', () => ({ AppShell: ({ children }: { children: unknown }) => children }))
 vi.mock('./pages/TaskWorkspacePage', () => ({ TaskWorkspacePage: () => <div>Task dashboard</div> }))
@@ -25,7 +29,7 @@ const data = {
   alerts: [],
   users: {
     available: true, error: null, total: 1, active: 1, disabled: 0, by_role: { admin: 1 }, truncated: false,
-    items: [{ id: 'u1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin', department: 'IT', is_active: true, last_sign_in_at: null }],
+    items: [{ id: 'u1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin', department: 'IT', is_active: true, login_status: 'Enabled', last_sign_in_at: null }],
   },
   departments: { available: true, error: null, total: 1, items: [{ name: 'IT', employees: 1, active_employees: 1, with_login: 1 }] },
   integrations: {
@@ -107,8 +111,8 @@ describe('administrator menus show real content, not a placeholder', () => {
     expect(api.getAdminDashboard).not.toHaveBeenCalled()
   })
 
-  it('a non-admin is denied the admin menus', async () => {
-    authState.user.role = 'employee'
+  it.each(['employee', 'hr_operations'])('a %s is denied the admin menus', async (role) => {
+    authState.user.role = role
     at('/admin/users')
     expect(await screen.findByRole('heading', { name: 'Access denied' })).toBeInTheDocument()
     expect(api.getAdminDashboard).not.toHaveBeenCalled()

@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Activity, RefreshCw } from 'lucide-react'
 import {
   getAdminDashboard,
+  updateEmployeeDepartment,
+  updateEmployeeRole,
   type AdminDashboard,
   type ApiMetrics,
+  type DashboardUser,
   type HealthStatus,
   type Section,
 } from '../api/adminDashboard'
@@ -94,12 +97,135 @@ function onlyAvailable<T>(section: Section<T>): (T & { available: true }) | null
   return section.available ? (section as T & { available: true }) : null
 }
 
+function DepartmentEditor({
+  person,
+  onUpdated,
+}: {
+  person: DashboardUser
+  onUpdated: () => Promise<void>
+}) {
+  const [department, setDepartment] = useState(
+    person.department === 'Unassigned' ? '' : person.department,
+  )
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const value = department.trim()
+    if (!value) {
+      setError('Enter a department before saving.')
+      return
+    }
+
+    setSaving(true)
+    setError('')
+    setMessage('')
+    try {
+      await updateEmployeeDepartment(person.id, value)
+      setMessage('Department updated.')
+      await onUpdated()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The department could not be updated.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="admin-department-editor">
+      <span>{person.department}</span>
+      <form onSubmit={(event) => void submit(event)}>
+        <input
+          type="text"
+          value={department}
+          maxLength={100}
+          required
+          aria-label={`Department for ${person.name}`}
+          placeholder="Enter department"
+          onChange={(event) => setDepartment(event.target.value)}
+        />
+        <button className="button secondary" type="submit" disabled={saving || !department.trim()}>
+          {saving ? 'Saving…' : person.department === 'Unassigned' ? 'Assign department' : 'Update department'}
+        </button>
+      </form>
+      {message && <small role="status">{message}</small>}
+      {error && <small role="alert">{error}</small>}
+    </div>
+  )
+}
+
+const ASSIGNABLE_ROLES = ['employee', 'manager', 'hr_operations', 'admin'] as const
+type AssignableRole = (typeof ASSIGNABLE_ROLES)[number]
+
+function isAssignableRole(role: string | null): role is AssignableRole {
+  return ASSIGNABLE_ROLES.some((candidate) => candidate === role)
+}
+
+function RoleEditor({
+  person,
+  onUpdated,
+}: {
+  person: DashboardUser
+  onUpdated: () => Promise<void>
+}) {
+  const [role, setRole] = useState<AssignableRole>(
+    isAssignableRole(person.role) ? person.role : 'employee',
+  )
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+
+  if (!person.role) return <span>No account</span>
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setSaving(true)
+    setError('')
+    setMessage('')
+    try {
+      await updateEmployeeRole(person.id, role)
+      setMessage('Role updated.')
+      await onUpdated()
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'The account role could not be updated.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="admin-department-editor">
+      <span>{ROLE_LABEL[person.role] ?? person.role}</span>
+      <form onSubmit={(event) => void submit(event)}>
+        <select
+          value={role}
+          aria-label={`Role for ${person.name}`}
+          onChange={(event) => {
+            if (isAssignableRole(event.target.value)) setRole(event.target.value)
+          }}
+        >
+          {ASSIGNABLE_ROLES.map((option) => (
+            <option key={option} value={option}>{ROLE_LABEL[option] ?? option}</option>
+          ))}
+        </select>
+        <button className="button secondary" type="submit" disabled={saving || role === person.role}>
+          {saving ? 'Saving…' : 'Update role'}
+        </button>
+      </form>
+      {message && <small role="status">{message}</small>}
+      {error && <small role="alert">{error}</small>}
+    </div>
+  )
+}
+
 /** Which part of the dashboard a menu entry shows. The data and refresh are the same. */
 export type AdminDashboardView = 'overview' | 'users' | 'health'
 
 const VIEW_TEXT: Record<AdminDashboardView, { title: string; blurb: string }> = {
   overview: { title: 'System dashboard', blurb: 'Users, departments, integrations and system health, measured live.' },
-  users: { title: 'Users and departments', blurb: 'Everyone with an account, and how each department is made up.' },
+  users: { title: 'Users and departments', blurb: 'The employee directory, login status, and department assignments.' },
   health: { title: 'Agent monitor', blurb: 'System health and integration status, measured live.' },
 }
 
@@ -312,20 +438,29 @@ export function AdminDashboardPage({ view = 'overview' }: { view?: AdminDashboar
                     <table className="task-table" aria-label="Users">
                       <thead>
                         <tr>
-                          <th>Name</th><th>Role</th><th>Department</th><th>Status</th><th>Last sign-in</th>
+                          <th>Name</th><th>Role</th><th>Department</th><th>Status</th><th>Login status</th><th>Last sign-in</th>
                         </tr>
                       </thead>
                       <tbody>
                         {users.items.map((person) => (
                           <tr key={person.id}>
                             <td><strong>{person.name}</strong><small>{person.email}</small></td>
-                            <td>{ROLE_LABEL[person.role] ?? person.role}</td>
-                            <td>{person.department}</td>
+                            <td>
+                              {view === 'users' ? (
+                                <RoleEditor person={person} onUpdated={load} />
+                              ) : person.role ? (ROLE_LABEL[person.role] ?? person.role) : 'No account'}
+                            </td>
+                            <td>
+                              {view === 'users' ? (
+                                <DepartmentEditor person={person} onUpdated={load} />
+                              ) : person.department}
+                            </td>
                             <td>
                               <span className={`status-pill ${person.is_active ? '' : 'muted'}`}>
                                 {person.is_active ? 'Active' : 'Disabled'}
                               </span>
                             </td>
+                            <td>{person.login_status}</td>
                             <td>{formatTime(person.last_sign_in_at)}</td>
                           </tr>
                         ))}

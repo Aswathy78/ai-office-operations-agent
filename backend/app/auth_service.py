@@ -91,8 +91,9 @@ def provision_account(
     employee_email: str,
     password: str,
     role: str = "employee",
+    department: str | None = None,
 ) -> AuthAccount:
-    """Provision a login only for one existing active employee; never creates employees."""
+    """Provision a login for an existing employee and optionally set operator-supplied department."""
     email = normalize_email(employee_email)
     if not _EMAIL_PATTERN.fullmatch(email):
         raise ValueError("Provide a valid employee email address.")
@@ -100,6 +101,8 @@ def provision_account(
         raise ValueError("Passwords must be between 12 and 1024 characters.")
     if role not in ("employee", "manager", "hr_operations", "admin"):
         raise ValueError("Unsupported account role.")
+    if department is not None and len(department.strip()) > 100:
+        raise ValueError("Department names must be at most 100 characters.")
 
     employees = (
         db.query(Employee)
@@ -121,6 +124,8 @@ def provision_account(
     )
     if existing:
         raise ValueError("An authentication account already exists for this employee or email.")
+    if department is not None:
+        employee.department = department.strip() or None
 
     account = AuthAccount(
         id=str(uuid.uuid4()),

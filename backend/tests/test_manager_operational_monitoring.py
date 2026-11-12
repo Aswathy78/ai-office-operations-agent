@@ -68,23 +68,23 @@ def monitoring_env():
     # --- Employees ---
     manager_a = Employee(
         id="mgr-a", name="Manager Alpha", email="mgr.a@example.com",
-        team="Engineering", manager_id=None, is_active=True,
+        team="Engineering", department="Operations", manager_id=None, is_active=True,
     )
     manager_b = Employee(
         id="mgr-b", name="Manager Beta", email="mgr.b@example.com",
-        team="Finance", manager_id=None, is_active=True,
+        team="Finance", department="Finance", manager_id=None, is_active=True,
     )
     emp1 = Employee(
         id="emp-1", name="Alice Smith", email="alice@example.com",
-        team="Engineering", manager_id="mgr-a", is_active=True,
+        team="Engineering", department="Operations", manager_id="mgr-a", is_active=True,
     )
     emp2 = Employee(
         id="emp-2", name="Bob Jones", email="bob@example.com",
-        team="Engineering", manager_id="mgr-a", is_active=True,
+        team="Engineering", department="Operations", manager_id="mgr-a", is_active=True,
     )
     emp3 = Employee(
         id="emp-3", name="Carol Lane", email="carol@example.com",
-        team="Finance", manager_id="mgr-b", is_active=True,
+        team="Finance", department="Finance", manager_id="mgr-b", is_active=True,
     )
     db.add_all([manager_a, manager_b, emp1, emp2, emp3])
 

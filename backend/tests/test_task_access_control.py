@@ -29,12 +29,15 @@ def task_api():
         id="employee-alice",
         name="Alice Employee",
         email="alice@example.test",
+        department="Operations",
         is_active=True,
     )
     bob = Employee(
         id="employee-bob",
         name="Bob Employee",
         email="bob@example.test",
+        department="Operations",
+        manager_id="employee-alice",
         is_active=True,
     )
     db.add_all([alice, bob])

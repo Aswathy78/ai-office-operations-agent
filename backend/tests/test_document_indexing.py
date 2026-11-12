@@ -54,6 +54,7 @@ def _ready_document(db: Session, *, text: str, shared_with: str | None = None) -
         email="index-owner@example.test",
         is_active=True,
         team="Operations",
+        department="Operations",
     )
     db.add(owner)
     if shared_with:

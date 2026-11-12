@@ -274,6 +274,7 @@ class Employee(Base):
         unique=True,
     )
     team: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    department: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Line manager; receives escalations when this employee's tasks go unanswered.
     manager_id: Mapped[str | None] = mapped_column(
         String(36),

@@ -52,6 +52,7 @@ from app.assistant_tools import (
     evaluate_write,
     execute_tool,
     get_registry,
+    scopes_for_role,
 )
 from app.auth_service import AuthenticatedPrincipal
 from app.auth_service import provision_account
@@ -126,6 +127,7 @@ def db_session():
         # Every day and hour is working time, so risk never depends on when tests run.
         session.add(Employee(
             id=employee_id, name=name, email=email, team=team, is_active=True,
+            department="Operations",
             working_days=[0, 1, 2, 3, 4, 5, 6],
             working_hours_start="00:00", working_hours_end="23:59",
         ))
@@ -194,6 +196,26 @@ def _decide(client, approval_id, decision="approve", note=None):
         f"/api/v1/assistant/approvals/{approval_id}/decide",
         json={"decision": decision, "note": note},
     )
+
+
+def _assign_approver(client, db, approval_id, employee_id):
+    employee = db.get(Employee, employee_id)
+    if db.query(AuthAccount).filter_by(employee_id=employee_id).one_or_none() is None:
+        db.add(AuthAccount(
+            id=f"acc-{employee_id}",
+            employee_id=employee_id,
+            email_normalized=employee.email.casefold(),
+            password_hash="test-only",
+            role=PEOPLE[employee_id][3],
+            is_enabled=True,
+        ))
+        db.commit()
+    client.login("emp-admin")
+    response = client.put(
+        f"/api/v1/assistant/approvals/{approval_id}/alternate-approver",
+        json={"email": PEOPLE[employee_id][1]},
+    )
+    assert response.status_code == 200, response.text
 
 
 def _audit(db: Session, event: str) -> list[AssistantAuditEvent]:
@@ -280,6 +302,24 @@ class TestRiskClassification:
 
 
 class TestPermissionDenials:
+    def test_role_scopes_keep_approval_explicit_and_workflows_restricted(self):
+        assert "tasks.write" not in scopes_for_role("employee")
+        assert "tasks.write" in scopes_for_role("manager")
+        assert "workflow.run" not in scopes_for_role("manager")
+        assert "workflow.run" in scopes_for_role("hr_operations")
+        assert "workflow.run" in scopes_for_role("admin")
+        assert scopes_for_role("unknown_role") == frozenset()
+
+    def test_hr_retains_cross_team_task_read_access(self, api):
+        api.login("emp-hr")
+        response = _run(
+            api,
+            "task.list",
+            {"assignee_email": "hana@northstar.example"},
+            "key-hr-task-read-1",
+        )
+        assert response.status_code == 200
+
     def test_missing_scope_is_denied_with_reason_and_audited(self, api, db_session):
         api.login("emp-bob")
         response = _run(api, "task.create", _task(), "key-deny-scope-1")
@@ -288,6 +328,13 @@ class TestPermissionDenials:
         [event] = _audit(db_session, "permission_denied")
         assert event.actor_id == "emp-bob" and "tasks.write" in event.detail
         assert db_session.query(Task).count() == 0
+
+    def test_unknown_role_is_denied_by_default_and_audited(self, api, db_session):
+        api.login("emp-mgr", role="approver")
+        response = _run(api, "task.list", {}, "key-unknown-role-1")
+        assert response.status_code == 403
+        [event] = _audit(db_session, "permission_denied")
+        assert event.actor_id == "emp-mgr" and event.actor_role == "approver"
 
     def test_manager_cannot_act_outside_own_team(self, api, db_session):
         response = _run(api, "task.create", _task(assignee_email="hana@northstar.example"),
@@ -548,6 +595,12 @@ class TestApprovalWorkflow:
             "FinanceTestPassword123!",
             role="manager",
         )
+        provision_account(
+            db_session,
+            "ada@northstar.example",
+            "AdminTestPassword123!",
+            role="admin",
+        )
         app.dependency_overrides.pop(require_authenticated_principal, None)
 
         def login_headers(email: str) -> tuple[dict[str, str], dict]:
@@ -559,6 +612,7 @@ class TestApprovalWorkflow:
                         engineering_priya.email: "PriyaTestPassword123!",
                         "priya@northstar.example": "ManagerTestPassword123!",
                         "farah@northstar.example": "FinanceTestPassword123!",
+                        "ada@northstar.example": "AdminTestPassword123!",
                     }[email],
                 },
             )
@@ -604,6 +658,13 @@ class TestApprovalWorkflow:
         )
         assert denied.status_code == 403
 
+        admin_headers, _ = login_headers("ada@northstar.example")
+        assigned = api.put(
+            f"/api/v1/assistant/approvals/{approval_id}/alternate-approver",
+            headers=admin_headers,
+            json={"email": "priya@northstar.example"},
+        )
+        assert assigned.status_code == 200, assigned.text
         manager_headers, manager_user = login_headers("priya@northstar.example")
         assert manager_user["role"] == "manager"
         manager_queue = api.get(
@@ -671,6 +732,7 @@ class TestApprovalWorkflow:
         assert db_session.query(EmailDraft).count() == 0
 
         # Bob's own manager can approve; it then runs through the e-mail workflow.
+        _assign_approver(api, db_session, approval_id, "emp-mgr")
         api.login("emp-mgr")
         queue = api.get("/api/v1/assistant/approvals", params={"scope": "queue"}).json()
         assert [item["id"] for item in queue] == [approval_id]
@@ -687,6 +749,7 @@ class TestApprovalWorkflow:
         api.login("emp-bob")
         approval_id = _run(api, "email.send", _email(recipient_emails=["x@partner.example"]),
                            "key-reject-0001").json()["approval"]["id"]
+        _assign_approver(api, db_session, approval_id, "emp-hr")
         api.login("emp-hr")
         decided = _decide(api, approval_id, decision="reject", note="Not approved.")
         assert decided.status_code == 200
@@ -750,6 +813,7 @@ class TestApprovalWorkflow:
         monkeypatch.setattr(
             notification_service, "notify_assistant_approval_decision", notify_decision
         )
+        _assign_approver(api, db_session, approval_id, "emp-hr")
         api.login("emp-hr")
         response = _decide(api, approval_id, decision="reject", note="Not approved.")
 
@@ -768,7 +832,10 @@ class TestApprovalWorkflow:
             entity_id=approval_id,
         ).one()
         assert "rejected" in notification.summary.lower()
-        assert len(mail.calls) == 1
+        assert [call["recipient"] for call in mail.calls] == [
+            "omar@northstar.example",
+            "bob@northstar.example",
+        ]
         assert db_session.query(EmailDraft).count() == 0
 
     def test_requester_can_cancel(self, api, db_session):
@@ -820,6 +887,7 @@ class TestApprovalWorkflow:
             _email(recipient_emails=["external@partner.example"]),
             "key-edit-approval-01",
         ).json()["approval"]["id"]
+        _assign_approver(api, db_session, approval_id, "emp-mgr")
         edited = _email(
             recipient_emails=["external@partner.example"],
             subject="Updated release",
@@ -906,6 +974,7 @@ class TestApprovalWorkflow:
             _email(recipient_emails=["external@partner.example"]),
             "key-invalid-edit-01",
         ).json()["approval"]["id"]
+        _assign_approver(api, db_session, approval_id, "emp-mgr")
         api.login("emp-mgr")
 
         response = api.post(
@@ -939,10 +1008,13 @@ class TestApprovalWorkflow:
             _email(recipient_emails=["external@partner.example"]),
             "key-email-link-01",
         ).json()["approval"]["id"]
-        link_match = re.search(r"https?://\S+", mail.calls[0]["body"])
+        _assign_approver(api, db_session, approval_id, "emp-mgr")
+        link_match = re.search(r"https?://\S+", mail.calls[-1]["body"])
         assert link_match is not None
         token = parse_qs(urlparse(link_match.group()).fragment)["approvalToken"][0]
-        [persisted_link] = db_session.query(AssistantApprovalEmailLink).all()
+        persisted_link = db_session.query(AssistantApprovalEmailLink).filter_by(
+            recipient_id="emp-mgr"
+        ).one()
         assert persisted_link.recipient_id == "emp-mgr"
         assert "/approvals#approvalToken=" in link_match.group()
 
@@ -971,7 +1043,9 @@ class TestApprovalWorkflow:
             json={"token": token, "decision": "reject", "note": "Not ready."},
         )
         assert decision.status_code == 200, decision.text
-        link = db_session.query(AssistantApprovalEmailLink).one()
+        link = db_session.query(AssistantApprovalEmailLink).filter_by(
+            recipient_id="emp-mgr"
+        ).one()
         assert link.used_at is not None
         assert db_session.get(AssistantActionApproval, approval_id).status == "rejected"
 
@@ -1022,6 +1096,7 @@ class TestApprovalWorkflow:
             _email(recipient_emails=["external@partner.example"]),
             key,
         ).json()["approval"]["id"]
+        _assign_approver(api, db_session, approval_id, "emp-mgr")
         now = datetime.now(timezone.utc)
         conversation_id = str(uuid.uuid4())
         conversation = AssistantConversation(
@@ -1277,9 +1352,16 @@ class TestChat:
     def test_cross_team_chat_task_is_denied_with_a_clear_reason(self, api, db_session):
         events, _ = _chat(api, f"Assign the budget review to Hana by {(datetime.now(timezone.utc) + timedelta(days=9)).date()}")
         [error] = [e["step_error"] for e in events if "step_error" in e]
-        assert "Permission denied" in error["message"] and "own team" in error["message"]
+        assert (
+            "Permission denied" in error["message"]
+            and "department and reporting-line scope" in error["message"]
+        )
         assert "I couldn't continue" in "".join(e.get("token", "") for e in events)
         assert db_session.query(Task).count() == 0
+        denied = db_session.query(AssistantAuditEvent).filter_by(
+            tool_name="directory.lookup_employees", event="permission_denied"
+        ).one()
+        assert "Hana" not in denied.detail and "Hana" not in str(denied.data)
 
     def test_high_risk_chat_request_goes_to_approvers(self, api, db_session):
         api.login("emp-hr")
@@ -1421,6 +1503,7 @@ class TestApprovalLifecycleStory97:
         assert approval.id not in {item["id"] for item in unassigned_queue.json()}
 
         api.login("emp-hr")
+        assert _decide(api, approval.id, decision="reject").status_code == 403
         response = api.put(
             f"/api/v1/assistant/approvals/{approval.id}/alternate-approver",
             json={"email": "farah@northstar.example"},

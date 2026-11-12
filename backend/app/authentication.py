@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
+from app.access_audit import record_access_denial
 from app.auth_service import (
     AuthConfigurationError,
     AuthenticatedPrincipal,
@@ -34,6 +35,9 @@ def get_authenticated_principal(
             detail="Authentication is not configured.",
         ) from exc
     except InvalidAccessToken as exc:
+        record_access_denial(
+            db, request, status_code=status.HTTP_401_UNAUTHORIZED
+        )
         detail = "Invalid or expired access token."
         if exc.reason:
             from app.auth_sessions import REASON_MESSAGES
@@ -55,9 +59,14 @@ def authenticated_actor_id(
 
 
 def require_authenticated_principal(
+    request: Request,
     principal: AuthenticatedPrincipal | None = Depends(get_authenticated_principal),
+    db: Session = Depends(get_db),
 ) -> AuthenticatedPrincipal:
     if principal is None:
+        record_access_denial(
+            db, request, status_code=status.HTTP_401_UNAUTHORIZED
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication is required.",

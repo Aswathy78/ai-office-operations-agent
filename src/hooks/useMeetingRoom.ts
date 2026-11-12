@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { meetingWebSocketUrl } from '../api/meetings'
+import { getAccessToken } from '../api/client'
 import type {
   MeetingClientMessage,
   MeetingConnectionState,
@@ -726,10 +727,16 @@ export function useMeetingRoom({
     generationRef.current = generation
     setConnectionState('connecting')
     setLastError(null)
+    const accessToken = getAccessToken()
+    if (!accessToken) {
+      setConnectionState('error')
+      setLastError('Sign in is required to join this meeting.')
+      return
+    }
 
     let socket: WebSocket
     try {
-      socket = new WebSocket(meetingWebSocketUrl(activeMeetingId))
+      socket = new WebSocket(meetingWebSocketUrl(activeMeetingId), [`access_token.${accessToken}`])
     } catch (error) {
       setConnectionState('error')
       setLastError(error instanceof Error ? error.message : 'Unable to create meeting connection.')

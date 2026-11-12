@@ -30,6 +30,10 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
 
         Base.metadata.create_all(bind=engine)
         table_names = set(inspect(engine).get_table_names())
+        employee_columns = {
+            column["name"] for column in inspect(engine).get_columns("employees")
+        }
+        assert "department" in employee_columns
         assert {
             "meetings",
             "user_notifications",
@@ -40,6 +44,50 @@ def test_full_migration_chain_upgrades_fresh_database_and_app_schema(tmp_path: P
             "assistant_runs",
             "assistant_run_steps",
         } <= table_names
+    finally:
+        engine.dispose()
+
+
+def test_employee_department_migration_adds_nullable_column_without_backfill(
+    tmp_path: Path,
+):
+    database_path = tmp_path / "employee_department.sqlite"
+    engine = create_engine(f"sqlite:///{database_path.as_posix()}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE alembic_version "
+                "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO alembic_version (version_num) VALUES ('20261112_01')"
+            )
+            connection.exec_driver_sql(
+                "CREATE TABLE employees (id VARCHAR(36) PRIMARY KEY, "
+                "name VARCHAR(255) NOT NULL, email VARCHAR(255) NOT NULL, "
+                "team VARCHAR(100))"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO employees (id, name, email, team) "
+                "VALUES ('employee-1', 'Avery', 'avery@example.test', 'Engineering')"
+            )
+
+        config = Config(Path(__file__).resolve().parents[1] / "alembic.ini")
+        config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            columns = {
+                column["name"]: column
+                for column in inspect(connection).get_columns("employees")
+            }
+            assert columns["department"]["nullable"] is True
+            assert connection.exec_driver_sql(
+                "SELECT department FROM employees WHERE id = 'employee-1'"
+            ).scalar_one() is None
+            assert connection.exec_driver_sql(
+                "SELECT version_num FROM alembic_version"
+            ).scalar_one() == head_revision()
     finally:
         engine.dispose()
 

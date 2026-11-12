@@ -361,7 +361,7 @@ def request_guest_join(
     db: Session,
     meeting_id: str,
     guest_data: GuestJoinRequest,
-) -> MeetingGuestRequest:
+) -> tuple[MeetingGuestRequest, bool]:
     """Create a pending lobby request for an external guest.
 
     If the same guest (matched by email, or name when email is absent) already
@@ -397,7 +397,7 @@ def request_guest_join(
             MeetingGuestRequest.guest_name == guest_data.guest_name
         ).first()
     if existing:
-        return existing
+        return existing, False
 
     guest_request = MeetingGuestRequest(
         id=str(uuid.uuid4()),
@@ -410,7 +410,7 @@ def request_guest_join(
     db.add(guest_request)
     db.commit()
     db.refresh(guest_request)
-    return guest_request
+    return guest_request, True
 
 
 def get_guest_request_by_id(

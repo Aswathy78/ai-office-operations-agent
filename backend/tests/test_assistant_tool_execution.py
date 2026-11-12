@@ -127,15 +127,15 @@ def db_session():
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
     session.add_all([
         Employee(id="emp-mgr", name="Priya Manager", email="priya@northstar.example",
-                 team="Engineering", is_active=True),
+                 team="Engineering", department="Operations", is_active=True),
         Employee(id="emp-bob", name="Bob Lee", email="bob@northstar.example",
-                 team="Engineering", is_active=True),
+                 team="Engineering", department="Operations", is_active=True),
         Employee(id="emp-alice", name="Alice Smith", email="alice@northstar.example",
-                 team="Engineering", is_active=True),
+                 team="Engineering", department="Operations", is_active=True),
         Employee(id="emp-hana", name="Hana Ortiz", email="hana@northstar.example",
-                 team="Finance", is_active=True),
+                 team="Finance", department="Operations", is_active=True),
         Employee(id="emp-maya", name="Maya Thompson", email="maya@northstar.example",
-                 team="Design", is_active=True),
+                 team="Design", department="Operations", is_active=True),
     ])
     session.commit()
     try:
@@ -942,6 +942,56 @@ class TestRealExecution:
         assert _execute(as_manager, "task.list",
                         {"assignee_email": "alice@northstar.example"}).status_code == 403
 
+    def test_manager_cannot_read_same_team_employee_outside_reporting_line(
+        self, as_manager, db_session, monkeypatch
+    ):
+        db_session.add(Employee(
+            id="emp-other-report",
+            name="Other Manager's Report",
+            email="other.report@northstar.example",
+            team="Engineering",
+            manager_id="emp-other-manager",
+            is_active=True,
+        ))
+        db_session.commit()
+        execution_called = False
+
+        def unexpected_execution(*_args, **_kwargs):
+            nonlocal execution_called
+            execution_called = True
+            raise AssertionError("A denied read tool must not execute.")
+
+        monkeypatch.setattr(assistant_tools, "_run_with_ledger", unexpected_execution)
+        denied = _execute(
+            as_manager,
+            "task.list",
+            {"assignee_email": "other.report@northstar.example"},
+        )
+        assert denied.status_code == 403
+        assert execution_called is False
+        [event] = db_session.query(AssistantAuditEvent).filter_by(
+            actor_id="emp-mgr", tool_name="task.list", event="permission_denied"
+        ).all()
+        assert "other.report@northstar.example" not in event.detail
+        assert "other.report@northstar.example" not in str(event.data)
+
+    def test_tool_arguments_cannot_spoof_caller_identity(
+        self, as_employee, db_session
+    ):
+        response = as_employee.post(
+            "/api/v1/assistant/tools/task.list/execute",
+            json={
+                "arguments": {
+                    "assignee_email": "alice@northstar.example",
+                    "actor_role": "admin",
+                    "employee_id": "emp-admin",
+                }
+            },
+        )
+        assert response.status_code == 422
+        assert db_session.query(Task).count() == 0
+        assert db_session.query(AssistantToolExecution).count() == 0
+
     def test_meeting_list_upcoming(self, as_manager, db_session, mail):
         # Every day is a working day, so the booking is low risk on any weekday (Story 6.6).
         bob = db_session.get(Employee, "emp-bob")
@@ -1115,7 +1165,7 @@ class TestChatExecution:
         assert draft.status == "sent" and mail.recipients() == ["maya@northstar.example"]
 
     def test_cancel_discards_the_pending_action(self, as_manager, db_session, mail, no_llm):
-        _, conversation_id = _chat(as_manager, "Send an email to Maya about the audit")
+        _, conversation_id = _chat(as_manager, "Send an email to Alice about the audit")
         events, _ = _chat(as_manager, "cancel", conversation_id)
         assert "No operation was performed" in _tokens(events)
         _chat(as_manager, "confirm", conversation_id)
@@ -1130,7 +1180,7 @@ class TestChatExecution:
     def test_expired_confirmation_runs_nothing(
         self, as_manager, db_session, mail, no_llm, monkeypatch
     ):
-        _, conversation_id = _chat(as_manager, "Send an email to Maya about the audit")
+        _, conversation_id = _chat(as_manager, "Send an email to Alice about the audit")
         conversation = db_session.get(AssistantConversation, conversation_id)
         db_session.refresh(conversation)
         state = json.loads(conversation.execution_state)

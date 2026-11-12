@@ -4,9 +4,8 @@
 ``AssistantActionApproval`` with status "pending" ("Approval Required"):
 
 * medium risk — ``approver_kind="requester"``: the requester confirms it;
-* high risk   — ``approver_kind="approver"``: someone else decides. HR / Operations
-  and admins may approve anyone's request; a manager may approve requests from
-  employees in their own team. Nobody approves their own high-risk request.
+* high risk   — ``approver_kind="approver"``: an admin or a specifically assigned
+  Manager / HR user decides. Nobody approves their own high-risk request.
 
 Approving runs the action through ``execute_tool`` again — so permissions,
 conflicts and risk are re-checked at that moment — using the *requester's*
@@ -255,8 +254,8 @@ def assign_alternate_approver(
     alternate_email: str | None,
 ) -> AssistantActionApproval:
     """Assign a manager or organization approver to one pending request."""
-    if actor.role not in HIGH_RISK_APPROVER_ROLES:
-        raise ToolPermissionDenied("Only HR / Operations or an admin can assign an alternate approver.")
+    if actor.role not in {"admin", "hr_operations"}:
+        raise ToolPermissionDenied("Only HR / Operations or an admin can assign approval authority.")
     expire_stale(db)
     approval = get_approval(db, approval_id)
     if approval.status != ACTION_APPROVAL_STATUS_PENDING or approval.approver_kind != "approver":
@@ -269,7 +268,7 @@ def assign_alternate_approver(
             .filter(
                 AuthAccount.email_normalized == alternate_email.strip().casefold(),
                 AuthAccount.is_enabled.is_(True),
-                AuthAccount.role.in_({"manager", "hr_operations", "admin"}),
+                AuthAccount.role.in_({"manager", "hr_operations"}),
             )
             .one_or_none()
         )
@@ -280,7 +279,7 @@ def assign_alternate_approver(
         )
         if alternate is None or not alternate.is_active:
             raise ToolArgumentError(
-                "The alternate must be an active manager, HR / Operations approver, or admin."
+                "The alternate must be an active manager or HR / Operations user."
             )
         if alternate.id == approval.requester_id:
             raise ToolArgumentError("The requester cannot be assigned as their own alternate approver.")
@@ -374,23 +373,14 @@ def decision_block_reason(
             return "Only the person who made this medium-risk request can confirm it."
         return None
     if decider.user_id == approval.requester_id:
-        return "You cannot approve your own high-risk request; HR / Operations, an admin, or your manager must."
+        return "You cannot approve your own high-risk request."
+    if decider.role == "admin":
+        return None
     if approval.alternate_approver_id == decider.user_id:
-        if decider.role in {"manager", *HIGH_RISK_APPROVER_ROLES}:
+        if decider.role in {"manager", "hr_operations"}:
             return None
-        return "The assigned alternate must be a manager, HR / Operations approver, or admin."
-    if decider.role in HIGH_RISK_APPROVER_ROLES:
-        return None
-    if (
-        decider.role == "manager"
-        and approval.requester_role == "employee"
-        and _same_team(decider.team, _current_requester_team(db, approval))
-    ):
-        return None
-    return (
-        "Only HR / Operations, an admin, or the manager of the requester's team can "
-        "approve this high-risk request."
-    )
+        return "Only an assigned manager or HR / Operations user can approve this request."
+    return "Approval authority must be explicitly assigned to this request."
 
 
 def can_decide(
@@ -814,34 +804,13 @@ def list_approvals(
         AssistantActionApproval.approver_kind == "approver",
         AssistantActionApproval.requester_id != actor.user_id,
     )
-    if actor.role in HIGH_RISK_APPROVER_ROLES:
+    if actor.role == "admin":
         return candidates_query.limit(limit).all()
-    if actor.role != "manager":
+    if actor.role not in {"manager", "hr_operations"}:
         return []
-    assigned = candidates_query.filter(
+    return candidates_query.filter(
         AssistantActionApproval.alternate_approver_id == actor.user_id
     ).limit(limit).all()
-    ordinary = candidates_query.filter(
-        AssistantActionApproval.alternate_approver_id.is_(None)
-        | (AssistantActionApproval.alternate_approver_id != actor.user_id)
-    ).limit(500).all()
-    requester_teams: dict[str, str | None] = {}
-    if ordinary:
-        requester_teams = dict(
-            db.query(Employee.id, Employee.team)
-            .filter(
-                Employee.id.in_({approval.requester_id for approval in ordinary}),
-                Employee.is_active.is_(True),
-            )
-            .all()
-        )
-    visible = assigned + [
-        approval
-        for approval in ordinary
-        if approval.requester_role == "employee"
-        and _same_team(actor.team, requester_teams.get(approval.requester_id))
-    ]
-    return list({approval.id: approval for approval in visible}.values())[:limit]
 
 
 def approval_view(approval: AssistantActionApproval, viewer: AuthenticatedPrincipal, db: Session) -> dict:

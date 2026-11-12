@@ -26,7 +26,8 @@ function parseStoredRequest(value: string | null, meetingId: string): GuestReque
       typeof parsed === 'object' && parsed !== null &&
       'id' in parsed && typeof parsed.id === 'string' &&
       'meeting_id' in parsed && parsed.meeting_id === meetingId &&
-      'guest_name' in parsed && typeof parsed.guest_name === 'string'
+      'guest_name' in parsed && typeof parsed.guest_name === 'string' &&
+      'lobby_token' in parsed && typeof parsed.lobby_token === 'string'
     ) {
       return parsed as GuestRequest
     }
@@ -112,7 +113,10 @@ export function GuestJoinPage() {
       setState((current) => current.status === 'waiting'
         ? { ...current, connection: 'connecting' }
         : current)
-      socket = new WebSocket(guestLobbyWebSocketUrl(meetingId, state.request.id))
+      socket = new WebSocket(
+        guestLobbyWebSocketUrl(meetingId, state.request.id),
+        [`guest_lobby.${state.request.lobby_token}`],
+      )
       socket.onopen = () => {
         retryDelay = 700
         retryCount = 0
@@ -200,6 +204,13 @@ export function GuestJoinPage() {
         guest_name: cleanName,
         ...(cleanEmail ? { guest_email: cleanEmail } : {}),
       })
+      if (!request.lobby_token) {
+        setState({
+          status: 'form',
+          apiError: 'A pending lobby request already exists. Reopen the original guest lobby session to reconnect.',
+        })
+        return
+      }
       sessionStorage.setItem(storedRequestKey(meetingId), JSON.stringify(request))
       setState({ status: 'waiting', request, connection: 'connecting' })
     } catch (error) {

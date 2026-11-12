@@ -381,7 +381,9 @@ def test_websocket_query_ids_cannot_impersonate_organizer_or_claim_host_state(
     db_session: Session,
 ):
     organizer = make_employee(db_session, "employee-1", "organizer@example.test")
-    make_account(db_session, organizer)
+    guest = make_employee(db_session, "employee-2", "guest@example.test")
+    guest_account = make_account(db_session, guest)
+    guest_token = login(client, guest_account.email_normalized).json()["access_token"]
     meeting_id = str(uuid.uuid4())
     start_at = datetime.now(timezone.utc) + timedelta(days=1)
     db_session.add(
@@ -395,16 +397,29 @@ def test_websocket_query_ids_cannot_impersonate_organizer_or_claim_host_state(
             status="scheduled",
         )
     )
+    db_session.add(
+        MeetingParticipant(
+            id=str(uuid.uuid4()),
+            meeting_id=meeting_id,
+            user_id=guest.id,
+            email=guest.email,
+            role="participant",
+        )
+    )
     db_session.commit()
 
     with client.websocket_connect(
-        f"/api/v1/meetings/{meeting_id}/ws?user_id={organizer.id}&client_id={organizer.id}"
+        f"/api/v1/meetings/{meeting_id}/ws?user_id={guest.id}&client_id={organizer.id}",
+        headers=bearer(guest_token),
     ) as impersonator:
         impersonator_welcome = impersonator.receive_json()
         impersonator_connection = impersonator_welcome["payload"]["connection_id"]
         assert impersonator_connection != organizer.id
 
-        with client.websocket_connect(f"/api/v1/meetings/{meeting_id}/ws") as guest:
+        with client.websocket_connect(
+            f"/api/v1/meetings/{meeting_id}/ws?user_id={organizer.id}",
+            headers=bearer(guest_token),
+        ) as guest:
             guest_connection = guest.receive_json()["payload"]["connection_id"]
             impersonator.receive_json()  # participant_joined
             guest.send_json({

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from app.access_audit import deny_access
 from app.admin_assistant_runs import (
     DEFAULT_LIMIT as ASSISTANT_RUN_DEFAULT_LIMIT,
     MAX_LIMIT as ASSISTANT_RUN_MAX_LIMIT,
@@ -23,9 +28,32 @@ from app.auth_sessions import (
 from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
-from app.meeting.models import ASSISTANT_RUN_STATUSES, WORKFLOW_RUN_STATUSES
+from app.meeting.models import (
+    ASSISTANT_RUN_STATUSES,
+    AUTH_ACCOUNT_ROLES,
+    WORKFLOW_RUN_STATUSES,
+    AuthAccount,
+    AuthAuditEvent,
+    Employee,
+)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["Administration"])
+
+
+class DepartmentUpdateRequest(BaseModel):
+    department: str = Field(min_length=1, max_length=100)
+
+
+class RoleUpdateRequest(BaseModel):
+    role: str = Field(min_length=1, max_length=30)
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        if value not in AUTH_ACCOUNT_ROLES:
+            allowed = ", ".join(AUTH_ACCOUNT_ROLES)
+            raise ValueError(f"role must be one of: {allowed}.")
+        return value
 
 
 def require_administrator(
@@ -39,15 +67,137 @@ def require_administrator(
     return principal
 
 
+def require_admin_users_access(
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+) -> AuthenticatedPrincipal:
+    if principal.role != "admin":
+        deny_access(
+            db,
+            request,
+            principal=principal,
+            detail="Only an administrator can view employee and department data.",
+            resource="admin.users.read",
+        )
+    return principal
+
+
+def require_user_management_administrator(
+    request: Request,
+    db: Session = Depends(get_db),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+) -> AuthenticatedPrincipal:
+    if principal.role != "admin":
+        deny_access(
+            db,
+            request,
+            principal=principal,
+            detail="Only an administrator can update employee access settings.",
+        )
+    return principal
+
+
 @router.get("/dashboard")
 def get_admin_dashboard(
     response: Response,
-    _: AuthenticatedPrincipal = Depends(require_administrator),
+    _: AuthenticatedPrincipal = Depends(require_admin_users_access),
     db: Session = Depends(get_db),
 ):
     # Live operational data: never let a browser or proxy serve a stale copy.
     response.headers["Cache-Control"] = "no-store"
     return build_dashboard(db)
+
+
+@router.patch("/users/{employee_id}/department")
+def update_employee_department(
+    employee_id: str,
+    body: DepartmentUpdateRequest,
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(require_user_management_administrator),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    department = body.department.strip()
+    if not department:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Department must not be blank.",
+        )
+
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee not found.",
+        )
+
+    previous_department = employee.department
+    if previous_department != department:
+        employee.department = department
+        db.add(
+            AuthAuditEvent(
+                id=str(uuid.uuid4()),
+                event="department_updated",
+                user_id=employee.id,
+                actor_id=principal.user_id,
+                session_id=principal.session_id,
+                detail=(
+                    f"Department changed from "
+                    f"{previous_department or 'Unassigned'} to {department}."
+                ),
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+    return {"employee_id": employee.id, "department": employee.department}
+
+
+@router.patch("/users/{employee_id}/role")
+def update_employee_account_role(
+    employee_id: str,
+    body: RoleUpdateRequest,
+    response: Response,
+    principal: AuthenticatedPrincipal = Depends(require_user_management_administrator),
+    db: Session = Depends(get_db),
+):
+    response.headers["Cache-Control"] = "no-store"
+    employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if employee is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee not found.",
+        )
+
+    account = (
+        db.query(AuthAccount)
+        .filter(AuthAccount.employee_id == employee.id)
+        .first()
+    )
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee login account not found.",
+        )
+
+    previous_role = account.role
+    if previous_role != body.role:
+        account.role = body.role
+        db.add(
+            AuthAuditEvent(
+                id=str(uuid.uuid4()),
+                event="role_updated",
+                user_id=employee.id,
+                actor_id=principal.user_id,
+                session_id=principal.session_id,
+                detail=f"Account role changed from {previous_role} to {body.role}.",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.commit()
+
+    return {"employee_id": employee.id, "role": account.role}
 
 
 @router.get("/audit-logs")

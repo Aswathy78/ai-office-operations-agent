@@ -72,6 +72,17 @@ def _create_confirmable_action_item(
         id=str(uuid.uuid4()),
         name="Maya Employee",
         email="maya.employee@example.test",
+        team="Engineering",
+        department="Operations",
+        manager_id=ORGANIZER_ID,
+        is_active=True,
+    )
+    organizer = Employee(
+        id=ORGANIZER_ID,
+        name="Meeting Organizer",
+        email="organizer@example.test",
+        team="Engineering",
+        department="Operations",
         is_active=True,
     )
     meeting = Meeting(
@@ -130,7 +141,7 @@ def _create_confirmable_action_item(
         review_status=ACTION_ITEM_REVIEW_STATUS_PENDING_REVIEW,
     )
     extraction.items.append(item)
-    db.add_all([employee, meeting, recording, transcript, extraction])
+    db.add_all([organizer, employee, meeting, recording, transcript, extraction])
     db.commit()
     db.refresh(item)
     return meeting, transcript, employee, item
@@ -244,7 +255,13 @@ def test_confirmation_creates_linked_task_and_reruns_are_idempotent(
     )
 
     calendar = client.get(
-        f"/api/v1/tasks/calendar.ics?assignee_email={employee.email}"
+        "/api/v1/tasks/calendar.ics",
+        params={
+            "assignee_email": employee.email,
+            "actor_id": employee.id,
+            "actor_role": "employee",
+            "actor_email": employee.email,
+        },
     )
     assert calendar.status_code == 200
     assert calendar.headers["content-type"].startswith("text/calendar")
@@ -360,7 +377,8 @@ def test_failed_assignment_email_is_reported_and_can_be_retried(
     assert notification.error == "SMTP unavailable"
 
     retried = client.post(
-        f"/api/v1/tasks/{task.id}/assignment-email/retry"
+        f"/api/v1/tasks/{task.id}/assignment-email/retry",
+        params={"actor_id": "operations", "actor_role": "hr_operations"},
     )
     assert retried.status_code == 200
     assert retried.json()["assignment_email_status"] == "sent"
@@ -492,7 +510,12 @@ def test_local_deadline_is_saved_and_returned_as_utc_for_calendar(
 
     calendar_response = client.get(
         "/api/v1/tasks/calendar.ics",
-        params={"assignee_email": employee.email},
+        params={
+            "assignee_email": employee.email,
+            "actor_id": employee.id,
+            "actor_role": "employee",
+            "actor_email": employee.email,
+        },
     )
     assert "DTSTART:20261022T103000Z" in calendar_response.text
 
