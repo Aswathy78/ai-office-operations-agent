@@ -309,7 +309,7 @@ def test_bounce_webhook_requires_token_or_admin(client, db_session, monkeypatch)
     assert client.post("/api/v1/email-drafts/bounces", headers={"X-Bounce-Webhook-Token": "wrong"},
                        json=payload).status_code == 403
     assert client.post("/api/v1/email-drafts/bounces", params=MANAGER, json=payload).status_code == 403
-    assert client.post("/api/v1/email-drafts/bounces", params=ADMIN, json=payload).status_code == 200
+    assert client.post("/api/v1/email-drafts/bounces", params=ADMIN, json=payload).status_code == 403
 
 
 def test_unknown_message_id_is_reported_unmatched(client):

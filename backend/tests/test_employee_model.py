@@ -32,6 +32,7 @@ def test_employee_table_exists_and_has_expected_columns(db_session: Session):
     assert columns["id"]["nullable"] is False
     assert columns["name"]["nullable"] is False
     assert columns["email"]["nullable"] is False
+    assert columns["department"]["nullable"] is True
     assert columns["is_active"]["nullable"] is False
     assert columns["created_at"]["nullable"] is False
     unique_constraints = inspect(db_session.get_bind()).get_unique_constraints("employees")
@@ -82,6 +83,20 @@ def test_seed_development_employees_is_idempotent_and_includes_rahul(
     rahul = db_session.query(Employee).filter_by(email="rahulexample.test@gmail.com").one()
     assert rahul.name == "Rahul"
     assert rahul.is_active is True
+    assert all(employee.department is None for employee in db_session.query(Employee).all())
+
+
+def test_employee_seed_preserves_department_without_inference(db_session: Session):
+    seed_development_employees(db_session)
+    employee = db_session.query(Employee).filter_by(
+        email="manager@example.com"
+    ).one()
+    employee.department = "Corporate Services"
+    db_session.commit()
+
+    seed_development_employees(db_session)
+    db_session.refresh(employee)
+    assert employee.department == "Corporate Services"
 
 
 def test_seed_assigns_team_line_managers(db_session: Session):

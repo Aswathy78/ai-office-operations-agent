@@ -14,7 +14,7 @@ vi.mock('../contexts/AuthContext', () => ({ useAuth: () => authState }))
 vi.mock('../api/adminAudit', () => api)
 vi.mock('react-router-dom', () => ({ Link: ({ children }: { children: unknown }) => children }))
 
-const labels = { task: 'Tasks', meeting: 'Meetings', assistant: 'AI assistant', email: 'E-mail', workflow: 'Workflows' }
+const labels = { task: 'Tasks', meeting: 'Meetings', assistant: 'AI assistant', email: 'E-mail', workflow: 'Workflows', auth: 'Authentication' }
 
 const log = (overrides: Partial<AuditLog> = {}): AuditLog => ({
   entries: [
@@ -25,7 +25,7 @@ const log = (overrides: Partial<AuditLog> = {}): AuditLog => ({
       action: 'dead_lettered', action_label: 'Moved to the dead-letter queue', target: 'Summary', outcome: null,
       detail: 'The AI service timed out.' },
   ],
-  counts: { task: 5, meeting: 1, assistant: 2, email: 3, workflow: 9 },
+  counts: { task: 5, meeting: 1, assistant: 2, email: 3, workflow: 9, auth: 0 },
   source_labels: labels,
   limit: 200,
   ...overrides,

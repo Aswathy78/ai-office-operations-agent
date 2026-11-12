@@ -6,7 +6,15 @@ from starlette.websockets import WebSocketDisconnect
 
 from main import app
 from app.db.database import SessionLocal, create_tables
-from app.meeting.models import Meeting
+from app.auth_service import issue_access_token
+from app.meeting.models import (
+    AuthAccount,
+    AuthAuditEvent,
+    AuthSession,
+    Employee,
+    Meeting,
+    MeetingParticipant,
+)
 from app.meeting.signaling import signaling_manager
 
 
@@ -19,10 +27,50 @@ class TestMeetingSignaling(unittest.TestCase):
     def setUp(self):
         self.db = SessionLocal()
         self.created_meeting_ids: list[str] = []
+        self.created_auth_session_ids: list[str] = []
+        self.existing_audit_ids = {
+            row[0] for row in self.db.query(AuthAuditEvent.id).all()
+        }
+        self.employee = Employee(
+            id=str(uuid.uuid4()),
+            name="Signaling Test User",
+            email=f"{uuid.uuid4()}@signaling.test",
+            team="Engineering",
+        )
+        self.account = AuthAccount(
+            id=str(uuid.uuid4()),
+            employee_id=self.employee.id,
+            email_normalized=self.employee.email.casefold(),
+            password_hash="unused",
+            role="employee",
+        )
+        self.db.add_all([self.employee, self.account])
+        self.db.commit()
+        token_result = issue_access_token(self.db, self.account, self.employee)
+        self.token = token_result.token
+        self.created_auth_session_ids.append(token_result.principal.jti)
 
     def tearDown(self):
         for meeting_id in self.created_meeting_ids:
+            self.db.query(MeetingParticipant).filter(
+                MeetingParticipant.meeting_id == meeting_id
+            ).delete()
             self.db.query(Meeting).filter(Meeting.id == meeting_id).delete()
+        if self.created_auth_session_ids:
+            self.db.query(AuthSession).filter(
+                AuthSession.jti.in_(self.created_auth_session_ids)
+            ).delete(synchronize_session=False)
+        new_audit_ids = [
+            row[0]
+            for row in self.db.query(AuthAuditEvent.id).all()
+            if row[0] not in self.existing_audit_ids
+        ]
+        if new_audit_ids:
+            self.db.query(AuthAuditEvent).filter(
+                AuthAuditEvent.id.in_(new_audit_ids)
+            ).delete(synchronize_session=False)
+        self.db.query(AuthAccount).filter(AuthAccount.id == self.account.id).delete()
+        self.db.query(Employee).filter(Employee.id == self.employee.id).delete()
         self.db.commit()
         self.db.close()
         # Clean up any leftover signaling state in memory
@@ -49,27 +97,106 @@ class TestMeetingSignaling(unittest.TestCase):
             status="scheduled",
         )
         self.db.add(meeting)
+        self.db.add(
+            MeetingParticipant(
+                id=str(uuid.uuid4()),
+                meeting_id=meeting_id,
+                user_id=self.employee.id,
+                email=self.employee.email,
+                role="participant",
+            )
+        )
         self.db.commit()
         self.created_meeting_ids.append(meeting_id)
         return meeting
 
+    def _connect(self, path: str):
+        return self.client.websocket_connect(
+            path,
+            subprotocols=[f"access_token.{self.token}"],
+        )
+
+    def test_missing_and_invalid_authentication_are_denied_and_audited(self):
+        meeting = self._create_meeting()
+        path = f"/api/v1/meetings/{meeting.id}/ws"
+
+        for kwargs in ({}, {"subprotocols": ["access_token.invalid-token-marker"]}):
+            with self.assertRaises(WebSocketDisconnect) as cm:
+                with self.client.websocket_connect(path, **kwargs):
+                    pass
+            self.assertEqual(cm.exception.code, 1008)
+            event = (
+                self.db.query(AuthAuditEvent)
+                .filter(AuthAuditEvent.event == "access_denied")
+                .order_by(AuthAuditEvent.created_at.desc())
+                .first()
+            )
+            self.assertEqual(event.detail, "WEBSOCKET 1008 denied.")
+            self.assertNotIn("invalid-token-marker", event.detail)
+
+    def test_authenticated_nonparticipant_is_denied_and_audited(self):
+        meeting = self._create_meeting()
+        outsider = Employee(
+            id=str(uuid.uuid4()),
+            name="Unrelated User",
+            email=f"{uuid.uuid4()}@signaling.test",
+            team="Finance",
+        )
+        outsider_account = AuthAccount(
+            id=str(uuid.uuid4()),
+            employee_id=outsider.id,
+            email_normalized=outsider.email.casefold(),
+            password_hash="unused",
+            role="employee",
+        )
+        self.db.add_all([outsider, outsider_account])
+        self.db.commit()
+        outsider_token_result = issue_access_token(
+            self.db, outsider_account, outsider
+        )
+        outsider_token = outsider_token_result.token
+        self.created_auth_session_ids.append(outsider_token_result.principal.jti)
+
+        with self.assertRaises(WebSocketDisconnect) as cm:
+            with self.client.websocket_connect(
+                f"/api/v1/meetings/{meeting.id}/ws",
+                subprotocols=[f"access_token.{outsider_token}"],
+            ):
+                pass
+
+        self.assertEqual(cm.exception.code, 1008)
+        event = (
+            self.db.query(AuthAuditEvent)
+            .filter(
+                AuthAuditEvent.event == "access_denied",
+                AuthAuditEvent.user_id == outsider.id,
+            )
+            .order_by(AuthAuditEvent.created_at.desc())
+            .first()
+        )
+        self.assertIsNotNone(event)
+        self.assertEqual(event.detail, "WEBSOCKET 1008 denied.")
+        self.db.query(AuthAccount).filter(AuthAccount.id == outsider_account.id).delete()
+        self.db.query(Employee).filter(Employee.id == outsider.id).delete()
+        self.db.commit()
+
     def test_invalid_meeting_is_rejected(self):
         fake_meeting_id = str(uuid.uuid4())
         with self.assertRaises(WebSocketDisconnect) as cm:
-            with self.client.websocket_connect(f"/api/v1/meetings/{fake_meeting_id}/ws") as _:
+            with self._connect(f"/api/v1/meetings/{fake_meeting_id}/ws") as _:
                 pass
         self.assertEqual(cm.exception.code, 1008)
 
     def test_expired_meeting_is_rejected(self):
         meeting = self._create_meeting(expired=True)
         with self.assertRaises(WebSocketDisconnect) as cm:
-            with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as _:
+            with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as _:
                 pass
         self.assertEqual(cm.exception.code, 1008)
 
     def test_valid_meeting_connects_and_receives_welcome(self):
         meeting = self._create_meeting(expired=False)
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws:
+        with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws:
             welcome = ws.receive_json()
             self.assertEqual(welcome["type"], "welcome")
             self.assertEqual(welcome["sender_id"], "server")
@@ -80,11 +207,11 @@ class TestMeetingSignaling(unittest.TestCase):
     def test_signaling_messages_forwarded_to_intended_participant(self):
         meeting = self._create_meeting(expired=False)
 
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
+        with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
             welcome1 = ws1.receive_json()
             user1_id = welcome1["payload"]["connection_id"]
 
-            with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
+            with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
                 welcome2 = ws2.receive_json()
                 user2_id = welcome2["payload"]["connection_id"]
                 # User 2 should discover User 1 in existing participants
@@ -142,16 +269,16 @@ class TestMeetingSignaling(unittest.TestCase):
     def test_three_participants_keep_independent_targeted_signaling(self):
         meeting = self._create_meeting(expired=False)
 
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
+        with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
             user1_id = ws1.receive_json()["payload"]["connection_id"]
 
-            with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
+            with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
                 welcome2 = ws2.receive_json()
                 user2_id = welcome2["payload"]["connection_id"]
                 self.assertEqual(welcome2["payload"]["participants"], [user1_id])
                 self.assertEqual(ws1.receive_json()["type"], "participant_joined")
 
-                with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws3:
+                with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws3:
                     welcome3 = ws3.receive_json()
                     user3_id = welcome3["payload"]["connection_id"]
                     self.assertCountEqual(
@@ -200,11 +327,11 @@ class TestMeetingSignaling(unittest.TestCase):
         meeting1 = self._create_meeting(expired=False)
         meeting2 = self._create_meeting(expired=False)
 
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting1.id}/ws") as ws1:
+        with self._connect(f"/api/v1/meetings/{meeting1.id}/ws") as ws1:
             welcome1 = ws1.receive_json()
             user1_id = welcome1["payload"]["connection_id"]
 
-            with self.client.websocket_connect(f"/api/v1/meetings/{meeting2.id}/ws") as ws2:
+            with self._connect(f"/api/v1/meetings/{meeting2.id}/ws") as ws2:
                 welcome2 = ws2.receive_json()
                 user2_id = welcome2["payload"]["connection_id"]
 
@@ -226,10 +353,10 @@ class TestMeetingSignaling(unittest.TestCase):
     def test_disconnect_removes_participant_and_notifies_remaining(self):
         meeting = self._create_meeting(expired=False)
 
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
+        with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws1:
             welcome1 = ws1.receive_json()
 
-            with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
+            with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws2:
                 welcome2 = ws2.receive_json()
                 user2_id = welcome2["payload"]["connection_id"]
                 # Flush joined message on ws1
@@ -243,7 +370,7 @@ class TestMeetingSignaling(unittest.TestCase):
     def test_malformed_messages_do_not_crash_server(self):
         meeting = self._create_meeting(expired=False)
 
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as ws:
+        with self._connect(f"/api/v1/meetings/{meeting.id}/ws") as ws:
             _ = ws.receive_json()  # welcome
 
             # 1. Invalid JSON string

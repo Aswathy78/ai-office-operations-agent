@@ -7,7 +7,11 @@ import { AdminDashboardPage, REFRESH_INTERVAL_MS } from './AdminDashboardPage'
 
 const { authState, api } = vi.hoisted(() => ({
   authState: { user: { id: 'admin-1', name: 'Ada Admin', role: 'admin' } as { id: string; name: string; role: string } },
-  api: { getAdminDashboard: vi.fn() },
+  api: {
+    getAdminDashboard: vi.fn(),
+    updateEmployeeDepartment: vi.fn(),
+    updateEmployeeRole: vi.fn(),
+  },
 }))
 
 vi.mock('../contexts/AuthContext', () => ({ useAuth: () => authState }))
@@ -45,14 +49,15 @@ function dashboard(overrides: Partial<AdminDashboard> = {}): AdminDashboard {
     users: {
       available: true,
       error: null,
-      total: 2,
+      total: 3,
       active: 1,
-      disabled: 1,
+      disabled: 2,
       by_role: { admin: 1, employee: 1 },
       truncated: false,
       items: [
-        { id: 'u1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin', department: 'IT', is_active: true, last_sign_in_at: '2026-11-07T09:00:00Z' },
-        { id: 'u2', name: 'Eli Employee', email: 'eli@example.test', role: 'employee', department: 'Unassigned', is_active: false, last_sign_in_at: null },
+        { id: 'u1', name: 'Ada Admin', email: 'ada@example.test', role: 'admin', department: 'IT', is_active: true, login_status: 'Enabled', last_sign_in_at: '2026-11-07T09:00:00Z' },
+        { id: 'u2', name: 'Eli Employee', email: 'eli@example.test', role: 'employee', department: 'Unassigned', is_active: false, login_status: 'Disabled', last_sign_in_at: null },
+        { id: 'u3', name: 'Nora No-Login', email: 'nora@example.test', role: null, department: 'Unassigned', is_active: false, login_status: 'No account', last_sign_in_at: null },
       ],
     },
     departments: {
@@ -61,7 +66,7 @@ function dashboard(overrides: Partial<AdminDashboard> = {}): AdminDashboard {
       total: 2,
       items: [
         { name: 'IT', employees: 1, active_employees: 1, with_login: 1 },
-        { name: 'Unassigned', employees: 1, active_employees: 0, with_login: 0 },
+        { name: 'Unassigned', employees: 2, active_employees: 0, with_login: 0 },
       ],
     },
     integrations: {
@@ -87,6 +92,13 @@ beforeEach(() => {
   authState.user = { id: 'admin-1', name: 'Ada Admin', role: 'admin' }
   api.getAdminDashboard.mockReset()
   api.getAdminDashboard.mockResolvedValue(dashboard())
+  api.updateEmployeeDepartment.mockReset()
+  api.updateEmployeeDepartment.mockResolvedValue({
+    employee_id: 'u2',
+    department: 'People Operations',
+  })
+  api.updateEmployeeRole.mockReset()
+  api.updateEmployeeRole.mockResolvedValue({ employee_id: 'u2', role: 'hr_operations' })
 })
 
 afterEach(() => {
@@ -125,8 +137,9 @@ describe('AdminDashboardPage data', () => {
     render(<AdminDashboardPage />)
     const users = await screen.findByRole('table', { name: 'Users' })
     expect(within(users).getByText('ada@example.test')).toBeInTheDocument()
-    expect(within(users).getByText('Disabled')).toBeInTheDocument()
-    expect(within(users).getByText('Never')).toBeInTheDocument()
+    expect(within(users).getAllByText('Disabled')).toHaveLength(3)
+    const noLoginRow = within(users).getByText('nora@example.test').closest('tr') as HTMLTableRowElement
+    expect(within(noLoginRow).getByText('Never')).toBeInTheDocument()
 
     const departments = screen.getByRole('table', { name: 'Departments' })
     expect(within(departments).getByText('Unassigned')).toBeInTheDocument()
@@ -135,6 +148,87 @@ describe('AdminDashboardPage data', () => {
     expect(within(email).getByText('Degraded')).toBeInTheDocument()
     expect(within(screen.getByRole('article', { name: 'AI model (Groq)' })).getByText('Operational')).toBeInTheDocument()
     expect(within(screen.getByRole('article', { name: 'Calendar' })).getByText('Not configured')).toBeInTheDocument()
+  })
+
+  it('allows an administrator to explicitly assign an unassigned user department', async () => {
+    const initial = dashboard()
+    const updated = dashboard({
+      users: initial.users.available
+        ? {
+            ...initial.users,
+            items: initial.users.items.map((person) =>
+              person.id === 'u2' ? { ...person, department: 'People Operations' } : person,
+            ),
+          }
+        : initial.users,
+    })
+    api.getAdminDashboard.mockResolvedValueOnce(initial).mockResolvedValueOnce(updated)
+    render(<AdminDashboardPage view="users" />)
+
+    const input = await screen.findByRole('textbox', { name: 'Department for Eli Employee' })
+    const users = screen.getByRole('table', { name: 'Users' })
+    const employeeRow = within(users).getByText('eli@example.test').closest('tr') as HTMLTableRowElement
+    expect(within(employeeRow).getByRole('button', { name: 'Assign department' })).toBeDisabled()
+    fireEvent.change(input, { target: { value: 'People Operations' } })
+    fireEvent.click(within(employeeRow).getByRole('button', { name: 'Assign department' }))
+
+    await waitFor(() =>
+      expect(api.updateEmployeeDepartment).toHaveBeenCalledWith('u2', 'People Operations'),
+    )
+    expect(await screen.findByText('Department updated.')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(within(screen.getByRole('table', { name: 'Users' })).getByText('People Operations'))
+        .toBeInTheDocument(),
+    )
+  })
+
+  it('lists employees without accounts and permits department assignment without creating a login', async () => {
+    render(<AdminDashboardPage view="users" />)
+    const users = await screen.findByRole('table', { name: 'Users' })
+    expect(within(users).getByText('nora@example.test')).toBeInTheDocument()
+    const noLoginRow = within(users).getByText('nora@example.test').closest('tr') as HTMLTableRowElement
+    expect(within(noLoginRow).getAllByText('No account')).toHaveLength(2)
+    expect(within(noLoginRow).getByText('Nora No-Login')).toBeInTheDocument()
+
+    fireEvent.change(within(noLoginRow).getByRole('textbox', { name: 'Department for Nora No-Login' }), {
+      target: { value: 'People Operations' },
+    })
+
+    fireEvent.click(within(noLoginRow).getByRole('button', { name: 'Assign department' }))
+
+    await waitFor(() =>
+      expect(api.updateEmployeeDepartment).toHaveBeenCalledWith('u3', 'People Operations'),
+    )
+  })
+
+  it('lets an administrator change an existing account role to HR / Operations', async () => {
+    const initial = dashboard()
+    const updated = dashboard({
+      users: initial.users.available
+        ? {
+            ...initial.users,
+            items: initial.users.items.map((person) =>
+              person.id === 'u2' ? { ...person, role: 'hr_operations' } : person,
+            ),
+          }
+        : initial.users,
+    })
+    api.getAdminDashboard.mockResolvedValueOnce(initial).mockResolvedValueOnce(updated)
+    render(<AdminDashboardPage view="users" />)
+
+    const users = await screen.findByRole('table', { name: 'Users' })
+    const employeeRow = within(users).getByText('eli@example.test').closest('tr') as HTMLTableRowElement
+    fireEvent.change(within(employeeRow).getByRole('combobox', { name: 'Role for Eli Employee' }), {
+      target: { value: 'hr_operations' },
+    })
+    fireEvent.click(within(employeeRow).getByRole('button', { name: 'Update role' }))
+
+    await waitFor(() =>
+      expect(api.updateEmployeeRole).toHaveBeenCalledWith('u2', 'hr_operations'),
+    )
+    expect(await within(employeeRow).findByText('Role updated.')).toBeInTheDocument()
+    expect(within(employeeRow).getByRole('combobox', { name: 'Role for Eli Employee' }))
+      .toHaveValue('hr_operations')
   })
 
   it('calls out what needs attention and which services stopped', async () => {

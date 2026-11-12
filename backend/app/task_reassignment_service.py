@@ -37,6 +37,7 @@ from app.meeting.models import (
     TASK_STATUS_COMPLETED,
     TASK_STATUS_PENDING,
 )
+from app.employee_access import manager_visible_employee_ids_for
 from app.task_service import (
     assignment_notification_key,
     render_assignment_email,
@@ -178,7 +179,7 @@ def _require_manager_scope(
     action: str,
     verb: str,
 ) -> None:
-    """Deny employees, and managers acting on tasks outside their own team."""
+    """Deny employees and managers acting outside known department/report scope."""
     if actor.role == ROLE_EMPLOYEE:
         _deny(
             db,
@@ -193,16 +194,14 @@ def _require_manager_scope(
         _deny(db, task, actor, action, f"The role '{actor.role}' cannot {verb}.")
 
     current = db.get(Employee, task.assignee_id)
-    current_team = current.team if current else None
-    if not _same_team(current_team, actor.team):
+    if current is None or current.id not in manager_visible_employee_ids_for(db, actor.id):
         _deny(
             db,
             task,
             actor,
             action,
-            f"This task belongs to {current.name if current else 'another employee'} "
-            f"({_team_label(current_team)}). Managers can only {verb} for their own "
-            f"team ({_team_label(actor.team)}).",
+            "This task is outside your known department and reporting-line scope. "
+            f"Managers can only {verb} for visible employees in their department.",
         )
 
 
@@ -337,13 +336,25 @@ def reassign_task(
         raise ValueError("The task's current assignee no longer exists.")
     if new_assignee.id == old_assignee.id:
         raise ValueError(f"This task is already assigned to {new_assignee.name}.")
+    if (
+        actor.role == ROLE_MANAGER
+        and new_assignee.id not in manager_visible_employee_ids_for(db, actor.id)
+    ):
+        _deny(
+            db,
+            task,
+            actor,
+            ACTION_REASSIGN,
+            "The selected employee is outside your known department and reporting-line scope.",
+        )
     if _pending_request(db, task.id) is not None:
         raise TaskChangeConflict(
             "A reassignment for this task is already awaiting approval."
         )
 
     reason_text = f" Reason: {reason.strip()}" if reason and reason.strip() else ""
-    cross_team = not _same_team(new_assignee.team, actor.team)
+    current_actor = db.get(Employee, actor.id)
+    cross_team = not _same_team(new_assignee.team, current_actor.team if current_actor else None)
 
     if actor.role == ROLE_MANAGER and cross_team:
         request = TaskReassignmentRequest(

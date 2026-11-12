@@ -2677,9 +2677,17 @@ due date from **Dashboard → Manage**.
 - E-mail failures are recorded per notification and never undo the change.
 
 Employee teams come from `employees.team`; the development seed assigns
-Engineering, Finance and Operations teams. The acting user's ID, role and
-team are sent with each request, following the app's existing demo
-authentication.
+Engineering, Finance and Operations teams. API actor identity and role come
+from the verified access token; caller-supplied identity or role fields do not
+grant access.
+
+The task calendar, task audit and notification routes require authentication.
+Employees can access their own tasks; managers are limited to their reporting
+line and team scope; HR / Operations and admins retain organization-wide
+access. Assignment-email retry is limited to authorized managers in scope, HR,
+and admins. Reassignment-request listings are limited to managers in scope,
+HR, and admins. Denials on these routes are written to the auth audit trail
+without request payloads or credentials.
 
 ### API
 
@@ -2692,8 +2700,8 @@ authentication.
 | `GET` | `/api/v1/tasks/{task_id}/audit` | Task audit log |
 | `GET` | `/api/v1/tasks/{task_id}/notifications` | Notification delivery history |
 
-Change requests take `actor_id`, `actor_role` and `actor_team` query
-parameters.
+Change endpoints derive actor ID, role and team from the verified
+authenticated principal; caller-supplied actor fields do not grant access.
 
 ### Database
 
@@ -2819,18 +2827,18 @@ The assistant now selects a registered tool for every plan step and really execu
 | Database | `database.query_records` (allow-listed, read-only, role-filtered) | read | `database.read` |
 | Workflow Engine | `workflow.run` (task reminders, e-mail dispatch, calendar sync) | high | `workflow.run` |
 
-Employees get the read scopes plus `meetings.write`, `email.compose` and `email.send` (as before in chat). Managers (team leads), HR / Operations and admins also get `tasks.write`, `notifications.send`, `database.read` and `workflow.run`; managers can only assign or notify within their own team.
+Employees get the read scopes plus `meetings.write`, `email.compose` and `email.send` (as before in chat). Managers and HR / Operations also get `tasks.write`, `notifications.send` and `database.read`; `workflow.run` is limited to HR / Operations and admins. Managers are limited to direct reports and unassigned employees on their own team. Employee records have `team` and `manager_id`, but no department field, so true department-level isolation is not currently enforceable.
 
 ### Rules enforced for every call (`backend/app/assistant_tools.py`)
 - Arguments are validated against the tool's declared JSON schema (plus cross-field rules such as end after start); invalid calls are rejected with `422` and nothing runs.
 - Each tool declares its required scopes, risk tier, timeout and retry policy; the registry refuses a tool that does not.
 - Every write needs an idempotency key. Repeating a key with the same arguments returns the first result (`replayed: true`); reusing it for different arguments is `409`. Keys are scoped per user.
 - Handlers run with a per-attempt timeout (`504` when exceeded; a late finish is still recorded) and retry only the errors their policy lists.
-- Every call is recorded in `assistant_tool_executions` (arguments, status, attempts, result, duration).
+- Executions are recorded in `assistant_tool_executions`; permission denials are recorded separately in `assistant_audit_events` with sanitized reasons only.
 
 ### API
 - `GET /api/v1/assistant/tools` — tools, schemas, scopes, risk tiers, timeouts, retry policies, and whether the caller may use each.
-- `POST /api/v1/assistant/tools/{tool_name}/execute` — body `{arguments, idempotency_key?, confirm?, conversation_id?}` (or `Idempotency-Key` header). Medium/high-risk tools need `"confirm": true`.
+- `POST /api/v1/assistant/tools/{tool_name}/execute` — body `{arguments, idempotency_key?, confirm?, conversation_id?}` (or `Idempotency-Key` header). Medium/high-risk calls return `202` with `status: "approval_required"`; `confirm: true` does not bypass checks.
 - `GET /api/v1/assistant/tools/executions`, `GET /api/v1/assistant/tools/executions/{id}` — the caller's execution history.
 - Chat SSE adds `awaiting_confirmation` and `confirmed` events. Reply `confirm` / `yes` to run, `cancel` to discard; any other message also discards the pending action. Confirmations expire after `ASSISTANT_CONFIRMATION_TTL_MINUTES` (default 30).
 
@@ -2858,7 +2866,7 @@ cd backend
 
 ### Overview
 Before any assistant write runs, `execute_tool` (the only path to a tool, used by both chat and the tools API) checks:
-1. **Permission** — the role's scopes, then the tool's resource rules (managers only assign or notify within their own team; only managers / HR / admins e-mail everyone; only HR / admins dispatch everyone's queued e-mail).
+1. **Permission** — the authenticated role's scopes, then server-side resource rules (employees act on their own permitted resources; managers are limited by reporting line and the existing unassigned-same-team fallback; HR retains its intended broader data access without receiving Admin privileges).
 2. **Conflicts** — busy calendar slots (attendees and organizer, with free-slot suggestions), duplicate open tasks, the same e-mail sent in the last 15 minutes, notices on closed tasks, a workflow already running, or an identical request already waiting for approval.
 3. **Risk** — Low, Medium or High:
 
@@ -2873,11 +2881,11 @@ Before any assistant write runs, `execute_tool` (the only path to a tool, used b
 ### Decisions
 - **Low risk** within your permissions runs at once.
 - **Medium risk** pauses with **Approval Required** until *you* confirm — reply "confirm" in chat, or click **Confirm and run** on the Approvals page.
-- **High risk** pauses until *someone else* approves: HR / Operations, an admin, or the manager of the requester's team. You cannot approve your own.
+- **High risk** pauses until *someone else* approves: an admin, or a Manager / HR user explicitly assigned to that request. Manager / HR role membership or reporting-line relationship alone does not grant approval authority. You cannot approve your own.
 - **Denied or blocked** actions explain why in chat and in the API (`403` with `reasons`, `409` with `conflicts`).
 - Approving re-runs every check and executes **with the requester's current permissions** (role re-read from their login account) — never the approver's. A requester who was demoted or disabled meanwhile cannot have it run.
 - The old `confirm: true` flag no longer skips anything; medium/high-risk calls return `202` with `status: "approval_required"`.
-- Every decision is written to `assistant_audit_events`: `permission_denied`, `conflict_blocked`, `auto_approved`, `approval_requested`, `approved`, `rejected`, `cancelled`, `expired`, `executed`, `execution_failed`, `replayed`.
+- Decisions and denials are written to `assistant_audit_events`; denied-call audit entries contain sanitized reasons, not raw tool arguments or credentials.
 
 ### API
 - `GET /api/v1/assistant/approvals?scope=mine|queue&status=pending`
@@ -3099,7 +3107,7 @@ An administrator-only area that shows how the system is doing and who did what. 
 |---|---|
 | **Dashboard** | The system dashboard first, with the task dashboard underneath |
 | **System dashboard** | Everything below on one page |
-| **Users** | Users with role, department, status and last sign-in, role counts, and a departments table |
+| **Users** | The employee directory, including people without login accounts, with role, department assignment, account/login status, last sign-in, role counts, and a departments table. Administrators can assign departments and change existing account roles (Employee, Manager, HR / Operations, Admin) without creating accounts. |
 | **Agent Monitor** | System health tiles, background services and integration health |
 | **Audit Logs** | One searchable trail of who did what |
 
@@ -3420,6 +3428,7 @@ approver name or e-mail, and decision date range.
 ### Epic 10 — Security & Identity
 
 - Story 10.1 — Sign in with Google or Microsoft (OAuth 2.0 / OIDC) linked to existing accounts; 15-minute access tokens with rotating single-use refresh tokens and reuse detection; idle time-out; administrator session list and revocation; every login audited (FR-56) — implemented, awaiting merge
+- Story 10.2 — HTTP access-control phase: protect and scope task/directory routes, require a verified bounce webhook token or authenticated admin, and audit sanitized denials; meeting signaling requires an authenticated meeting participant, while guest lobby sockets require a short-lived meeting/request-bound capability — implemented in phases
 
 ### Known gaps
 
@@ -3427,7 +3436,6 @@ approver name or e-mail, and decision date range.
 - Story 10.1: tokens live in memory only, so reloading the page signs the person in again (a deliberate choice: nothing about the session is stored in the browser). The automated tests use a fake provider that signs real ID tokens; a real Google / Microsoft sign-in needs your own credentials and an employee record for the signing-in e-mail (see "Setting up the providers").
 - OCR of images and scanned PDFs needs Tesseract, which has to be installed separately.
 - Managers can upload documents, although Story 7.1 names HR / Operations; the upload permission check also has a test-only bypass.
-- The e-mail bounce endpoint trusts the `actor_role` query parameter.
 - E-mail drafts created before Story 7.4 do not record the documents they quote, so they get no document re-check.
 - Dashboard API latency and error rate are kept in memory, so they reset when the API restarts. Integration health is inferred from recent activity, not a live probe, so an idle integration shows "Unknown".
 - Two backend tests depend on time or network: `test_live_groq_streaming_and_latency` makes a live Groq call that must answer in under 2 seconds, and `test_due_date_change_updates_the_existing_entry` uses a fixed due date of 2 November 2026 that is now in the past.

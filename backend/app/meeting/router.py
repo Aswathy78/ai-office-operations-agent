@@ -1,6 +1,8 @@
 import json
+import uuid
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
+import jwt
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import Response
 
 from sqlalchemy import func, or_
@@ -10,8 +12,11 @@ from app.auth_service import (
     AuthConfigurationError,
     AuthenticatedPrincipal,
     InvalidAccessToken,
+    _jwt_settings,
     authenticate_access_token,
 )
+from app.access_audit import deny_access, record_access_denial
+from app.employee_access import department_visible_employee_ids
 from app.authentication import (
     authenticated_actor_id,
     require_authenticated_actor_id,
@@ -531,10 +536,14 @@ def get_meetings(
 
 
 @router.get("/employees", response_model=list[EmployeeResponse])
-def get_active_employees(db: Session = Depends(get_db)):
+def get_active_employees(
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    visible_ids = department_visible_employee_ids(db, principal)
     employees = (
         db.query(Employee)
-        .filter(Employee.is_active.is_(True))
+        .filter(Employee.is_active.is_(True), Employee.id.in_(visible_ids))
         .order_by(Employee.name.asc())
         .all()
     )
@@ -544,6 +553,7 @@ def get_active_employees(db: Session = Depends(get_db)):
             name=employee.name,
             email=employee.email,
             team=employee.team,
+            department=employee.department,
         )
         for employee in employees
     ]
@@ -1498,6 +1508,7 @@ def upload_participant_track_file(
 )
 def get_meeting_report(
     meeting_id: str,
+    request: Request,
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
@@ -1521,8 +1532,8 @@ def get_meeting_report(
         principal.email,
     )
     if not is_organizer and not is_assigned_task_viewer:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer or an assigned task employee can access the report",
         )
 
@@ -1558,6 +1569,86 @@ def get_meeting_report(
 
 # -- Guest Lobby REST Endpoints ------------------------------------------------
 
+def _websocket_access_token(websocket: WebSocket) -> str | None:
+    authorization = websocket.headers.get("authorization")
+    if authorization is not None:
+        scheme, separator, token = authorization.partition(" ")
+        if scheme.casefold() != "bearer" or not separator or not token.strip():
+            raise InvalidAccessToken()
+        return token.strip()
+
+    token_protocols = [
+        protocol.removeprefix("access_token.")
+        for protocol in websocket.scope.get("subprotocols", [])
+        if protocol.startswith("access_token.")
+    ]
+    if len(token_protocols) != 1 or (token_protocols and not token_protocols[0]):
+        if token_protocols:
+            raise InvalidAccessToken()
+        return None
+    return token_protocols[0]
+
+
+def _meeting_websocket_access_allowed(
+    db: Session,
+    meeting: Meeting,
+    principal: AuthenticatedPrincipal,
+) -> bool:
+    if meeting.organizer_id == principal.user_id:
+        return True
+
+    participant = db.query(MeetingParticipant.id).filter(
+        MeetingParticipant.meeting_id == meeting.id,
+        or_(
+            MeetingParticipant.user_id == principal.user_id,
+            func.lower(MeetingParticipant.email) == principal.email.casefold(),
+        ),
+    ).first()
+    if participant is not None:
+        return True
+
+    attended = db.query(MeetingAttendanceLog.id).filter(
+        MeetingAttendanceLog.meeting_id == meeting.id,
+        MeetingAttendanceLog.user_id == principal.user_id,
+    ).first()
+    if attended is not None:
+        return True
+
+    return db.query(MeetingDelegate.id).filter(
+        MeetingDelegate.organizer_id == meeting.organizer_id,
+        MeetingDelegate.delegate_id == principal.user_id,
+        or_(MeetingDelegate.meeting_id == meeting.id, MeetingDelegate.meeting_id.is_(None)),
+    ).first() is not None
+
+
+def _record_websocket_denial(
+    db: Session,
+    websocket: WebSocket,
+    *,
+    principal: AuthenticatedPrincipal | None,
+    close_code: int = status.WS_1008_POLICY_VIOLATION,
+) -> None:
+    record_access_denial(
+        db,
+        websocket,
+        status_code=close_code,
+        principal=principal,
+    )
+
+
+async def _deny_websocket(
+    db: Session,
+    websocket: WebSocket,
+    *,
+    principal: AuthenticatedPrincipal | None,
+    reason: str,
+    close_code: int = status.WS_1008_POLICY_VIOLATION,
+) -> None:
+    _record_websocket_denial(
+        db, websocket, principal=principal, close_code=close_code
+    )
+    await websocket.close(code=close_code, reason=reason)
+
 
 @router.post(
     "/{meeting_id}/lobby",
@@ -1574,7 +1665,35 @@ def guest_join_lobby(
     Returns a lobby request record with ``status='pending'``.
     The organizer is notified via WebSocket.
     """
-    guest_req = request_guest_join(db=db, meeting_id=meeting_id, guest_data=guest_data)
+    guest_req, created = request_guest_join(
+        db=db, meeting_id=meeting_id, guest_data=guest_data
+    )
+    meeting = get_meeting_by_id(db, meeting_id)
+    if meeting is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+    secret, issuer, _, _ = _jwt_settings()
+    now = datetime.now(timezone.utc)
+    meeting_end = meeting.end_at
+    if meeting_end.tzinfo is None:
+        meeting_end = meeting_end.replace(tzinfo=timezone.utc)
+    lobby_token = (
+        jwt.encode(
+            {
+                "sub": guest_req.id,
+                "meeting_id": meeting_id,
+                "scope": "guest_lobby",
+                "iss": issuer,
+                "aud": "meeting-guest-lobby",
+                "iat": int(now.timestamp()),
+                "exp": int(meeting_end.timestamp()),
+                "jti": str(uuid.uuid4()),
+            },
+            secret,
+            algorithm="HS256",
+        )
+        if created
+        else None
+    )
     return GuestRequestResponse(
         id=guest_req.id,
         meeting_id=guest_req.meeting_id,
@@ -1584,6 +1703,7 @@ def guest_join_lobby(
         requested_at=guest_req.requested_at,
         decided_at=guest_req.decided_at,
         attendance_log_id=guest_req.attendance_log_id,
+        lobby_token=lobby_token,
     )
 
 
@@ -1594,7 +1714,9 @@ def guest_join_lobby(
 )
 def list_pending_guests(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     """Returns all pending guest requests for the given meeting."""
@@ -1602,7 +1724,10 @@ def list_pending_guests(
     if meeting is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
     if not is_authorized_rescheduler(db, meeting, actor_id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Meeting manager access required")
+        deny_access(
+            db, request, principal=principal,
+            detail="Meeting manager access required",
+        )
     pending = get_pending_guest_requests(db=db, meeting_id=meeting_id)
     return [
         GuestRequestResponse(
@@ -1675,52 +1800,66 @@ async def meeting_websocket_signaling(
     meeting_id: str,
     db: Session = Depends(get_db),
 ):
+    authenticated_principal: AuthenticatedPrincipal | None = None
+    try:
+        token = _websocket_access_token(websocket)
+        if token is None:
+            await _deny_websocket(
+                db, websocket, principal=None, reason="Authentication required"
+            )
+            return
+        authenticated_principal = authenticate_access_token(db, token)
+    except AuthConfigurationError:
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=None,
+            reason="Authentication is not configured",
+            close_code=status.WS_1011_INTERNAL_ERROR,
+        )
+        return
+    except InvalidAccessToken:
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Invalid authentication credentials"
+        )
+        return
+
     meeting = get_meeting_by_id(db, meeting_id)
     if not meeting:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=authenticated_principal,
             reason="Meeting not found",
         )
         return
 
     if meeting.status in TERMINAL_STATUSES:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=authenticated_principal,
             reason="Meeting has already completed",
         )
         return
 
     if is_meeting_expired(meeting):
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=authenticated_principal,
             reason="Meeting has expired",
         )
         return
 
-    authenticated_principal: AuthenticatedPrincipal | None = None
-    authorization = websocket.headers.get("authorization")
-    if authorization:
-        scheme, _, token = authorization.partition(" ")
-        if scheme.casefold() != "bearer" or not token:
-            await websocket.close(
-                code=status.WS_1008_POLICY_VIOLATION,
-                reason="Invalid authentication credentials",
-            )
-            return
-        try:
-            authenticated_principal = authenticate_access_token(db, token.strip())
-        except AuthConfigurationError:
-            await websocket.close(
-                code=status.WS_1011_INTERNAL_ERROR,
-                reason="Authentication is not configured",
-            )
-            return
-        except InvalidAccessToken:
-            await websocket.close(
-                code=status.WS_1008_POLICY_VIOLATION,
-                reason="Invalid or expired access token",
-            )
-            return
+    if not _meeting_websocket_access_allowed(db, meeting, authenticated_principal):
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=authenticated_principal,
+            reason="Meeting access denied",
+        )
+        return
 
     # Release initial read transaction so SQLite does not hold a read lock during the WS loop
     db.commit()
@@ -2004,40 +2143,92 @@ async def lobby_websocket(
     db: Session = Depends(get_db),
 ):
     """Dedicated WebSocket channel bound to a validated guest request."""
+    protocols = websocket.scope.get("subprotocols", [])
+    capability_tokens = [
+        protocol.removeprefix("guest_lobby.")
+        for protocol in protocols
+        if protocol.startswith("guest_lobby.")
+    ]
+    if len(capability_tokens) != 1 or not capability_tokens[0]:
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Guest lobby capability required"
+        )
+        return
+
+    try:
+        secret, issuer, _, _ = _jwt_settings()
+        claims = jwt.decode(
+            capability_tokens[0],
+            secret,
+            algorithms=["HS256"],
+            issuer=issuer,
+            audience="meeting-guest-lobby",
+            options={
+                "require": [
+                    "sub",
+                    "meeting_id",
+                    "scope",
+                    "iss",
+                    "aud",
+                    "iat",
+                    "exp",
+                    "jti",
+                ]
+            },
+        )
+        capability_request_id = claims["sub"]
+        if (
+            not isinstance(capability_request_id, str)
+            or claims["meeting_id"] != meeting_id
+            or claims["scope"] != "guest_lobby"
+            or capability_request_id != guest_request_id
+        ):
+            raise InvalidAccessToken()
+    except (
+        AuthConfigurationError,
+        InvalidAccessToken,
+        jwt.PyJWTError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Invalid guest lobby capability"
+        )
+        return
+
     meeting = get_meeting_by_id(db, meeting_id)
     if not meeting:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Meeting not found",
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Meeting not found"
         )
         return
 
     if is_meeting_expired(meeting):
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Meeting has expired",
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Meeting has expired"
         )
         return
 
     if not guest_request_id:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Guest request ID is required",
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Guest request ID is required"
         )
         return
 
     guest_request = get_guest_request_by_id(db, guest_request_id)
     if not guest_request or guest_request.meeting_id != meeting_id:
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
+        await _deny_websocket(
+            db,
+            websocket,
+            principal=None,
             reason="Guest request not found for this meeting",
         )
         return
 
     if guest_request.status not in ("pending", "admitted", "rejected"):
-        await websocket.close(
-            code=status.WS_1008_POLICY_VIOLATION,
-            reason="Guest request is not valid",
+        await _deny_websocket(
+            db, websocket, principal=None, reason="Guest request is not valid"
         )
         return
 
@@ -2145,7 +2336,9 @@ async def lobby_websocket(
 )
 def get_meeting_summary(
         meeting_id: str,
+        request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+        principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
         db: Session = Depends(get_db),
 ):
         meeting = get_meeting_by_id(db, meeting_id)
@@ -2156,8 +2349,8 @@ def get_meeting_summary(
             )
 
         if meeting.organizer_id != actor_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+            deny_access(
+                db, request, principal=principal,
                 detail="Only the meeting organizer can access the summary",
             )
 
@@ -2267,7 +2460,9 @@ def _meeting_action_items_response(
 )
 def extract_meeting_action_items(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     retry_empty: bool = Query(
         default=False,
         description="Re-run an extraction that completed without finding any action items.",
@@ -2282,8 +2477,8 @@ def extract_meeting_action_items(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can extract action items",
         )
 
@@ -2319,7 +2514,9 @@ def confirm_action_item_owner(
     meeting_id: str,
     action_item_id: str,
     payload: ActionItemOwnerConfirmationRequest,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2330,8 +2527,8 @@ def confirm_action_item_owner(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can confirm ownership",
         )
 
@@ -2398,7 +2595,9 @@ def review_action_item_endpoint(
     meeting_id: str,
     action_item_id: str,
     payload: ActionItemReviewRequest,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2409,8 +2608,8 @@ def review_action_item_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can review action items",
         )
 
@@ -2468,7 +2667,9 @@ def review_action_item_endpoint(
 )
 def get_meeting_action_items(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2479,8 +2680,8 @@ def get_meeting_action_items(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can access action items",
         )
 
@@ -2512,6 +2713,7 @@ def get_meeting_action_items(
 )
 def get_transcript(
     meeting_id: str,
+    request: Request,
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
@@ -2527,8 +2729,8 @@ def get_transcript(
         principal.email,
         transcript_id,
     ):
-        raise HTTPException(
-            status_code=403,
+        deny_access(
+            db, request, principal=principal,
             detail="Organizer or assigned task employee access required",
         )
 
@@ -2563,7 +2765,9 @@ def get_transcript(
 def update_transcript(
     meeting_id: str,
     request: MeetingTranscriptUpdateRequest,
+    http_request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
@@ -2573,7 +2777,10 @@ def update_transcript(
         raise HTTPException(status_code=404, detail="Meeting not found")
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(status_code=403, detail="Organizer access required")
+        deny_access(
+            db, http_request, principal=principal,
+            detail="Organizer access required",
+        )
 
     try:
         transcript = update_meeting_transcript(
@@ -2617,7 +2824,9 @@ def update_transcript(
 )
 def get_transcript_corrections(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     transcript_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
@@ -2627,7 +2836,10 @@ def get_transcript_corrections(
         raise HTTPException(status_code=404, detail="Meeting not found")
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(status_code=403, detail="Organizer access required")
+        deny_access(
+            db, request, principal=principal,
+            detail="Organizer access required",
+        )
 
     corrections = get_meeting_transcript_corrections(
         db,
@@ -2653,11 +2865,13 @@ def get_transcript_corrections(
 )
 def generate_meeting_minutes_endpoint(
     meeting_id: str,
+    request: Request,
     force_refresh: bool = Query(
         default=False,
         description="Re-aggregate content from current action items and summary (only applies when minutes are not yet approved)",
     ),
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2668,8 +2882,8 @@ def generate_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can generate meeting minutes",
         )
 
@@ -2691,7 +2905,9 @@ def generate_meeting_minutes_endpoint(
 )
 def get_meeting_minutes_endpoint(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2702,8 +2918,8 @@ def get_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can access meeting minutes",
         )
 
@@ -2730,7 +2946,9 @@ def get_meeting_minutes_endpoint(
 def update_meeting_minutes_endpoint(
     meeting_id: str,
     payload: MeetingMinutesUpdateRequest,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2741,8 +2959,8 @@ def update_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can edit meeting minutes",
         )
 
@@ -2776,7 +2994,9 @@ def update_meeting_minutes_endpoint(
 )
 def refresh_meeting_minutes_endpoint(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2787,8 +3007,8 @@ def refresh_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can refresh meeting minutes",
         )
 
@@ -2814,8 +3034,10 @@ def refresh_meeting_minutes_endpoint(
 )
 def approve_meeting_minutes_endpoint(
     meeting_id: str,
+    request: Request,
     payload: MeetingMinutesApproveRequest | None = None,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2826,8 +3048,8 @@ def approve_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can approve meeting minutes",
         )
 
@@ -2849,8 +3071,10 @@ def approve_meeting_minutes_endpoint(
 )
 def send_meeting_minutes_endpoint(
     meeting_id: str,
+    request: Request,
     retry_failed: bool = Query(default=False, description="Re-attempt previously failed recipients"),
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2861,8 +3085,8 @@ def send_meeting_minutes_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can send meeting minutes",
         )
 
@@ -2902,7 +3126,9 @@ def send_meeting_minutes_endpoint(
 )
 def get_minutes_recipients_endpoint(
     meeting_id: str,
+    request: Request,
     actor_id: str = Depends(require_authenticated_actor_id),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     meeting = get_meeting_by_id(db, meeting_id)
@@ -2913,8 +3139,8 @@ def get_minutes_recipients_endpoint(
         )
 
     if meeting.organizer_id != actor_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal,
             detail="Only the meeting organizer can view delivery status",
         )
 

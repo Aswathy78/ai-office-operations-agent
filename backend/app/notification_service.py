@@ -403,20 +403,7 @@ def notify_assistant_approval_request(
         requester = db.get(Employee, approval.requester_id)
         recipients = [requester] if requester and requester.is_active else []
     else:
-        recipients = _employees_with_roles(db, {"hr_operations", "admin"})
-        if approval.requester_role == "employee" and approval.requester_team:
-            managers = (
-                db.query(Employee)
-                .join(AuthAccount, AuthAccount.employee_id == Employee.id)
-                .filter(
-                    Employee.is_active.is_(True),
-                    AuthAccount.is_enabled.is_(True),
-                    AuthAccount.role == "manager",
-                    Employee.team == approval.requester_team,
-                )
-                .all()
-            )
-            recipients.extend(managers)
+        recipients = _employees_with_roles(db, {"admin"})
     deduplicated = {recipient.id: recipient for recipient in recipients}
     for recipient in deduplicated.values():
         summary = f"Assistant action needs approval: {approval.summary}"
@@ -556,20 +543,7 @@ def notify_assistant_approval_reminder(
     approval: AssistantActionApproval,
 ) -> bool:
     """Remind current authorized approvers once after a request has waited 24 hours."""
-    recipients = _employees_with_roles(db, {"hr_operations", "admin"})
-    requester = db.get(Employee, approval.requester_id)
-    if requester is not None and requester.is_active and approval.requester_role == "employee":
-        recipients.extend(
-            db.query(Employee)
-            .join(AuthAccount, AuthAccount.employee_id == Employee.id)
-            .filter(
-                Employee.is_active.is_(True),
-                AuthAccount.is_enabled.is_(True),
-                AuthAccount.role == "manager",
-                Employee.team == requester.team,
-            )
-            .all()
-        )
+    recipients = _employees_with_roles(db, {"admin"})
     if approval.alternate_approver_id:
         alternate = db.get(Employee, approval.alternate_approver_id)
         if alternate is not None and alternate.is_active:

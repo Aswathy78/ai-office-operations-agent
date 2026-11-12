@@ -42,6 +42,15 @@ def db_session():
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     Base.metadata.create_all(bind=engine)
     session = sessionmaker(bind=engine, autoflush=False, autocommit=False)()
+    session.add(Employee(
+        id="user-002",
+        name="Maya Manager",
+        email="manager@northstar.example",
+        team="Engineering",
+        department="Operations",
+        is_active=True,
+    ))
+    session.commit()
     try:
         yield session
     finally:
@@ -95,6 +104,8 @@ def _employee(db: Session, name: str, team: str = "Engineering") -> Employee:
     employee = Employee(
         id=str(uuid.uuid4()), name=name, team=team, is_active=True,
         email=f"{name.lower().replace(' ', '.')}@northstar.example",
+        department="Operations",
+        manager_id="user-002",
     )
     db.add(employee)
     db.commit()
@@ -191,11 +202,12 @@ def test_completed_tasks_get_no_calendar_entry(db_session, rahul, provider):
 
 
 def test_due_date_change_updates_the_existing_entry(client, db_session, rahul, provider):
-    task = _task(db_session, rahul)
+    due_at = datetime.now(timezone.utc) + timedelta(days=5)
+    task = _task(db_session, rahul, due_at=due_at)
     sync_service.run_sync_pass(db_session)
     [entry] = _entries(db_session)
     entry_id, entry_version = entry.id, entry.version
-    new_due = DUE + timedelta(days=3)
+    new_due = due_at + timedelta(days=3)
 
     response = client.patch(f"/api/v1/tasks/{task.id}/due-date", params=MANAGER,
                             json={"due_at": new_due.isoformat(), "reason": "Scope grew"})
@@ -411,7 +423,7 @@ def test_failed_sync_can_be_retried_by_assignee(client, db_session, rahul, provi
     someone_else = {"actor_id": "user-009", "actor_role": "employee", "actor_email": "other@northstar.example"}
     assert client.post(f"/api/v1/tasks/{task.id}/calendar-sync/retry", params=someone_else).status_code == 403
 
-    assignee = {"actor_id": "user-001", "actor_role": "employee", "actor_email": rahul.email}
+    assignee = {"actor_id": rahul.id, "actor_role": "employee", "actor_email": rahul.email}
     response = client.post(f"/api/v1/tasks/{task.id}/calendar-sync/retry", params=assignee)
     assert response.status_code == 200
     assert response.json()["calendar_sync"]["status"] == "pending"

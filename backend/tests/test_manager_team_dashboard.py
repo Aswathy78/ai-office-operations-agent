@@ -12,6 +12,7 @@ from app.auth_service import AuthenticatedPrincipal
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
 from app.meeting.models import (
+    AuthAuditEvent,
     Base,
     Employee,
     Task,
@@ -37,6 +38,7 @@ def dashboard_env():
         name="Maya Thompson",
         email="manager@example.com",
         team="Engineering",
+        department="Operations",
         manager_id=None,
         is_active=True,
     )
@@ -45,6 +47,7 @@ def dashboard_env():
         name="Isabella Lopez",
         email="isabella.lopez@northstar.example",
         team="Finance",
+        department="Finance",
         manager_id=None,
         is_active=True,
     )
@@ -53,6 +56,7 @@ def dashboard_env():
         name="Solo Manager",
         email="solo.mgr@example.com",
         team="Research",
+        department="Research",
         manager_id=None,
         is_active=True,
     )
@@ -63,6 +67,7 @@ def dashboard_env():
         name="Alex Rivera",
         email="alex@northstar.example",
         team="Engineering",
+        department="Operations",
         manager_id=maya.id,
         is_active=True,
     )
@@ -71,6 +76,7 @@ def dashboard_env():
         name="Marcus Chen",
         email="marcus@northstar.example",
         team="Engineering",
+        department="Operations",
         manager_id=maya.id,
         is_active=True,
     )
@@ -80,6 +86,7 @@ def dashboard_env():
         name="Daniel Brooks",
         email="daniel@northstar.example",
         team="Engineering",
+        department="Operations",
         manager_id=maya.id,
         is_active=True,
     )
@@ -90,6 +97,7 @@ def dashboard_env():
         name="Noah Martin",
         email="noah@northstar.example",
         team="Finance",
+        department="Finance",
         manager_id=isabella.id,
         is_active=True,
     )
@@ -220,7 +228,7 @@ def dashboard_env():
 
 
 def test_employee_cannot_access_team_dashboard(dashboard_env):
-    client, principal, _, entities = dashboard_env
+    client, principal, db, entities = dashboard_env
     alex = entities["alex"]
     principal["value"] = AuthenticatedPrincipal(
         user_id=alex.id,
@@ -235,6 +243,9 @@ def test_employee_cannot_access_team_dashboard(dashboard_env):
     resp = client.get("/api/v1/tasks/team-dashboard")
     assert resp.status_code == 403
     assert "Employees cannot access" in resp.json()["detail"]
+    record = db.query(AuthAuditEvent).filter_by(event="access_denied").one()
+    assert record.actor_id == alex.id
+    assert record.detail == "HTTP 403 GET denied."
 
 
 def test_manager_retrieves_team_dashboard(dashboard_env):
@@ -430,4 +441,3 @@ def test_dashboard_data_freshness_on_task_completion(dashboard_env):
     assert r2.json()["summary"]["completion_rate"] == 60.0  # 3/5
     assert r2.json()["summary"]["overdue_tasks"] == 0
     assert len(r2.json()["overdue_tasks"]) == 0
-

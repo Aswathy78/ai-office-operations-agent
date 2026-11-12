@@ -77,7 +77,7 @@ def _visible(
     db: Session,
 ) -> bool:
     return approval.requester_id == principal.user_id or can_decide(approval, principal, db) or (
-        principal.role in HIGH_RISK_APPROVER_ROLES
+        principal.role == "admin"
     )
 
 

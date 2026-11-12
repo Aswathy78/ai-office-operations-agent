@@ -2127,6 +2127,12 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .admin-services li { display: flex; align-items: center; gap: 8px; }
 .admin-unavailable { display: grid; gap: 4px; padding: 14px 16px; background: #f7f9fc; border: 1px dashed var(--border); border-radius: 12px; color: var(--muted); font-size: 13px; }
 .admin-note { margin: 0; color: var(--muted); font-size: 12px; }
+.admin-department-editor { display: grid; gap: 7px; min-width: 220px; }
+.admin-department-editor form { display: flex; flex-wrap: wrap; gap: 6px; }
+.admin-department-editor input, .admin-department-editor select { min-width: 150px; flex: 1 1 150px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
+.admin-department-editor .button { min-height: 34px; padding: 0 9px; font-size: 11px; }
+.admin-department-editor small { color: var(--muted); }
+.admin-department-editor small[role="alert"] { color: #a12622; }
 .admin-run-table { min-width: 1160px; }
 .admin-run-table td small { display: block; margin-top: 4px; color: var(--muted); }
 .admin-run-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--muted); font-size: 13px; }

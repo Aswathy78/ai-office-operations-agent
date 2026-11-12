@@ -44,6 +44,10 @@ from app.assistant_tools import (
     max_risk,
     parse_datetime_argument,
 )
+from app.employee_access import (
+    department_visible_employee_ids,
+    manager_visible_employee_ids,
+)
 from app.meeting.calendar_provider import (
     CalendarConflictError,
     CalendarProviderError,
@@ -111,17 +115,21 @@ def _same_team(left: str | None, right: str | None) -> bool:
     return bool(left and right and left.strip().casefold() == right.strip().casefold())
 
 
-def _require_team_scope(context: ToolContext, employee: Employee, verb: str) -> None:
-    """HR / Operations and admins act on anyone; managers only on their own team."""
-    principal = context.principal
+def _employee_scope_allowed(db, principal, employee: Employee) -> bool:
     if principal.role in ELEVATED_ROLES:
-        return
-    if principal.role == "manager" and _same_team(employee.team, principal.team):
+        return True
+    if principal.role == "manager":
+        return employee.id in manager_visible_employee_ids(db, principal)
+    return employee.id == principal.user_id
+
+
+def _require_team_scope(context: ToolContext, employee: Employee, verb: str) -> None:
+    """Enforce the existing manager-line/team fallback and own-resource rules."""
+    principal = context.principal
+    if _employee_scope_allowed(context.db, principal, employee):
         return
     raise ToolPermissionDenied(
-        f"Managers can only {verb} employees in their own team "
-        f"({principal.team or 'no team'}); {employee.name} is in "
-        f"{employee.team or 'no team'}."
+        f"You are not permitted to {verb} this employee."
     )
 
 
@@ -173,7 +181,12 @@ def lookup_employees(context: ToolContext, arguments: dict) -> dict:
     from app.meeting.employee_matching import match_employee_name
 
     db = context.db
-    directory = _active_employees(db)
+    visible_ids = department_visible_employee_ids(db, context.principal)
+    directory = [
+        employee
+        for employee in _active_employees(db)
+        if employee.id in visible_ids
+    ]
     found: dict[str, dict] = {}
     unresolved: list[str] = []
     ambiguous: dict[str, list[str]] = {}
@@ -192,11 +205,18 @@ def lookup_employees(context: ToolContext, arguments: dict) -> dict:
         match = match_employee_name(db, name)
         if match.status == "unique_match" and match.employee_id:
             employee = db.get(Employee, match.employee_id)
-            if employee is not None:
+            if employee is not None and employee.id in visible_ids:
                 add(employee, f"name:{name}")
                 continue
         if match.status == "ambiguous_match":
-            ambiguous[name] = list(match.candidate_names)
+            ambiguous[name] = [
+                employee.name
+                for employee in directory
+                if employee.id in set(match.candidate_employee_ids)
+            ]
+            if ambiguous[name]:
+                continue
+            unresolved.append(name)
         else:
             unresolved.append(name)
 
@@ -630,7 +650,7 @@ def list_tasks(context: ToolContext, arguments: dict) -> dict:
     if principal.role == "employee":
         if email and email.casefold() != principal.email.casefold():
             raise ToolPermissionDenied("Employees can only list their own tasks.")
-        query = query.filter(func.lower(Employee.email) == principal.email.casefold())
+        query = query.filter(Employee.id == principal.user_id)
     elif principal.role == "manager":
         if email:
             assignee = _active_employee_by_email(context, email)
@@ -639,7 +659,8 @@ def list_tasks(context: ToolContext, arguments: dict) -> dict:
             _require_team_scope(context, assignee, "list tasks of")
             query = query.filter(Employee.id == assignee.id)
         else:
-            query = query.filter(func.lower(Employee.team) == (principal.team or "").casefold())
+            visible_employee_ids = manager_visible_employee_ids(db, principal)
+            query = query.filter(Employee.id.in_(visible_employee_ids))
     elif email:
         query = query.filter(func.lower(Employee.email) == email.casefold())
     if arguments.get("status"):
@@ -761,9 +782,15 @@ def query_records(context: ToolContext, arguments: dict) -> dict:
 
     if entity == "tasks":
         query = db.query(Task, Employee).join(Employee, Task.assignee_id == Employee.id)
-        if not elevated:
+        if principal.role == "employee":
             query = query.filter(
-                (func.lower(Employee.team) == (principal.team or "").casefold())
+                (Task.assignee_id == principal.user_id)
+                | (Task.creator_id == principal.user_id)
+            )
+        elif principal.role == "manager":
+            visible_employee_ids = manager_visible_employee_ids(db, principal)
+            query = query.filter(
+                (Task.assignee_id.in_(visible_employee_ids))
                 | (Task.creator_id == principal.user_id)
             )
         if status_filter:
@@ -800,11 +827,7 @@ def query_records(context: ToolContext, arguments: dict) -> dict:
     elif entity == "email_drafts":
         query = db.query(EmailDraft).filter(EmailDraft.discarded_at.is_(None))
         if not elevated:
-            # Managers approve e-mails, so they also see the approval queue.
-            query = query.filter(
-                (EmailDraft.created_by_id == principal.user_id)
-                | (EmailDraft.status == EMAIL_DRAFT_STATUS_APPROVAL)
-            )
+            query = query.filter(EmailDraft.created_by_id == principal.user_id)
         if status_filter:
             query = query.filter(EmailDraft.status == status_filter)
         if since:
@@ -907,7 +930,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             ],
         },
         required_scopes=frozenset({"directory.read"}),
-        risk_tier="read",
+        **_GUARD_HOOKS["directory.lookup_employees"],
         timeout_seconds=5,
         retry_policy=READ_RETRY,
         handler=lookup_employees,
@@ -1070,7 +1093,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(
         name="task.list",
         category="task",
-        description="List tasks the caller may see (own, team, or everyone for HR / admins).",
+        description="List tasks within the caller's own, reporting-line/team-fallback, or HR/admin scope.",
         input_schema={
             "type": "object",
             "additionalProperties": False,
@@ -1081,7 +1104,7 @@ def register_builtin_tools(registry: ToolRegistry) -> None:
             },
         },
         required_scopes=frozenset({"tasks.read"}),
-        risk_tier="read",
+        **_GUARD_HOOKS["task.list"],
         timeout_seconds=5,
         retry_policy=READ_RETRY,
         handler=list_tasks,
@@ -1204,14 +1227,17 @@ def _assignee(db, arguments: dict) -> Employee | None:
     )
 
 
-def _team_denial(principal, employee: Employee, verb: str) -> list[str]:
+def _team_denial(db, principal, employee: Employee, verb: str) -> list[str]:
     if principal.role in ELEVATED_ROLES:
         return []
-    if principal.role == "manager" and _same_team(employee.team, principal.team):
+    if _employee_scope_allowed(db, principal, employee):
         return []
+    if principal.role == "manager":
+        return [
+            f"Managers can only {verb} employees in their reporting line or unassigned employees on their own team."
+        ]
     return [
-        f"Managers can only {verb} employees in their own team "
-        f"({principal.team or 'no team'}); {employee.name} is in {employee.team or 'no team'}."
+        f"You are not permitted to {verb} this employee."
     ]
 
 
@@ -1227,7 +1253,65 @@ def _directory_emails(db) -> set[str]:
 
 def authorize_task_create(db, principal, arguments: dict) -> list[str]:
     assignee = _assignee(db, arguments)
-    return _team_denial(principal, assignee, "assign tasks to") if assignee else []
+    return _team_denial(db, principal, assignee, "assign tasks to") if assignee else []
+
+
+def authorize_directory_lookup(db, principal, arguments: dict) -> list[str]:
+    visible_ids = department_visible_employee_ids(db, principal)
+    emails = {email.strip().casefold() for email in arguments.get("emails", [])}
+    for email in emails:
+        employee = (
+            db.query(Employee)
+            .filter(func.lower(Employee.email) == email, Employee.is_active.is_(True))
+            .one_or_none()
+        )
+        if employee is not None and employee.id not in visible_ids:
+            return ["The employee is outside your department and reporting-line scope."]
+
+    from app.meeting.employee_matching import match_employee_name
+
+    for name in arguments.get("names", []):
+        matches = (
+            db.query(Employee.id)
+            .filter(
+                func.lower(func.trim(Employee.name)) == name.strip().casefold(),
+                Employee.is_active.is_(True),
+            )
+            .all()
+        )
+        if any(employee_id not in visible_ids for (employee_id,) in matches):
+            return ["The employee is outside your department and reporting-line scope."]
+        if not matches:
+            match = match_employee_name(db, name)
+            if any(
+                employee_id not in visible_ids
+                for employee_id in match.candidate_employee_ids
+            ):
+                return ["The employee is outside your department and reporting-line scope."]
+    return []
+
+
+def authorize_task_list(db, principal, arguments: dict) -> list[str]:
+    email = arguments.get("assignee_email")
+    if not email or principal.role in ELEVATED_ROLES:
+        return []
+    employee = (
+        db.query(Employee)
+        .filter(
+            func.lower(Employee.email) == email.strip().casefold(),
+            Employee.is_active.is_(True),
+        )
+        .one_or_none()
+    )
+    if principal.role == "employee":
+        return (
+            []
+            if employee is not None and employee.id == principal.user_id
+            else ["Employees can only list their own tasks."]
+        )
+    if employee is not None and _employee_scope_allowed(db, principal, employee):
+        return []
+    return ["You are not permitted to list tasks for this employee."]
 
 
 def conflicts_task_create(db, principal, arguments: dict) -> list[dict]:
@@ -1265,7 +1349,9 @@ def risk_task_create(db, principal, arguments: dict) -> tuple[str, list[str]]:
     if parse_datetime_argument(arguments["due_at"]) - _now() < timedelta(hours=24):
         level = "medium"
         reasons.append("due within 24 hours")
-    if assignee is not None and not _same_team(assignee.team, principal.team):
+    actor = db.get(Employee, principal.user_id)
+    actor_team = actor.team if actor is not None else principal.team
+    if assignee is not None and not _same_team(assignee.team, actor_team):
         level = "high"
         reasons.append(f"{assignee.name} is outside your team ({assignee.team or 'no team'})")
     return level, reasons
@@ -1490,7 +1576,7 @@ def authorize_task_notice(db, principal, arguments: dict) -> list[str]:
     if task is None or task.creator_id == principal.user_id:
         return []
     assignee = db.get(Employee, task.assignee_id)
-    return _team_denial(principal, assignee, "notify") if assignee else []
+    return _team_denial(db, principal, assignee, "notify") if assignee else []
 
 
 def conflicts_task_notice(db, principal, arguments: dict) -> list[dict]:
@@ -1532,8 +1618,8 @@ def describe_task_notice(arguments: dict) -> str:
 
 
 def authorize_workflow_run(db, principal, arguments: dict) -> list[str]:
-    if arguments["workflow"] == "email_dispatch" and principal.role not in ELEVATED_ROLES:
-        return ["Only HR / Operations or admins can dispatch the queued e-mails of every employee."]
+    if principal.role not in ELEVATED_ROLES:
+        return ["This workflow operates across the organization and is limited to HR / Operations or admins."]
     return []
 
 
@@ -1563,6 +1649,9 @@ def describe_workflow_run(arguments: dict) -> str:
 
 
 _GUARD_HOOKS = {
+    "directory.lookup_employees": dict(
+        risk_tier="read", authorize=authorize_directory_lookup,
+    ),
     "task.create": dict(
         risk_tier="low", authorize=authorize_task_create,
         detect_conflicts=conflicts_task_create, assess_risk=risk_task_create,
@@ -1587,4 +1676,5 @@ _GUARD_HOOKS = {
         detect_conflicts=conflicts_workflow_run, assess_risk=risk_workflow_run,
         describe_call=describe_workflow_run,
     ),
+    "task.list": dict(risk_tier="read", authorize=authorize_task_list),
 }

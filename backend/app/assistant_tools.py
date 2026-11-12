@@ -120,13 +120,12 @@ MANAGER_SCOPES = EMPLOYEE_SCOPES | frozenset({
     "tasks.write",
     "notifications.send",
     "database.read",
-    "workflow.run",
 })
 ROLE_SCOPES: dict[str, frozenset[str]] = {
     "employee": EMPLOYEE_SCOPES,
     "manager": MANAGER_SCOPES,
-    "hr_operations": MANAGER_SCOPES,
-    "admin": MANAGER_SCOPES,
+    "hr_operations": MANAGER_SCOPES | frozenset({"workflow.run"}),
+    "admin": MANAGER_SCOPES | frozenset({"workflow.run"}),
 }
 
 
@@ -648,6 +647,10 @@ def validate_tool_call(
     require_key: bool = True,
 ) -> ToolSpec:
     """Check scopes, arguments and the idempotency key without running anything."""
+    if principal.role not in ROLE_SCOPES:
+        raise ToolPermissionDenied(
+            "The authenticated account has an unrecognized role; tool access is denied."
+        )
     spec = get_registry().get(tool_name)
     missing = spec.required_scopes - scopes_for_role(principal.role)
     if missing:
@@ -1035,7 +1038,7 @@ def _request_approval(
 
     notify_assistant_approval_request(db, approval)
     who = "your confirmation" if approval.approver_kind == "requester" else (
-        "approval by HR / Operations, an admin, or your team's manager"
+        "approval by an admin or a specifically assigned Manager / HR user"
     )
     record_audit(
         db, actor=principal, tool_name=spec.name, event="approval_requested",
@@ -1109,6 +1112,16 @@ def execute_tool(
                      conversation_id=conversation_id, detail=exc.message,
                      data={"reasons": exc.reasons})
         raise
+    except UnknownToolError:
+        record_audit(
+            db,
+            actor=principal,
+            tool_name="unknown",
+            event="permission_denied",
+            conversation_id=conversation_id,
+            detail="Unknown AI tool denied.",
+        )
+        raise
     except ToolArgumentError as exc:
         spec_or_none = get_registry()._tools.get(tool_name)
         if spec_or_none is not None and spec_or_none.is_write:
@@ -1117,6 +1130,20 @@ def execute_tool(
                          data={"errors": exc.errors})
         raise
     affected_people = None
+    if not spec.is_write and spec.authorize is not None:
+        denials = spec.authorize(db, principal, arguments)
+        if denials:
+            message = "Permission denied: " + " ".join(denials)
+            record_audit(
+                db,
+                actor=principal,
+                tool_name=spec.name,
+                event="permission_denied",
+                conversation_id=conversation_id,
+                detail=message,
+                data={"reasons": denials},
+            )
+            raise ToolPermissionDenied(message, denials)
     if spec.name == "email.send":
         if spec.authorize is not None:
             denials = spec.authorize(db, principal, arguments)

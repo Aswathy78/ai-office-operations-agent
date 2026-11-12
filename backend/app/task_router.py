@@ -6,14 +6,19 @@ import io
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from app.auth_service import AuthenticatedPrincipal
+from app.access_audit import deny_access
 from app.authentication import require_authenticated_principal
 from app.db.database import get_db
+from app.employee_access import (
+    manager_visible_employee_ids,
+    manager_visible_employee_ids_for,
+)
 from app.meeting.models import (
     Employee,
     Meeting,
@@ -220,7 +225,13 @@ def get_assigned_tasks(
     db: Session = Depends(get_db),
 ):
     query = _task_query(db)
-    if principal.role in {"manager", "hr_operations", "admin"} and assignee_email:
+    if principal.role == "manager":
+        query = query.filter(
+            Employee.id.in_(manager_visible_employee_ids(db, principal))
+        )
+        if assignee_email:
+            query = query.filter(Employee.email == assignee_email)
+    elif principal.role in {"hr_operations", "admin"} and assignee_email:
         query = query.filter(Employee.email == assignee_email)
     else:
         query = query.filter(Task.assignee_id == principal.user_id)
@@ -234,7 +245,11 @@ def get_task_dashboard(
     db: Session = Depends(get_db),
 ):
     query = _task_query(db)
-    if principal.role not in {"manager", "hr_operations", "admin"}:
+    if principal.role == "manager":
+        query = query.filter(
+            Employee.id.in_(manager_visible_employee_ids(db, principal))
+        )
+    elif principal.role not in {"hr_operations", "admin"}:
         query = query.filter(Task.assignee_id == principal.user_id)
     rows = query.all()
     return _task_responses(db, rows)
@@ -242,12 +257,13 @@ def get_task_dashboard(
 
 @router.get("/escalations", response_model=list[EscalationResponse])
 def get_task_escalations(
+    request: Request,
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     if principal.role == "employee":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Employees cannot access the manager escalation dashboard.",
         )
 
@@ -260,18 +276,12 @@ def get_task_escalations(
     )
 
     if principal.role == "manager":
-        current_emp = (
-            db.query(Employee)
-            .filter((Employee.id == principal.user_id) | (Employee.email == principal.email))
-            .first()
+        query = query.filter(
+            Employee.id.in_(manager_visible_employee_ids(db, principal))
         )
-        manager_ids = {principal.user_id}
-        if current_emp:
-            manager_ids.add(current_emp.id)
-        query = query.filter(Employee.manager_id.in_(list(manager_ids)))
     elif principal.role not in ("hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Unauthorized to access escalations.",
         )
 
@@ -310,13 +320,14 @@ def get_task_escalations(
 
 @router.get("/team-dashboard", response_model=TeamDashboardResponse)
 def get_manager_team_dashboard(
+    request: Request,
     team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     if principal.role not in ("manager", "hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Employees cannot access the manager team dashboard.",
         )
 
@@ -329,31 +340,20 @@ def get_manager_team_dashboard(
     if current_emp:
         manager_ids.add(current_emp.id)
 
-    manager_team = current_emp.team if current_emp and current_emp.team else principal.team
+    manager_team = current_emp.team if current_emp else None
 
     # Team isolation rules:
     # 1. Managers see ONLY their own team. Query parameter is ignored for managers to prevent manipulation.
     # 2. Primary hierarchy boundary: employees where manager_id matches the manager.
     # 3. Fallback for unassigned manager_id: employees in the same team without another manager.
     if principal.role == "manager":
-        team_filter_clauses = [Employee.manager_id.in_(list(manager_ids))]
-        if manager_team:
-            team_filter_clauses.append(
-                and_(
-                    Employee.manager_id.is_(None),
-                    func.lower(Employee.team) == manager_team.casefold(),
-                    ~Employee.id.in_(list(manager_ids)),
-                )
-            )
-        team_members = (
-            db.query(Employee)
-            .filter(
-                Employee.is_active.is_(True),
-                or_(*team_filter_clauses),
-            )
-            .order_by(Employee.name.asc())
-            .all()
+        team_query = db.query(Employee).filter(
+            Employee.is_active.is_(True),
+            Employee.id.in_(manager_visible_employee_ids(db, principal)),
         )
+        if current_emp:
+            team_query = team_query.filter(Employee.id != current_emp.id)
+        team_members = team_query.order_by(Employee.name.asc()).all()
         resolved_team_name = manager_team or "My Team"
     else:
         # HR Operations / Admin
@@ -546,10 +546,24 @@ def _ical_stamp(value: datetime) -> str:
 
 @router.get("/calendar.ics")
 def get_task_calendar(
+    request: Request,
     assignee_email: str = Query(min_length=1),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
-    rows = _task_query(db).filter(Employee.email == assignee_email).all()
+    assignee = (
+        db.query(Employee)
+        .filter(func.lower(func.trim(Employee.email)) == assignee_email.strip().casefold())
+        .one_or_none()
+    )
+    if assignee is None or not assignee.is_active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+    if not _can_access_employee_tasks(db, principal, assignee):
+        deny_access(
+            db, request, principal=principal,
+            detail="You are not authorized to export this employee's task calendar.",
+        )
+    rows = _task_query(db).filter(Task.assignee_id == assignee.id).all()
     events = []
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     for task, _, meeting in rows:
@@ -607,11 +621,25 @@ def _escape_ical_text(value: str) -> str:
     "/{task_id}/assignment-email/retry",
     response_model=TaskResponse,
 )
-def retry_assignment_email(task_id: str, db: Session = Depends(get_db)):
-    if _task_row(db, task_id) is None:
+def retry_assignment_email(
+    task_id: str,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    task_row = _task_row(db, task_id)
+    if task_row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Task not found",
+        )
+    _task, assignee, _meeting = task_row
+    if principal.role not in {"manager", "hr_operations", "admin"} or not _can_access_employee_tasks(
+        db, principal, assignee
+    ):
+        deny_access(
+            db, request, principal=principal,
+            detail="Only an authorized manager, HR, or administrator can retry this assignment email.",
         )
     try:
         attempt_assignment_email(db, task_id, retry_failed=True)
@@ -742,13 +770,26 @@ def change_task_due_date_endpoint(
     response_model=list[TaskReassignmentRequestResponse],
 )
 def list_reassignment_requests(
+    request: Request,
     request_status: str | None = Query(
         default=TASK_REASSIGNMENT_STATUS_PENDING,
         alias="status",
     ),
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     query = db.query(TaskReassignmentRequest)
+    if principal.role == "manager":
+        visible_employee_ids = _manager_visible_employee_ids(db, principal)
+        query = query.filter(
+            (TaskReassignmentRequest.from_assignee_id.in_(visible_employee_ids))
+            | (TaskReassignmentRequest.to_assignee_id.in_(visible_employee_ids))
+        )
+    elif principal.role not in {"hr_operations", "admin"}:
+        deny_access(
+            db, request, principal=principal,
+            detail="Only managers, HR, or administrators can view reassignment requests.",
+        )
     if request_status:
         query = query.filter(TaskReassignmentRequest.status == request_status)
     requests = query.order_by(TaskReassignmentRequest.created_at.desc()).all()
@@ -775,9 +816,20 @@ def decide_reassignment_request_endpoint(
 
 
 @router.get("/{task_id}/audit", response_model=list[TaskAuditLogResponse])
-def get_task_audit_log(task_id: str, db: Session = Depends(get_db)):
-    if db.get(Task, task_id) is None:
+def get_task_audit_log(
+    task_id: str,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    task_row = _task_row(db, task_id)
+    if task_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if not _can_access_employee_tasks(db, principal, task_row[1]):
+        deny_access(
+            db, request, principal=principal,
+            detail="You are not authorized to view this task's audit history.",
+        )
     entries = (
         db.query(TaskAuditLog)
         .filter(TaskAuditLog.task_id == task_id)
@@ -800,9 +852,20 @@ def get_task_audit_log(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{task_id}/notifications", response_model=list[TaskNotificationResponse])
-def get_task_notifications(task_id: str, db: Session = Depends(get_db)):
-    if db.get(Task, task_id) is None:
+def get_task_notifications(
+    task_id: str,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
+    db: Session = Depends(get_db),
+):
+    task_row = _task_row(db, task_id)
+    if task_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    if not _can_access_employee_tasks(db, principal, task_row[1]):
+        deny_access(
+            db, request, principal=principal,
+            detail="You are not authorized to view this task's notifications.",
+        )
     notifications = (
         db.query(TaskNotification)
         .filter(TaskNotification.task_id == task_id)
@@ -832,12 +895,14 @@ def update_task_status_endpoint(
     summary="Run the reminder / escalation pass now (the scheduler also runs it automatically)",
 )
 def run_task_reminders_endpoint(
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     actor: TaskActor = Depends(_actor),
     db: Session = Depends(get_db),
 ):
     if actor.role not in ("manager", "hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Only managers, HR / Operations or admins can trigger reminders.",
         )
     return run_task_reminders(db).as_dict()
@@ -855,11 +920,15 @@ def _sync_calendar_soon(db: Session, task_id: str, reason: str) -> None:
 
 
 def _can_manage_calendar_sync(db: Session, task_id: str, actor: TaskActor) -> bool:
-    if actor.role in ("manager", "hr_operations", "admin"):
+    if actor.role in ("hr_operations", "admin"):
         return True
     task = db.get(Task, task_id)
     assignee = db.get(Employee, task.assignee_id) if task else None
-    return bool(assignee and actor.email and assignee.email.casefold() == actor.email.casefold())
+    if assignee is None:
+        return False
+    if actor.role == "manager":
+        return assignee.id in manager_visible_employee_ids_for(db, actor.id)
+    return actor.role == "employee" and assignee.id == actor.id
 
 
 @router.post(
@@ -869,14 +938,16 @@ def _can_manage_calendar_sync(db: Session, task_id: str, actor: TaskActor) -> bo
 )
 def retry_task_calendar_sync(
     task_id: str,
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     actor: TaskActor = Depends(_actor),
     db: Session = Depends(get_db),
 ):
     if _task_row(db, task_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     if not _can_manage_calendar_sync(db, task_id, actor):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Only the assignee or a manager can retry this calendar sync.",
         )
     try:
@@ -896,12 +967,14 @@ def retry_task_calendar_sync(
     summary="Run a calendar sync pass now, including the external-change poll",
 )
 def run_task_calendar_sync(
+    request: Request,
+    principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     actor: TaskActor = Depends(_actor),
     db: Session = Depends(get_db),
 ):
     if actor.role not in ("manager", "hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Only managers, HR / Operations or admins can run the calendar sync.",
         )
     return run_sync_pass(db, poll=True).as_dict()
@@ -926,25 +999,16 @@ def _resolve_manager_team(
     if current_emp:
         manager_ids.add(current_emp.id)
 
-    manager_team = current_emp.team if current_emp and current_emp.team else principal.team
+    manager_team = current_emp.team if current_emp else None
 
     if principal.role == "manager":
-        # Managers always see own team – ignore team_filter parameter
-        team_filter_clauses = [Employee.manager_id.in_(list(manager_ids))]
-        if manager_team:
-            team_filter_clauses.append(
-                and_(
-                    Employee.manager_id.is_(None),
-                    func.lower(Employee.team) == manager_team.casefold(),
-                    ~Employee.id.in_(list(manager_ids)),
-                )
-            )
-        members = (
-            db.query(Employee)
-            .filter(Employee.is_active.is_(True), or_(*team_filter_clauses))
-            .order_by(Employee.name.asc())
-            .all()
+        member_query = db.query(Employee).filter(
+            Employee.is_active.is_(True),
+            Employee.id.in_(manager_visible_employee_ids(db, principal)),
         )
+        if current_emp:
+            member_query = member_query.filter(Employee.id != current_emp.id)
+        members = member_query.order_by(Employee.name.asc()).all()
         return members, manager_team or "My Team", manager_ids
     else:
         # HR / Admin can filter by team
@@ -955,6 +1019,28 @@ def _resolve_manager_team(
         elif manager_team:
             q = q.filter(func.lower(Employee.team) == manager_team.casefold())
         return q.order_by(Employee.name.asc()).all(), resolved_name, manager_ids
+
+
+def _manager_visible_employee_ids(
+    db: Session, principal: AuthenticatedPrincipal
+) -> set[str]:
+    return manager_visible_employee_ids(db, principal)
+
+
+def _can_access_employee_tasks(
+    db: Session,
+    principal: AuthenticatedPrincipal,
+    employee: Employee,
+) -> bool:
+    if employee.id == principal.user_id:
+        return True
+    if principal.role in {"hr_operations", "admin"}:
+        return True
+    if principal.role == "employee":
+        return employee.id == principal.user_id
+    if principal.role == "manager":
+        return employee.id in _manager_visible_employee_ids(db, principal)
+    return False
 
 
 def _build_operational_monitoring(
@@ -1186,6 +1272,7 @@ def _build_operational_monitoring(
     summary="Manager operational monitoring portal – action items, task email/calendar status, workflow failures",
 )
 def get_operational_monitoring(
+    request: Request,
     team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
@@ -1197,8 +1284,8 @@ def get_operational_monitoring(
     - Employees receive 403.
     """
     if principal.role not in ("manager", "hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Only managers, HR / Operations or administrators can access the monitoring portal.",
         )
     team_members, team_name, manager_ids = _resolve_manager_team(db, principal, team)
@@ -1210,13 +1297,14 @@ def get_operational_monitoring(
     summary="Export task status rows as CSV (manager / HR / admin only)",
 )
 def export_operational_monitoring_csv(
+    request: Request,
     team: str | None = Query(default=None, description="Optional team filter for admin/HR"),
     principal: AuthenticatedPrincipal = Depends(require_authenticated_principal),
     db: Session = Depends(get_db),
 ):
     if principal.role not in ("manager", "hr_operations", "admin"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+        deny_access(
+            db, request, principal=principal, status_code=status.HTTP_403_FORBIDDEN,
             detail="Only managers, HR / Operations or administrators can export monitoring data.",
         )
     team_members, _team_name, manager_ids = _resolve_manager_team(db, principal, team)

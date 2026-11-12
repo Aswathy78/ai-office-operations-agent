@@ -86,6 +86,8 @@ ACTION_LABELS = {
     "session_revoked": "Session ended by an administrator",
     "session_idle_timeout": "Signed out for inactivity",
     "refresh_reuse_detected": "Session ended: token reuse detected",
+    "department_updated": "Department updated",
+    "role_updated": "Account role updated",
 }
 AUTH_OUTCOMES = {"login_success": "success", "login_failed": "failed", "refresh_reuse_detected": "failed"}
 DEFAULT_DETAIL = {

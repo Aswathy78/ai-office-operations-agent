@@ -32,6 +32,7 @@ from app.assistant_tools import (
     ToolPermissionDenied,
     execute_tool,
     get_registry,
+    record_audit,
     scopes_for_role,
 )
 from app.auth_service import AuthenticatedPrincipal
@@ -131,6 +132,13 @@ def execute_tool_endpoint(
     if req.conversation_id:
         conversation = db.get(AssistantConversation, req.conversation_id)
         if conversation is None or conversation.user_id != principal.user_id:
+            record_audit(
+                db,
+                actor=principal,
+                tool_name=tool_name if tool_name in get_registry()._tools else "unknown",
+                event="permission_denied",
+                detail="Tool call denied for an unauthorized conversation.",
+            )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Conversation not found.",

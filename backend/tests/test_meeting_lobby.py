@@ -18,7 +18,12 @@ from sqlalchemy.orm import sessionmaker
 
 from main import app
 from app.db.database import get_db
-from app.meeting.models import Base, Meeting, MeetingAttendanceLog
+from app.meeting.models import (
+    AuthAuditEvent,
+    Base,
+    Meeting,
+    MeetingAttendanceLog,
+)
 
 
 # Test fixtures
@@ -99,6 +104,8 @@ class TestGuestJoinLobby:
         assert body["meeting_id"] == meeting["id"]
         assert body["decided_at"] is None
         assert body["attendance_log_id"] is None
+        assert isinstance(body["lobby_token"], str)
+        assert body["lobby_token"]
 
     def test_guest_joins_lobby_without_email(self, client):
         meeting = _future_meeting(client)
@@ -117,6 +124,8 @@ class TestGuestJoinLobby:
         assert r1.status_code == 202
         assert r2.status_code == 202
         assert r1.json()["id"] == r2.json()["id"]
+        assert r1.json()["lobby_token"]
+        assert r2.json()["lobby_token"] is None
 
     def test_guest_join_lobby_idempotent_by_name_only(self, client):
         meeting = _future_meeting(client)
@@ -189,6 +198,34 @@ class TestListPendingGuests:
 # POST /{meeting_id}/lobby/{id}/decision
 
 class TestOrganizerDecision:
+    def test_missing_and_invalid_capability_are_denied_and_audited(
+        self, client, db_session
+    ):
+        meeting = _future_meeting(client)
+        request = client.post(
+            f"/api/v1/meetings/{meeting['id']}/lobby",
+            json={"guest_name": "Capability Guest"},
+        ).json()
+        url = (
+            f"/api/v1/meetings/{meeting['id']}/lobby-ws"
+            f"?guest_request_id={request['id']}"
+        )
+
+        for protocols in ([], ["guest_lobby.invalid-capability-marker"]):
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with client.websocket_connect(url, subprotocols=protocols):
+                    pass
+            assert exc_info.value.code == 1008
+            event = (
+                db_session.query(AuthAuditEvent)
+                .filter(AuthAuditEvent.event == "access_denied")
+                .order_by(AuthAuditEvent.created_at.desc())
+                .first()
+            )
+            assert event.detail == "WEBSOCKET 1008 denied."
+            assert "invalid-capability-marker" not in event.detail
+            assert request["lobby_token"] not in event.detail
+
     def test_admit_guest_sets_status_admitted(self, client):
         meeting = _future_meeting(client)
         mid = meeting["id"]
@@ -286,7 +323,8 @@ class TestOrganizerDecision:
         ).json()
 
         with client.websocket_connect(
-            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}",
+            subprotocols=[f"guest_lobby.{request['lobby_token']}"],
         ) as websocket:
             welcome = websocket.receive_json()
             assert welcome["type"] == "lobby_welcome"
@@ -311,7 +349,8 @@ class TestOrganizerDecision:
         ).json()
 
         with client.websocket_connect(
-            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}",
+            subprotocols=[f"guest_lobby.{request['lobby_token']}"],
         ) as websocket:
             assert websocket.receive_json()["type"] == "lobby_welcome"
             response = client.post(
@@ -347,7 +386,8 @@ class TestOrganizerDecision:
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect(
                 f"/api/v1/meetings/{meeting_b['id']}/lobby-ws"
-                f"?guest_request_id={request['id']}"
+                f"?guest_request_id={request['id']}",
+                subprotocols=[f"guest_lobby.{request['lobby_token']}"],
             ):
                 pass
         assert exc_info.value.code == 1008
@@ -361,13 +401,14 @@ class TestOrganizerDecision:
         ).json()
 
         url = f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+        protocols = [f"guest_lobby.{request['lobby_token']}"]
 
-        with client.websocket_connect(url) as ws1:
+        with client.websocket_connect(url, subprotocols=protocols) as ws1:
             welcome1 = ws1.receive_json()
             assert welcome1["type"] == "lobby_welcome"
 
             # Reconnecting with the same guest_request_id should succeed and take over
-            with client.websocket_connect(url) as ws2:
+            with client.websocket_connect(url, subprotocols=protocols) as ws2:
                 welcome2 = ws2.receive_json()
                 assert welcome2["type"] == "lobby_welcome"
 
@@ -401,7 +442,8 @@ class TestOrganizerDecision:
 
         with pytest.raises(WebSocketDisconnect) as exc_info:
             with client.websocket_connect(
-                f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+                f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}",
+                subprotocols=[f"guest_lobby.{request['lobby_token']}"],
             ):
                 pass
         assert exc_info.value.code == 1008
@@ -428,7 +470,8 @@ class TestOrganizerDecision:
         )
 
         with client.websocket_connect(
-            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}"
+            f"/api/v1/meetings/{meeting_id}/lobby-ws?guest_request_id={request['id']}",
+            subprotocols=[f"guest_lobby.{request['lobby_token']}"],
         ) as websocket:
             event = websocket.receive_json()
 

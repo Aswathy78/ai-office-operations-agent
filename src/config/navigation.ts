@@ -23,7 +23,7 @@ export const navigationItems: NavigationItem[] = [
   { id: 'meetings', label: 'Meetings', route: '/meetings', icon: Video, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
   { id: 'tasks', label: 'My Tasks', route: '/tasks', icon: CheckSquare, allowedRoles: ['employee', 'manager', 'admin'] },
   { id: 'calendar', label: 'Calendar', route: '/calendar', icon: CalendarDays, allowedRoles: ['employee', 'manager', 'hr_operations', 'admin'] },
-  { id: 'dashboard', label: 'Dashboard', route: '/dashboard', icon: Gauge, allowedRoles: ['manager', 'hr_operations', 'admin'] },
+  { id: 'dashboard', label: 'Task Dashboard', route: '/dashboard', icon: Gauge, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'monitoring', label: 'Operations Monitor', route: '/monitoring', icon: Activity, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'documents', label: 'Knowledge', route: '/documents', icon: FileText, allowedRoles: ['manager', 'hr_operations', 'admin'] },
   { id: 'approvals', label: 'Approvals', route: '/approvals', icon: ShieldCheck, allowedRoles: ['manager', 'hr_operations', 'admin'] },

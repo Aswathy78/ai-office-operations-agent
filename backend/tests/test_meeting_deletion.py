@@ -5,13 +5,17 @@ from fastapi.testclient import TestClient
 
 from main import app
 from app.db.database import SessionLocal, create_tables
+from app.auth_service import issue_access_token
 from app.meeting.models import (
+    AuthAccount,
+    AuthSession,
     Meeting,
     MeetingAttendanceLog,
     MeetingGuestRequest,
     MeetingParticipant,
     MeetingRecording,
     MeetingTranscript,
+    Employee,
     GUEST_STATUS_ADMITTED,
     RECORDING_STATUS_COMPLETED,
     TRANSCRIPT_STATUS_COMPLETED,
@@ -28,6 +32,9 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
     def setUp(self):
         self.db = SessionLocal()
         self.created_meeting_ids: list[str] = []
+        self.created_auth_session_ids: list[str] = []
+        self.created_organizer_account_id: str | None = None
+        self.created_organizer_employee = False
 
     def tearDown(self):
         for meeting_id in self.created_meeting_ids:
@@ -48,6 +55,16 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
                 MeetingRecording.meeting_id == meeting_id
             ).delete(synchronize_session=False)
             self.db.query(Meeting).filter(Meeting.id == meeting_id).delete()
+        if self.created_auth_session_ids:
+            self.db.query(AuthSession).filter(
+                AuthSession.jti.in_(self.created_auth_session_ids)
+            ).delete(synchronize_session=False)
+        if self.created_organizer_account_id:
+            self.db.query(AuthAccount).filter(
+                AuthAccount.id == self.created_organizer_account_id
+            ).delete()
+        if self.created_organizer_employee:
+            self.db.query(Employee).filter(Employee.id == "user-001").delete()
         self.db.commit()
         self.db.close()
         signaling_manager.rooms.clear()
@@ -82,6 +99,37 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
         self.created_meeting_ids.append(meeting_id)
         return meeting
 
+    def _organizer_headers(self):
+        employee = self.db.query(Employee).filter(Employee.id == "user-001").first()
+        if employee is None:
+            employee = Employee(
+                id="user-001",
+                name="Lifecycle Organizer",
+                email="lifecycle-organizer@example.test",
+                team="Engineering",
+            )
+            self.db.add(employee)
+            self.db.commit()
+            self.created_organizer_employee = True
+        account = self.db.query(AuthAccount).filter(
+            AuthAccount.employee_id == employee.id
+        ).first()
+        if account is None:
+            account = AuthAccount(
+                id=str(uuid.uuid4()),
+                employee_id=employee.id,
+                email_normalized=employee.email.casefold(),
+                password_hash="unused",
+                role="employee",
+            )
+            self.db.add(account)
+            self.db.commit()
+            self.created_organizer_account_id = account.id
+        token_result = issue_access_token(self.db, account, employee)
+        self.created_auth_session_ids.append(token_result.principal.jti)
+        token = token_result.token
+        return {"Authorization": f"Bearer {token}"}
+
     def test_completed_meeting_can_be_deleted_by_organizer(self):
         meeting = self._create_meeting(organizer_id="user-001", status="completed")
         meeting_id = meeting.id
@@ -108,7 +156,10 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
         meeting = self._create_meeting(organizer_id="user-001", status="active", expired=False)
 
         # Connect a participant to the signaling room
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws") as _:
+        with self.client.websocket_connect(
+            f"/api/v1/meetings/{meeting.id}/ws",
+            headers=self._organizer_headers(),
+        ) as _:
             # Attempt to delete while participant is in the meeting
             res = self.client.delete(f"/api/v1/meetings/{meeting.id}?organizer_id=user-001")
             self.assertEqual(res.status_code, 400)
@@ -138,7 +189,10 @@ class TestMeetingDeletionAndLifecycle(unittest.TestCase):
         att_id = join_res.json()["id"]
 
         # Connect WS
-        with self.client.websocket_connect(f"/api/v1/meetings/{meeting.id}/ws?user_id=user-001") as _:
+        with self.client.websocket_connect(
+            f"/api/v1/meetings/{meeting.id}/ws?user_id=user-001",
+            headers=self._organizer_headers(),
+        ) as _:
             pass
 
         # Participant leaves attendance

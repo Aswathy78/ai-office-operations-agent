@@ -149,6 +149,7 @@ class EmployeeResponse(BaseModel):
     name: str
     email: str
     team: str | None = None
+    department: str | None = None
 
 
 class MeetingValidationResponse(BaseModel):
@@ -203,6 +204,7 @@ class GuestRequestResponse(BaseModel):
     requested_at: datetime
     decided_at: datetime | None = None
     attendance_log_id: str | None = None
+    lobby_token: str | None = None
 
 
 class GuestDecisionRequest(BaseModel):
