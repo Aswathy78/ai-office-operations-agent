@@ -1113,7 +1113,8 @@ def summarize_tool_result(tool_name: str, result: dict) -> str:
         if outcome == "queued":
             return (
                 f"E-mail \"{result['subject']}\" queued for delivery to "
-                f"{result['recipient_count']} recipient(s) (draft {result['draft_id']})."
+                f"{result['recipient_count']} recipient(s) (draft {result['draft_id']}). "
+                "Review the draft under Your e-mails."
             )
         if outcome == "pending_approval":
             return (

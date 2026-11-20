@@ -1156,7 +1156,13 @@ class TestChatExecution:
         assert _of(events, "awaiting_confirmation")[0]["tool_name"] == "email.send"
         assert db_session.query(EmailDraft).count() == 0
 
-        _chat(as_employee, "confirm", conversation_id)
+        events, _ = _chat(as_employee, "confirm", conversation_id)
+        response_text = _tokens(events)
+        assert "queued for delivery" in response_text
+        assert "1 recipient(s)" in response_text
+        assert "Your e-mails" in response_text
+        assert "/api/v1/email-drafts/" not in response_text
+        assert "http://127.0.0.1:8000" not in response_text
         draft = db_session.query(EmailDraft).one()
         assert draft.status == "queued"
         assert [r["email"] for r in draft.recipients] == ["maya@northstar.example"]

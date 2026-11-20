@@ -3,7 +3,7 @@ import { CalendarPlus, CalendarClock, Zap, Check, Copy, Share2, Video } from 'lu
 import { useNavigate } from 'react-router-dom'
 import { demoUsers } from '../mocks/mockUser'
 import { useAuth } from '../contexts/AuthContext'
-import { createMeeting } from '../api/meetings'
+import { createMeeting, getCalendarMeetings } from '../api/meetings'
 
 type Mode = 'pick' | 'instant' | 'scheduled' | 'created'
 
@@ -13,6 +13,73 @@ const EMAIL_PATTERN = /^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@(?:[A-Z0-9](?:[A-Z0-9-]{0,
 
 function normalizeParticipantEmail(email: string): string {
   return email.trim().toLowerCase()
+}
+
+function organizationLocalDateTimeToUtc(value: string, timeZone: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value)
+  if (!match) {
+    throw new Error('Enter a valid start and end time.')
+  }
+
+  const [, yearText, monthText, dayText, hourText, minuteText] = match
+  const target = {
+    year: Number(yearText),
+    month: Number(monthText),
+    day: Number(dayText),
+    hour: Number(hourText),
+    minute: Number(minuteText),
+  }
+  const targetAsUtc = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute,
+  )
+  const targetDate = new Date(targetAsUtc)
+  if (
+    targetDate.getUTCFullYear() !== target.year
+    || targetDate.getUTCMonth() + 1 !== target.month
+    || targetDate.getUTCDate() !== target.day
+    || target.hour > 23
+    || target.minute > 59
+  ) {
+    throw new Error('Enter a valid start and end time.')
+  }
+
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  })
+
+  let candidate = targetAsUtc
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = formatter.formatToParts(new Date(candidate))
+    const partValue = (type: Intl.DateTimeFormatPartTypes) => {
+      const valuePart = parts.find((part) => part.type === type)?.value
+      if (!valuePart) throw new Error(`Could not resolve ${type} in ${timeZone}.`)
+      return Number(valuePart)
+    }
+    const displayedAsUtc = Date.UTC(
+      partValue('year'),
+      partValue('month') - 1,
+      partValue('day'),
+      partValue('hour'),
+      partValue('minute'),
+      partValue('second'),
+    )
+    const correction = targetAsUtc - displayedAsUtc
+    if (correction === 0) return new Date(candidate).toISOString()
+    candidate += correction
+  }
+
+  throw new Error(`The selected local time is not valid in ${timeZone}.`)
 }
 
 interface CreatedMeeting {
@@ -96,7 +163,7 @@ export function CreateMeetingPlaceholder() {
         setError('Start and end times are required for scheduled meetings.')
         return
       }
-      if (new Date(endAt) <= new Date(startAt)) {
+      if (endAt <= startAt) {
         setError('End time must be after start time.')
         return
       }
@@ -128,8 +195,10 @@ export function CreateMeetingPlaceholder() {
         participants: [...submittedParticipants.values()],
       }
       if (!isInstant) {
-        body.start_at = startAt
-        body.end_at = endAt
+        const now = new Date()
+        const calendar = await getCalendarMeetings(now.getFullYear(), now.getMonth() + 1)
+        body.start_at = organizationLocalDateTimeToUtc(startAt, calendar.timezone)
+        body.end_at = organizationLocalDateTimeToUtc(endAt, calendar.timezone)
       }
 
       const data = await createMeeting(body, user?.id ?? 'demo-organizer')

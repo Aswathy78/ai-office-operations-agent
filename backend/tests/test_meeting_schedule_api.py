@@ -343,6 +343,73 @@ def _team_schedule_prompt(start_at: datetime) -> str:
     return f"Schedule a project meeting with Ava Patel and Marcus Chen on {date_text} at 10 AM"
 
 
+def test_manual_meeting_with_organization_local_times_fits_working_hours(
+    client: TestClient,
+    seeded_directory,
+    monkeypatch,
+):
+    organization_timezone = ZoneInfo("Asia/Kolkata")
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", str(organization_timezone))
+    target_date = _next_weekday_at_ten_utc().date()
+    local_start = datetime.combine(target_date, time(10, 1), tzinfo=organization_timezone)
+    local_end = datetime.combine(target_date, time(12, 2), tzinfo=organization_timezone)
+
+    response = client.post(
+        "/api/v1/meetings/?organizer_id=emp-1",
+        json={
+            "title": "Local-time conversion",
+            "meeting_type": "scheduled",
+            "start_at": local_start.astimezone(timezone.utc).isoformat(),
+            "end_at": local_end.astimezone(timezone.utc).isoformat(),
+            "participants": [{"user_id": "emp-2"}],
+        },
+    )
+
+    assert response.status_code == 200
+    created = response.json()
+    saved_start = datetime.fromisoformat(created["start_at"])
+    saved_end = datetime.fromisoformat(created["end_at"])
+    assert saved_start == local_start.astimezone(timezone.utc)
+    assert saved_end == local_end.astimezone(timezone.utc)
+    assert saved_start.astimezone(organization_timezone).hour == 10
+    assert saved_start.astimezone(organization_timezone).minute == 1
+    assert saved_end.astimezone(organization_timezone).hour == 12
+    assert saved_end.astimezone(organization_timezone).minute == 2
+
+
+def test_manual_working_hours_conflicts_list_only_outside_attendees(
+    client: TestClient,
+    db_session: Session,
+    seeded_directory,
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    attendee_with_later_hours = db_session.query(Employee).filter_by(id="emp-3").one()
+    attendee_with_later_hours.working_hours_end = "23:00"
+    db_session.commit()
+    start_at = _next_weekday_at_ten_utc().replace(hour=13, minute=0)
+
+    response = client.post(
+        "/api/v1/meetings/?organizer_id=emp-1",
+        json={
+            "title": "Working-hours conflict detail",
+            "meeting_type": "scheduled",
+            "start_at": start_at.isoformat(),
+            "end_at": (start_at + timedelta(minutes=30)).isoformat(),
+            "participants": [
+                {"user_id": "emp-2"},
+                {"user_id": "emp-3"},
+            ],
+        },
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert {
+        conflict["attendee_email"] for conflict in detail["conflicts"]
+    } == {"ava.patel@northstar.example"}
+
+
 def test_conflict_returns_all_attendees_alternatives_and_requires_confirmation(
     client: TestClient,
     seeded_directory,

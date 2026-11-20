@@ -626,3 +626,69 @@ def test_reschedule_endpoints_via_api(client: TestClient, db_session: Session, e
     assert decide_data["request"]["status"] == "approved"
     assert decide_data["meeting"] is not None
     assert "14:00" in decide_data["meeting"]["start_at"] or "08:30" in decide_data["meeting"]["start_at"]
+
+
+def test_chat_schedule_api_reschedules_existing_event_and_calendar_lists_it_once(
+    client: TestClient,
+    db_session: Session,
+    employees: list[Employee],
+    monkeypatch,
+):
+    monkeypatch.setenv("ORGANIZATION_TIMEZONE", "Asia/Kolkata")
+    org_tz = ZoneInfo("Asia/Kolkata")
+    tomorrow = (datetime.now(timezone.utc).astimezone(org_tz) + timedelta(days=1)).date()
+    original_start = datetime.combine(tomorrow, time(10), tzinfo=org_tz)
+    meeting = create_meeting(
+        db=db_session,
+        meeting_data=MeetingCreate(
+            title="Planning meeting",
+            meeting_type="scheduled",
+            start_at=original_start.astimezone(timezone.utc).replace(tzinfo=None),
+            end_at=(original_start + timedelta(minutes=30))
+            .astimezone(timezone.utc)
+            .replace(tzinfo=None),
+            participants=[
+                ParticipantCreate(user_id="emp-2", email="ava.patel@northstar.example"),
+            ],
+        ),
+        organizer_id="emp-1",
+    )
+
+    response = client.post(
+        "/api/v1/meetings/schedule/natural-language",
+        json={"prompt": "Schedule the planning meeting with Ava at 3 PM instead of 10 AM"},
+        headers={"X-User-Id": "emp-1"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    expected_start = (
+        datetime.combine(tomorrow, time(15), tzinfo=org_tz)
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    assert result["status"] == "Completed"
+    assert result["meeting"]["id"] == meeting.id
+    assert result["meeting"]["start_at"] == expected_start
+    assert "ava.patel@northstar.example" in result["invitations_sent"]
+    assert db_session.query(Meeting).count() == 1
+
+    calendar = client.get(
+        "/api/v1/meetings/calendar",
+        params={
+            "year": tomorrow.year,
+            "month": tomorrow.month,
+            "user_id": "emp-1",
+            "email": "maya@northstar.example",
+        },
+    )
+
+    assert calendar.status_code == 200, calendar.text
+    events = calendar.json()["meetings"]
+    assert len(events) == 1
+    assert events[0]["id"] == meeting.id
+    assert events[0]["start_at"] == expected_start
+    assert events[0]["start_at"] != (
+        original_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    )

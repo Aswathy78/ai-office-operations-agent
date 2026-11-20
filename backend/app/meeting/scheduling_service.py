@@ -379,6 +379,67 @@ def _employee_timezone(employee: Employee, organization_timezone: ZoneInfo | tim
         return organization_timezone
 
 
+def _attendee_outside_working_hours(
+    start_at: datetime,
+    end_at: datetime,
+    email: str,
+    employee: Employee | None,
+    organization_timezone: ZoneInfo | timezone,
+    default_for_unknown_attendees: bool,
+) -> bool:
+    if employee is None:
+        if not default_for_unknown_attendees:
+            return False
+        attendee_timezone = organization_timezone
+        working_days = [0, 1, 2, 3, 4]
+        start_text = "09:00"
+        end_text = "17:00"
+    else:
+        attendee_timezone = _employee_timezone(employee, organization_timezone)
+        working_days = employee.working_days
+        start_text = employee.working_hours_start
+        end_text = employee.working_hours_end
+
+    local_start = start_at.astimezone(attendee_timezone)
+    local_end = end_at.astimezone(attendee_timezone)
+    if local_start.date() != local_end.date():
+        return True
+
+    try:
+        work_start = time.fromisoformat(start_text)
+        work_end = time.fromisoformat(end_text)
+    except ValueError:
+        logger.warning("Invalid working hours for attendee %s; using 09:00-17:00.", email)
+        work_start, work_end = time(9), time(17)
+    return (
+        local_start.weekday() not in working_days
+        or local_start.time().replace(tzinfo=None) < work_start
+        or local_end.time().replace(tzinfo=None) > work_end
+    )
+
+
+def _attendees_outside_working_hours(
+    start_at: datetime,
+    end_at: datetime,
+    attendee_emails: list[str],
+    employees_by_email: dict[str, Employee],
+    organization_timezone: ZoneInfo | timezone,
+    default_for_unknown_attendees: bool = False,
+) -> list[str]:
+    return [
+        email
+        for email in attendee_emails
+        if _attendee_outside_working_hours(
+            start_at,
+            end_at,
+            email,
+            employees_by_email.get(email.lower()),
+            organization_timezone,
+            default_for_unknown_attendees,
+        )
+    ]
+
+
 def _fits_attendee_working_hours(
     start_at: datetime,
     end_at: datetime,
@@ -387,38 +448,17 @@ def _fits_attendee_working_hours(
     organization_timezone: ZoneInfo | timezone,
     default_for_unknown_attendees: bool = False,
 ) -> bool:
-    for email in attendee_emails:
-        employee = employees_by_email.get(email.lower())
-        if employee is None:
-            if not default_for_unknown_attendees:
-                continue
-            attendee_timezone = organization_timezone
-            working_days = [0, 1, 2, 3, 4]
-            start_text = "09:00"
-            end_text = "17:00"
-        else:
-            attendee_timezone = _employee_timezone(employee, organization_timezone)
-            working_days = employee.working_days
-            start_text = employee.working_hours_start
-            end_text = employee.working_hours_end
-        local_start = start_at.astimezone(attendee_timezone)
-        local_end = end_at.astimezone(attendee_timezone)
-        if local_start.date() != local_end.date():
-            return False
-
-        try:
-            work_start = time.fromisoformat(start_text)
-            work_end = time.fromisoformat(end_text)
-        except ValueError:
-            logger.warning("Invalid working hours for attendee %s; using 09:00-17:00.", email)
-            work_start, work_end = time(9), time(17)
-        if (
-            local_start.weekday() not in working_days
-            or local_start.time().replace(tzinfo=None) < work_start
-            or local_end.time().replace(tzinfo=None) > work_end
-        ):
-            return False
-    return True
+    return all(
+        not _attendee_outside_working_hours(
+            start_at,
+            end_at,
+            email,
+            employees_by_email.get(email.lower()),
+            organization_timezone,
+            default_for_unknown_attendees,
+        )
+        for email in attendee_emails
+    )
 
 
 def find_alternative_slots(
@@ -724,6 +764,14 @@ def is_reschedule_intent(prompt: str) -> bool:
         return False
     if re.match(r"^(?:email|send\s+(?:an?\s+)?email|draft\s+(?:an?\s+)?email)\b", p):
         return False
+    if (
+        re.search(r"\b(?:instead of|rather than)\b", p)
+        and re.search(
+            r"\b(?:the|my|our|existing)\s+(?:\w+\s+){0,3}(?:meeting|sync|call)\b",
+            p,
+        )
+    ):
+        return True
     if re.search(r"\b(?:move|shift|push|postpone|delay)\b", p):
         return True
     if re.search(r"\breschedule\b", p) and re.search(r"\b(?:to|for|at)\b", p):
@@ -735,7 +783,7 @@ def is_reschedule_intent(prompt: str) -> bool:
 
 def _split_reschedule_prompt(prompt: str, ref_local: datetime) -> tuple[str, str | None]:
     """Split prompt into (source_meeting_ref, target_time_clause)."""
-    matches = list(re.finditer(r"\b(?:to|for)\s+", prompt, re.IGNORECASE))
+    matches = list(re.finditer(r"\b(?:to|for|at)\s+", prompt, re.IGNORECASE))
     for m in reversed(matches):
         candidate_target = prompt[m.end():].strip()
         if (

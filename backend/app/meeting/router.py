@@ -103,7 +103,7 @@ from app.meeting.schemas import (
     MeetingParticipantResponse,
 )
 from app.meeting.scheduling_service import (
-    _fits_attendee_working_hours,
+    _attendees_outside_working_hours,
     find_alternative_slots,
     get_organization_timezone,
     send_meeting_invitations,
@@ -261,13 +261,14 @@ def create_new_meeting(
             }
             start_utc = meeting.start_at.replace(tzinfo=timezone.utc)
             end_utc = meeting.end_at.replace(tzinfo=timezone.utc)
-            if not _fits_attendee_working_hours(
+            working_hours_conflicts = _attendees_outside_working_hours(
                 start_utc,
                 end_utc,
                 attendee_emails,
                 employees_by_email,
                 organization_timezone,
-            ):
+            )
+            if working_hours_conflicts:
                 alternatives = find_alternative_slots(
                     db,
                     start_utc,
@@ -287,7 +288,7 @@ def create_new_meeting(
                                 "conflicting_start_at": start_utc.isoformat(),
                                 "conflicting_end_at": end_utc.isoformat(),
                             }
-                            for email in attendee_emails
+                            for email in working_hours_conflicts
                         ],
                         "alternative_slots": [
                             {"start_at": start.isoformat(), "end_at": end.isoformat()}
@@ -408,6 +409,7 @@ def get_calendar_meetings(
         start_at=start_utc,
         end_at=end_utc,
     )
+    meetings = [meeting for meeting in meetings if meeting.status != "cancelled"]
     meeting_ids = [meeting.id for meeting in meetings]
     participants = (
         db.query(MeetingParticipant)

@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
-import { createMeeting } from '../api/meetings'
+import { createMeeting, getCalendarMeetings } from '../api/meetings'
 import { CreateMeetingPlaceholder } from './CreateMeetingPlaceholder'
 
 const { authValue } = vi.hoisted(() => ({
@@ -23,6 +23,7 @@ vi.mock('../contexts/AuthContext', () => ({
 
 vi.mock('../api/meetings', () => ({
   createMeeting: vi.fn(),
+  getCalendarMeetings: vi.fn(),
 }))
 
 afterEach(() => {
@@ -35,6 +36,42 @@ async function openInstantMeetingForm(user: ReturnType<typeof userEvent.setup>) 
 }
 
 describe('CreateMeetingPlaceholder participants', () => {
+  it('sends organization-local scheduled times as explicit UTC instants', async () => {
+    const user = userEvent.setup()
+    vi.mocked(getCalendarMeetings).mockResolvedValue({
+      timezone: 'Asia/Kolkata',
+      meetings: [],
+    })
+    vi.mocked(createMeeting).mockResolvedValue({
+      id: 'meeting-1',
+      title: 'Working-hours meeting',
+      join_url: 'http://localhost:5173/meetings/meeting-1',
+      status: 'scheduled',
+      start_at: '2026-10-19T04:31:00Z',
+      end_at: '2026-10-19T06:32:00Z',
+      timezone: 'Asia/Kolkata',
+      invitations_sent: [],
+      invitation_failures: [],
+    })
+    render(<MemoryRouter><CreateMeetingPlaceholder /></MemoryRouter>)
+
+    await user.click(screen.getByRole('button', { name: /schedule for later/i }))
+    await user.type(screen.getByLabelText('Meeting title'), 'Working-hours meeting')
+    await user.type(screen.getByLabelText('Start time'), '2026-10-19T10:01')
+    await user.type(screen.getByLabelText('End time'), '2026-10-19T12:02')
+    await user.click(screen.getByRole('button', { name: 'Schedule meeting' }))
+
+    await waitFor(() => {
+      expect(createMeeting).toHaveBeenCalledWith(
+        expect.objectContaining({
+          start_at: '2026-10-19T04:31:00.000Z',
+          end_at: '2026-10-19T06:32:00.000Z',
+        }),
+        'employee-1',
+      )
+    })
+  })
+
   it('includes a typed participant even when Create is submitted without clicking Add', async () => {
     const user = userEvent.setup()
     vi.mocked(createMeeting).mockResolvedValue({
@@ -131,6 +168,10 @@ describe('CreateMeetingPlaceholder participants', () => {
 
   it('shows invitation delivery failures after successful meeting creation', async () => {
     const user = userEvent.setup()
+    vi.mocked(getCalendarMeetings).mockResolvedValue({
+      timezone: 'Asia/Kolkata',
+      meetings: [],
+    })
     vi.mocked(createMeeting).mockResolvedValue({
       id: 'meeting-1',
       title: 'Invitation failure',

@@ -480,7 +480,9 @@ class _PlanRunner:
                 message += f" {failed_count} review notification(s) could not be delivered."
             if not sent_count and not failed_count:
                 message += " No review notification could be delivered; check the audit log."
-            if link.get("url"):
+            if step.tool_name == "email.send":
+                message += " Review the draft under Your e-mails."
+            elif link.get("url"):
                 message += f" Review the record: {link['url']}"
             self.failure = message
             self._record(step, "escalated", message, step.estimated_tokens)
@@ -502,7 +504,7 @@ class _PlanRunner:
             record_link = ((step.result or {}).get("links") or {}).get("record", {})
             link_text = (
                 f" Review: {record_link['url']}"
-                if step.tool_name != "task.create" and record_link.get("url")
+                if step.tool_name not in {"task.create", "email.send"} and record_link.get("url")
                 else ""
             )
             self.writes_done.append(summary + link_text)

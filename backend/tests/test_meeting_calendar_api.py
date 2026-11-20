@@ -217,3 +217,43 @@ def test_calendar_includes_meetings_linked_by_participant_user_id(
     assert [meeting["title"] for meeting in response.json()["meetings"]] == [
         "Employee-linked meeting"
     ]
+
+
+def test_calendar_excludes_cancelled_meetings(
+    client: TestClient,
+    db_session: Session,
+    seeded_employees: list[Employee],
+):
+    scheduled = _create_meeting(
+        db_session,
+        title="Rescheduled meeting",
+        start_at=datetime(2026, 10, 22, 9, 30, tzinfo=ZoneInfo("Asia/Kolkata")),
+        end_at=datetime(2026, 10, 22, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+        organizer_id="employee-1",
+        participants=[],
+    )
+    cancelled = _create_meeting(
+        db_session,
+        title="Cancelled old event",
+        start_at=datetime(2026, 10, 22, 4, 30, tzinfo=timezone.utc),
+        end_at=datetime(2026, 10, 22, 5, 0, tzinfo=timezone.utc),
+        organizer_id="employee-1",
+        participants=[],
+    )
+    cancelled.status = "cancelled"
+    db_session.commit()
+
+    response = client.get(
+        "/api/v1/meetings/calendar",
+        params={
+            "year": 2026,
+            "month": 10,
+            "user_id": "employee-1",
+            "email": "maya@example.test",
+        },
+    )
+
+    assert response.status_code == 200
+    events = response.json()["meetings"]
+    assert [event["id"] for event in events] == [scheduled.id]
+    assert [event["start_at"] for event in events] == ["2026-10-22T04:00:00Z"]
